@@ -1,0 +1,14 @@
+# Textdateien einheitlich mit LF im Repository
+* text=auto eol=lf
+
+# Windows-Startskript braucht CRLF
+*.bat text eol=crlf
+
+# Beispieldateien unveraendert lassen -- E-Mails und Bueroformate vertragen
+# keine Zeilenendenkonvertierung
+*.eml -text
+*.msg -text
+*.pdf binary
+*.xlsx binary
+*.xlsm binary
+*.xls binary

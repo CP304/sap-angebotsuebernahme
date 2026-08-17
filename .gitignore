@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+build/
+dist/
+
+# Anwendungsdaten (werden zur Laufzeit erzeugt)
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.defekt-*
+logs/
+mock_sap.json
+settings.json
+sap_selectors.json
+
+# Hinweis: sample_data/erzeugt/ wird bewusst mit eingecheckt, damit die
+# Beispielangebote sofort verfuegbar sind. Neu erzeugen mit:
+#   python sample_data/erzeuge_beispiele.py
+
+# Werkzeuge
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.idea/
+.vscode/
+
+# Windows
+Thumbs.db
+desktop.ini
+~$*

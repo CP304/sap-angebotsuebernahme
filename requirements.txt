@@ -1,0 +1,23 @@
+# SAP-Angebotsuebernahme -- Abhaengigkeiten
+# Installation:  pip install -r requirements.txt
+
+# --- Pflicht -------------------------------------------------------------
+PySide6>=6.6            # Oberflaeche
+pandas>=2.0             # Tabellenauswertung
+openpyxl>=3.1           # Excel (.xlsx/.xlsm) lesen und schreiben
+PyMuPDF>=1.24           # PDF-Textextraktion mit Layoutinformationen
+
+# --- Windows/SAP ---------------------------------------------------------
+# Nur unter Windows noetig und nur fuer den Echtbetrieb.
+# Ohne pywin32 laeuft die Anwendung vollstaendig im Testsystem (Mock-SAP).
+pywin32>=306; sys_platform == "win32"
+
+# --- Optional ------------------------------------------------------------
+# Aeltere Excel-Dateien (.xls, Format vor Excel 2007).
+# Ohne xlrd meldet die Anwendung verstaendlich, dass die Datei als .xlsx
+# gespeichert werden soll.
+xlrd>=2.0
+
+# Hinweis: Outlook-Nachrichten (.msg) werden mit einem eigenen, in der
+# Standardbibliothek umgesetzten Leser verarbeitet -- dafuer ist keine
+# zusaetzliche Abhaengigkeit noetig.
