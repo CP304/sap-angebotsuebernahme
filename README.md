@@ -71,8 +71,13 @@ Ziehen Sie eine der Dateien einfach in das Anwendungsfenster.
 9. Positionen an- und abwaehlen
 10. **Uebernehmen** (F9) → Vorschau bestaetigen → Ergebnisuebersicht
 
-Unterstuetzte Formate: **PDF, XLSX, XLSM, XLS, CSV, E-Mail (.msg / .eml),
-Text und HTML** — sowie direkt eingefuegter Text.
+Unterstuetzte Formate: **PDF, Excel (XLSX/XLSM/XLS), CSV, Word (DOCX),
+OpenDocument (ODT), RTF, E-Mail (MSG/EML), Text und HTML** — sowie direkt
+eingefuegter Text. Word und OpenDocument werden ohne Zusatzbibliothek
+gelesen.
+
+Kein OCR: Gescannte PDFs ohne Textebene werden erkannt und klar abgelehnt,
+statt Werte zu raten.
 
 ---
 
@@ -137,7 +142,7 @@ im Orderbuch und eine Materialnummer, die es gar nicht gibt.
 
 ## Sicherheitskonzept
 
-Diese Anwendung schreibt in ein Produktivsystem. Deshalb vier harte Sperren:
+Diese Anwendung schreibt in ein Produktivsystem. Deshalb fuenf harte Sperren:
 
 ### 1. Ungepruefte Feld-IDs sperren das Schreiben
 
@@ -154,7 +159,17 @@ Gelingt das nicht, wird der Beleg **nicht gesichert** (`MessageGuard`).
 Es soll ausdruecklich nichts an den Lieferanten hinausgehen — die Kommunikation
 macht weiterhin der Mensch.
 
-### 3. Nichts wird erfunden
+### 3. Ruecklese-Pruefung nach dem Schreiben
+
+Die Statusleiste ist kein Beweis: SAP meldet "gesichert", auch wenn ein Feld
+gar nicht uebernommen wurde (nicht eingabebereit, still gerundet, Berechtigung
+auf Detailebene). Deshalb wird der Satz nach dem Sichern erneut gelesen und
+gegen den Sollwert verglichen — Preis (mit Toleranz), Preiseinheit, Waehrung,
+Gueltigkeit; beim Orderbuch zusaetzlich Sperrkennzeichen und Gueltigkeit. Eine
+Abweichung gilt per Voreinstellung als Fehler. Fehlt nach dem Sichern die
+Belegnummer, ist das ebenfalls ein Fehler statt eines stillen Erfolgs.
+
+### 4. Nichts wird erfunden
 
 Jeder Wert traegt seine Herkunft: *erkannt*, *unsicher erkannt*, *ueber
 Zuordnung ergaenzt*, *Voreinstellung* oder *manuell erfasst*. Unsicher erkannte
@@ -162,7 +177,7 @@ Werte werden in der Tabelle gelb hinterlegt. Ist ein fuer die gewaehlte Aktion
 zwingendes Feld unsicher, blockiert die Pruefung die Verarbeitung, bis der
 Anwender es bestaetigt hat. Nicht erkannt heisst leer — nie geraten.
 
-### 4. Kontrollierter Ablauf statt Warteschleifen
+### 5. Kontrollierter Ablauf statt Warteschleifen
 
 * Keine `sleep`-Kaskaden: es wird auf `session.Busy` und auf konkrete Elemente
   gewartet, mit Zeitlimit und begrenzten Wiederholungen.
@@ -185,10 +200,26 @@ mehrstufig und lernt mit:
 
 **Quellen**
 PDF (layoutbewusste Spaltenrekonstruktion, nicht nur Rohtext) · Excel/CSV
-(mit und ohne Kopfzeile) · E-Mail `.eml` und `.msg` (Outlook-Dateien werden mit
+(mit und ohne Kopfzeile) · Word und OpenDocument (Tabellen, Fliesstext, Kopf-
+und Fusszeilen) · RTF · E-Mail `.eml` und `.msg` (Outlook-Dateien werden mit
 einem eigenen, in der Standardbibliothek umgesetzten Leser geoeffnet — keine
 Zusatzabhaengigkeit) · HTML-Tabellen aus Mails · Anhaenge rekursiv · direkt
 eingefuegter Text.
+
+**Mail und Anhang gehoeren zusammen**
+Der haeufigste Alltagsfall: Die Preistabelle steckt im Anhang, die
+entscheidenden Ergaenzungen stehen im Mailtext. Beides ergibt *ein* Angebot:
+
+```
+"Preise gelten ab 01.09., Zahlungsziel 30 Tage"  ->  Kopfdaten aus der Mail
+"Position 30 entfaellt, dafuer neu: 47110009"    ->  abgewaehlt + Neuzugang
+"Fuer 47110001 gilt Mindestmenge 500"            ->  ergaenzt Anhangposition
+"Preis im Anhang ueberholt, es gilt 9,10"        ->  Widerspruch -> unsicher
+```
+
+Widersprueche werden nicht zugunsten einer Quelle aufgeloest, sondern als
+*unsicher* markiert. Jede Uebernahme steht nachvollziehbar in den
+Erkennungshinweisen — es wird nie stillschweigend etwas ueberschrieben.
 
 **Erkennung**
 Kopfdaten ueber einen umfangreichen deutsch/englischen Regelkatalog ·
@@ -397,7 +428,10 @@ Zugriff auf Ihre echten Anwendungsdaten (temporaeres `SAP_ANGEBOT_HOME`).
 | `tests/test_database.py` | Migrationen, Historie, Zuordnungen, CSV-Export, Nebenlaeufigkeit |
 | `tests/test_services.py` | Vergleich, Pruefung, Vorschau, Komplettvorgang, Undo |
 | `tests/test_extraction.py` | Angebotsformate, E-Mails, Freitext, Lernen |
+| `tests/test_email_merge.py` | Mail und Anhang als ein Angebot |
 | `tests/test_fallback.py` | Tabelle einfuegen, grafisches Anlernen |
+| `tests/test_office_readers.py` | Word, OpenDocument, RTF |
+| `tests/test_sap_write.py` | Ruecklese-Pruefung, Kontrakte, Kontierung, Staffeln |
 | `tests/test_gui_smoke.py` | Aufbau der Oberflaeche (ohne sichtbares Fenster) |
 | `tests/test_integration.py` | komplette Kette Datei → SAP-Beleg, Robustheit |
 
