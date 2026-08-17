@@ -227,6 +227,22 @@ def default_screens() -> dict[str, Screen]:
                                      "table", optional=True),
             "validity_periods_button": _s("wnd[0]/tbar[1]/btn[16]", "Gueltigkeitsperioden",
                                           "button", optional=True),
+            # -- Mengenstaffel -------------------------------------------
+            # TODO: kundenspezifische SAP-GUI-ID pruefen.  Die Staffelpflege
+            # liegt in einem eigenen Bild (Konditionsdetail -> "Staffeln").
+            # Solange diese IDs ungeprueft sind, schreibt die Anwendung nur
+            # den Grundpreis und vermerkt das im Ergebnis -- eine halb
+            # gepflegte Staffel waere schlimmer als gar keine.
+            "scales_button": _s("wnd[0]/tbar[1]/btn[8]", "Schaltflaeche Staffeln",
+                                "button", optional=True),
+            "scale_quantity_cell": _s("wnd[0]/usr/tblSAPMV13ATCTRL_STAFFEL/"
+                                      "txtKONM-KSTBM[0,%d]",
+                                      "Staffel: ab Menge (Zeilenplatzhalter %d)",
+                                      "table", optional=True),
+            "scale_amount_cell": _s("wnd[0]/usr/tblSAPMV13ATCTRL_STAFFEL/"
+                                    "txtKONM-KBETR[1,%d]",
+                                    "Staffel: Betrag (Zeilenplatzhalter %d)",
+                                    "table", optional=True),
         },
     )
 
@@ -325,6 +341,33 @@ def default_screens() -> dict[str, Screen]:
         },
     )
 
+    # -- Kontraktsuche ME33K / Beleguebersicht ----------------------------
+    screens["contract_search"] = Screen(
+        key="contract_search", title="Kontrakt – Suche nach bestehendem Beleg",
+        transaction="ME33K/ME3L",
+        note=("TODO: kundenspezifische SAP-GUI-IDs pruefen -- ALLE Vorschlaege dieser "
+              "Maske sind ungeprueft.  Gesucht wird ein laufender Mengenkontrakt zu "
+              "Lieferant + Einkaufsorganisation + Belegart.  Solange die IDs nicht "
+              "geprueft sind, wird NICHT gesucht: die Anwendung legt dann wie bisher "
+              "einen neuen Kontrakt an und protokolliert das.  Es wird nie geraten, "
+              "welcher Beleg gemeint sein koennte."),
+        elements={
+            "vendor": _s("wnd[0]/usr/ctxtRM06E-LIFNR", "Lieferant (Selektion)"),
+            "purchasing_org": _s("wnd[0]/usr/ctxtRM06E-EKORG", "Einkaufsorganisation"),
+            "document_type": _s("wnd[0]/usr/ctxtRM06E-BSART", "Belegart (MK/WK)"),
+            "valid_to_from": _s("wnd[0]/usr/ctxtRM06E-KDATE", "Laufzeitende ab",
+                                optional=True),
+            "execute_button": _s("wnd[0]/tbar[1]/btn[8]", "Ausfuehren (F8)", "button"),
+            "result_table": _s("wnd[0]/usr/lbl_shell", "Trefferliste", "grid"),
+            "result_number_cell": _s("wnd[0]/usr/lbl_shell/txtEKKO-EBELN[0,%d]",
+                                     "Kontraktnummer in der Trefferliste (Zeile %d)",
+                                     "grid"),
+            "result_valid_to_cell": _s("wnd[0]/usr/lbl_shell/txtEKKO-KDATE[1,%d]",
+                                       "Laufzeitende in der Trefferliste (Zeile %d)",
+                                       "grid", optional=True),
+        },
+    )
+
     # -- Bestellung ME21N -------------------------------------------------
     screens["purchase_order"] = Screen(
         key="purchase_order", title="Bestellung – Enjoy-Transaktion",
@@ -376,6 +419,49 @@ def default_screens() -> dict[str, Screen]:
                                   optional=True),
             "check_button": _s("wnd[0]/tbar[1]/btn[19]", "Pruefen (Beleg pruefen)",
                                "button", optional=True),
+            # TODO: kundenspezifische SAP-GUI-ID pruefen -- Kontierungstyp in
+            # der Positionszeile (leer = Lagerbestellung, K = Kostenstelle).
+            "item_account_category_cell": _s("wnd[0]/usr/subSUB0:SAPLMEGUI:0016/"
+                                             "subSUB2:SAPLMEVIEWS:1100/"
+                                             "subSUB2:SAPLMEGUI:1211/tblSAPLMEGUITC_1211/"
+                                             "ctxtMEPO1211-KNTTP[2,%d]",
+                                             "Kontierungstyp (Zeile %d)", "table",
+                                             optional=True),
+        },
+    )
+
+    # -- Bestellung: Kontierungsbild --------------------------------------
+    screens["purchase_order_account"] = Screen(
+        key="purchase_order_account", title="Bestellung – Kontierung (Positionsdetail)",
+        transaction="ME21N/ME22N",
+        note=("TODO: kundenspezifische SAP-GUI-IDs pruefen -- ALLE Vorschlaege dieser "
+              "Maske sind ungeprueft.  Die Registerkarte 'Kontierung' im Positions"
+              "detail erscheint nur, wenn in der Positionszeile ein Kontierungstyp "
+              "gesetzt ist.  Ohne geprueftes Kontierungsbild wird eine kontierte "
+              "Bestellung im Echtbetrieb NICHT geschrieben."),
+        elements={
+            "detail_tabstrip": _s("wnd[0]/usr/subSUB0:SAPLMEGUI:0019/subSUB3:SAPLMEVIEWS:1100/"
+                                  "subSUB2:SAPLMEGUI:1301/tabsITEM_DETAIL",
+                                  "Positionsdetail-Registerkarten", "tab", optional=True),
+            "account_tab": _s("wnd[0]/usr/subSUB0:SAPLMEGUI:0019/subSUB3:SAPLMEVIEWS:1100/"
+                              "subSUB2:SAPLMEGUI:1301/tabsITEM_DETAIL/tabpTABIDT6",
+                              "Registerkarte Kontierung", "tab"),
+            "cost_center": _s("wnd[0]/usr/subSUB0:SAPLMEGUI:0019/subSUB3:SAPLMEVIEWS:1100/"
+                              "subSUB2:SAPLMEGUI:1301/tabsITEM_DETAIL/tabpTABIDT6/"
+                              "ssubTABSTRIPCONTROL1SUB:SAPLMEACCTVI:0100/"
+                              "ctxtMEACCT1100-KOSTL", "Kostenstelle"),
+            "gl_account": _s("wnd[0]/usr/subSUB0:SAPLMEGUI:0019/subSUB3:SAPLMEVIEWS:1100/"
+                             "subSUB2:SAPLMEGUI:1301/tabsITEM_DETAIL/tabpTABIDT6/"
+                             "ssubTABSTRIPCONTROL1SUB:SAPLMEACCTVI:0100/"
+                             "ctxtMEACCT1100-SAKTO", "Sachkonto"),
+            "order_number": _s("wnd[0]/usr/subSUB0:SAPLMEGUI:0019/subSUB3:SAPLMEVIEWS:1100/"
+                               "subSUB2:SAPLMEGUI:1301/tabsITEM_DETAIL/tabpTABIDT6/"
+                               "ssubTABSTRIPCONTROL1SUB:SAPLMEACCTVI:0100/"
+                               "ctxtMEACCT1100-AUFNR", "Innenauftrag", optional=True),
+            "asset_number": _s("wnd[0]/usr/subSUB0:SAPLMEGUI:0019/subSUB3:SAPLMEVIEWS:1100/"
+                               "subSUB2:SAPLMEGUI:1301/tabsITEM_DETAIL/tabpTABIDT6/"
+                               "ssubTABSTRIPCONTROL1SUB:SAPLMEACCTVI:0100/"
+                               "ctxtMEACCT1100-ANLN1", "Anlage", optional=True),
         },
     )
 
@@ -466,7 +552,14 @@ REQUIRED_SCREENS: dict[str, tuple[str, ...]] = {
     "source_list_read": ("source_list_initial", "source_list_overview"),
     "source_list_write": ("source_list_initial", "source_list_overview"),
     "contract_write": ("contract_initial", "contract_header", "contract_items", "messages"),
+    #: Suche nach einem bestehenden Kontrakt (nur lesend).  Ist diese Maske
+    #: nicht geprueft, wird nicht gesucht -- es wird ein neuer Kontrakt
+    #: angelegt und das protokolliert.
+    "contract_search": ("contract_search",),
     "purchase_order_write": ("purchase_order", "messages"),
+    #: Zusaetzlich noetig, sobald eine Position kontiert wird (Kontierungstyp
+    #: nicht leer).  Ohne geprueftes Kontierungsbild wird nicht geschrieben.
+    "purchase_order_account": ("purchase_order", "purchase_order_account", "messages"),
     "purchase_order_from_contract": ("purchase_order", "purchase_order_reference", "messages"),
     "material_read": ("material_display",),
     "vendor_read": ("vendor_display",),

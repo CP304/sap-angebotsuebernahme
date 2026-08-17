@@ -678,7 +678,10 @@ class MainWindow(QMainWindow):
                 position.set_field("uom", purchasing.order_unit, FieldOrigin.DEFAULT)
             if position.valid_from is None and offer.valid_from is not None:
                 position.set_field("valid_from", offer.valid_from, FieldOrigin.EXTRACTED)
-            position.selected = ui.autoselect_after_import
+            # Hat die Erkennung eine Position bewusst abgewaehlt (z. B. weil im
+            # Mailtext "Position 30 entfaellt" steht), darf die Vorbelegung das
+            # nicht wieder aufheben.
+            position.selected = ui.autoselect_after_import and position.selected
             position.do_info_record = workflow.chain_info_record
             position.do_source_list = workflow.chain_source_list
             position.do_contract = workflow.chain_contract

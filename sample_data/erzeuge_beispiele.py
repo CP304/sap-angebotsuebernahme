@@ -14,6 +14,25 @@ unterschiedliche Formate ab -- genau das ist im Alltag das Problem:
     7. CSV mit Semikolon und deutschen Zahlen
     8. Excel mit Staffelpreisen und Summenzeile (Stoerfaelle)
 
+Dazu kommen die *schwierigen* Faelle -- die, an denen ein Import im Alltag
+tatsaechlich scheitert:
+
+    9.  PDF im Fliesstextstil: keine Tabelle, die Preise stehen in Saetzen,
+        die Kopfdaten sind ueber das Anschreiben verstreut
+    10. Excel mit quer verteilten Kopfdaten: Angebotsnummer in H2, Datum in
+        B15 *unter* der Tabelle, Waehrung nur in einer Fusszeile, Kopfzeile
+        erst in Zeile 12 -- davor Logo-Platzhalter und Anschreiben
+    11. E-Mail mit Anhang, bei der die Mail die entscheidenden Ergaenzungen
+        traegt (Gueltigkeit, Streichung, Zusatzposition, ueberholter Preis)
+    12. PDF mit Staffelpreisen ueber zwei Seiten inkl. Uebertragszeile
+    13. Excel mit vertauschten Artikelnummernspalten, englischen
+        Ueberschriften und gemischten Zahlenformaten (1,234.56 und 1.234,56)
+
+Quer durch die schwierigen Faelle laufen zusaetzlich: Umlaute und
+Sonderzeichen in den Bezeichnungen, Mengeneinheiten, die erst normalisiert
+werden muessen (Stk., St, PCS, Meter), und eine Position "auf Anfrage" ohne
+Preis -- dort darf nie ein Betrag erfunden werden.
+
 Die verwendeten Materialnummern passen zum eingebauten Testsystem
 (Mock-SAP), damit der Alt/Neu-Vergleich sofort etwas anzeigt.
 """
@@ -318,6 +337,263 @@ def csv_datei(pfad: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 9: PDF im Fliesstextstil -- keine Tabelle, Preise stehen in Saetzen
+# ---------------------------------------------------------------------------
+
+_FLIESSTEXT_ABSAETZE = (
+    "Dichtungswerk Sued GmbH",
+    "Am Hafen 22  -  68159 Mannheim",
+    "",
+    "Sehr geehrte Damen und Herren,",
+    "",
+    "vielen Dank fuer Ihre Anfrage. Unser Angebot AG-2026-3355 vom "
+    f"{_datum(HEUTE)} ist",
+    "60 Tage bindend; das Zahlungsziel betraegt 30 Tage netto, alle Preise "
+    "verstehen sich in EUR.",
+    "",
+    "Fuer den Dichtring NBR 40x52x7, Ihre Materialnummer 47110001, bieten wir "
+    "Ihnen bei",
+    "Abnahme von 500 Stueck einen Preis von 12,85 EUR je Stueck an. Die "
+    "Mindestbestellmenge",
+    "betraegt 50 Stueck, die Lieferzeit 14 Tage.",
+    "",
+    "Den O-Ring Viton 25x3, Ihre Materialnummer 47110002, liefern wir zu "
+    "8,90 EUR je Stueck",
+    "bei einer Mindestbestellmenge von 200 Stueck; die Lieferzeit betraegt "
+    "ebenfalls 14 Tage.",
+    "",
+    "Fuer die Gleitringdichtung KP-40, Ihre Materialnummer 48200111, koennen "
+    "wir derzeit",
+    "keinen festen Preis nennen - dieser erfolgt auf Anfrage.",
+    "",
+    f"Die genannten Preise gelten ab {_datum(GUELTIG_AB)}.",
+    "",
+    "Mit freundlichen Gruessen",
+    "K. Brandt, Vertrieb",
+)
+
+
+def pdf_fliesstext(pfad: Path) -> None:
+    """Angebot ohne jede Tabelle -- alles steht im Fliesstext."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        print("  PyMuPDF fehlt - PDF-Beispiel wird uebersprungen.")
+        return
+
+    dokument = fitz.open()
+    seite = dokument.new_page()
+    y = 70
+    for zeile in _FLIESSTEXT_ABSAETZE:
+        if zeile:
+            seite.insert_text((55, y), zeile, fontsize=10.5, fontname="helv")
+        y += 16
+    dokument.save(pfad)
+    dokument.close()
+
+
+# ---------------------------------------------------------------------------
+# 10: Excel mit quer verteilten Kopfdaten
+# ---------------------------------------------------------------------------
+
+def excel_kopfdaten_quer(pfad: Path) -> None:
+    """Kopfzeile erst in Zeile 12, Datum unter der Tabelle, Waehrung im Fuss."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    mappe = Workbook()
+    blatt = mappe.active
+    blatt.title = "Angebot"
+
+    blatt["A1"] = "[ Firmenlogo ]"
+    blatt["G2"] = "Angebot Nr.:"
+    blatt["H2"] = "ANG-2026-7788"          # ganz rechts, weit weg vom Rest
+    blatt["A4"] = "Sehr geehrte Damen und Herren,"
+    blatt["A6"] = ("vielen Dank fuer Ihre Anfrage. Gerne unterbreiten wir Ihnen "
+                   "folgendes Angebot.")
+    blatt["A8"] = "Ansprechpartner:"
+    blatt["B8"] = "Frau Sabine Groeger"
+    blatt["A9"] = "Lieferbedingung:"
+    blatt["B9"] = "FCA Bielefeld"
+
+    kopf = ["Pos.", "Materialnummer", "Bezeichnung", "Menge", "ME", "Preis"]
+    for spalte, text in enumerate(kopf, start=1):
+        blatt.cell(row=12, column=spalte, value=text).font = Font(bold=True)
+
+    zeilen = [
+        (10, "47110001", "Öldichtring NBR 40x52x7, ölbeständig", 500, "Stk.", "12,85"),
+        (20, "49900012", "Meßstab Edelstahl 1000 mm (±0,5 mm)", 120, "Meter", "6,40"),
+    ]
+    for index, zeile in enumerate(zeilen, start=13):
+        for spalte, wert in enumerate(zeile, start=1):
+            blatt.cell(row=index, column=spalte, value=wert)
+
+    blatt["A15"] = "Angebotsdatum:"
+    blatt["B15"] = _datum(HEUTE)           # unter der Tabelle, nicht darueber
+    blatt["A17"] = "Zahlungsbedingungen:"
+    blatt["B17"] = "30 Tage netto"
+    blatt["A20"] = "Alle Preise in EUR zuzueglich gesetzlicher Mehrwertsteuer."
+
+    mappe.save(pfad)
+
+
+# ---------------------------------------------------------------------------
+# 11: E-Mail, deren Text die entscheidenden Ergaenzungen traegt
+# ---------------------------------------------------------------------------
+
+_ERGAENZUNGS_CSV = (
+    "Pos;Material;Bezeichnung;Menge;ME;Preis\n"
+    "10;47110001;Dichtring NBR 40x52x7;500;St;12,85\n"
+    "20;47110002;O-Ring Viton 25x3;200;St;8,90\n"
+    "30;47110003;Wellendichtring FPM 30x47x7;100;St;18,95\n"
+)
+
+_ERGAENZUNGS_MAIL = f"""Sehr geehrte Damen und Herren,
+
+anbei unsere Preisliste. Die Preise gelten ab {_datum(GUELTIG_AB)},
+Zahlungsziel 30 Tage netto.
+
+Position 30 entfaellt, dafuer neu: 47110009 zu 4,20 EUR.
+Fuer Artikel 47110001 gilt abweichend eine Mindestmenge von 500 Stueck.
+Der Preis fuer 47110002 im Anhang ist ueberholt, es gilt 9,10 EUR.
+
+Mit freundlichen Gruessen
+Thomas Wagner
+Muster Dichtungstechnik GmbH
+"""
+
+
+def mail_mit_ergaenzungen(pfad: Path) -> None:
+    """Der Alltagsfall: Tabelle im Anhang, das Wichtige im Mailtext."""
+    nachricht = EmailMessage()
+    nachricht["From"] = "Thomas Wagner <vertrieb@muster-dichtungstechnik.de>"
+    nachricht["To"] = "einkauf@unsere-firma.de"
+    nachricht["Subject"] = "Preisliste 2026 - bitte Ergaenzungen im Text beachten"
+    nachricht["Date"] = HEUTE.strftime("%a, %d %b %Y 08:35:00 +0200")
+    nachricht.set_content(_ERGAENZUNGS_MAIL)
+    nachricht.add_attachment(_ERGAENZUNGS_CSV.encode("utf-8"), maintype="text",
+                             subtype="csv", filename="Preisliste_2026.csv")
+    pfad.write_bytes(nachricht.as_bytes())
+
+
+# ---------------------------------------------------------------------------
+# 12: PDF mit Staffelpreisen ueber zwei Seiten
+# ---------------------------------------------------------------------------
+
+def pdf_staffelpreise_zwei_seiten(pfad: Path) -> None:
+    """Positionsliste laeuft ueber den Seitenumbruch -- inkl. Uebertragszeile."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        print("  PyMuPDF fehlt - PDF-Beispiel wird uebersprungen.")
+        return
+
+    spalten = (50, 105, 185, 350, 400, 460)
+    ueberschriften = ("Pos", "Material", "Bezeichnung", "Menge", "ME", "Preis")
+
+    dokument = fitz.open()
+
+    def kopfzeile(seite, y: float) -> float:
+        for x, text in zip(spalten, ueberschriften):
+            seite.insert_text((x, y), text, fontsize=10, fontname="hebo")
+        seite.draw_line(fitz.Point(50, y + 5), fitz.Point(540, y + 5))
+        return y + 22
+
+    def zeilen_schreiben(seite, y: float, zeilen) -> float:
+        for zeile in zeilen:
+            for x, text in zip(spalten, zeile):
+                seite.insert_text((x, y), text, fontsize=10, fontname="helv")
+            y += 18
+        return y
+
+    seite = dokument.new_page()
+    seite.insert_text((50, 60), "Nordtec Industriebedarf AG", fontsize=15,
+                      fontname="hebo")
+    seite.insert_text((50, 82), "Angebots-Nr.:  AG-2026-9001", fontsize=10,
+                      fontname="helv")
+    seite.insert_text((50, 98), f"Datum:  {_datum(HEUTE)}", fontsize=10,
+                      fontname="helv")
+    seite.insert_text((50, 114), "Waehrung:  EUR   -   Zahlungsziel: 30 Tage netto",
+                      fontsize=10, fontname="helv")
+    seite.insert_text((50, 130), "Seite 1 von 2", fontsize=9, fontname="helv")
+
+    y = kopfzeile(seite, 170)
+    y = zeilen_schreiben(seite, y, (
+        ("10", "47110005", "Kugellager 6204-2RS", "100", "Stk.", "4,75"),
+        ("", "", "ab 500 Stk 4,35 EUR", "", "", ""),
+        ("", "", "ab 1000 Stk 4,10 EUR", "", "", ""),
+        ("20", "49900010", "Hydraulikschlauch DN12 2SN", "500", "Meter", "6,95"),
+        ("", "", "ab 2000 m 6,40 EUR", "", "", ""),
+    ))
+    seite.insert_text((350, y + 14), "Uebertrag:  1.622,50 EUR", fontsize=10,
+                      fontname="helv")
+
+    seite = dokument.new_page()
+    seite.insert_text((50, 60), "Seite 2 von 2", fontsize=9, fontname="helv")
+    seite.insert_text((350, 60), "Uebertrag:  1.622,50 EUR", fontsize=10,
+                      fontname="helv")
+    y = kopfzeile(seite, 100)
+    y = zeilen_schreiben(seite, y, (
+        ("30", "48200111", "Gleitringdichtung KP-40", "40", "St", "289,00"),
+        ("", "", "ab 100 St 265,00 EUR", "", "", ""),
+        ("40", "47110004", "Flachdichtung Klingersil 100x60x2", "800", "PCS", "3,40"),
+    ))
+    seite.insert_text((350, y + 20), "Gesamtsumme:  15.402,50 EUR", fontsize=10,
+                      fontname="helv")
+
+    dokument.save(pfad)
+    dokument.close()
+
+
+# ---------------------------------------------------------------------------
+# 13: Vertauschte Artikelnummernspalten, englische Ueberschriften
+# ---------------------------------------------------------------------------
+
+def excel_vertauschte_spalten(pfad: Path) -> None:
+    """"Part No" ist die Nummer des Lieferanten, "Customer Material" unsere.
+
+    Zusaetzlich stehen in derselben Datei beide Zahlenformate nebeneinander
+    (1,234.56 englisch und 1.234,56 deutsch), es gibt Umlaute in den
+    Bezeichnungen, drei Schreibweisen derselben Mengeneinheit und eine
+    Position ganz ohne Preis ("auf Anfrage").
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    mappe = Workbook()
+    blatt = mappe.active
+    blatt.title = "Quotation"
+
+    blatt["A1"] = "Global Sealing Solutions Ltd."
+    blatt["A1"].font = Font(bold=True)
+    blatt["A2"] = "Quotation No. GS-2026-0042"
+    blatt["A3"] = f"Date: {HEUTE.strftime('%Y-%m-%d')}"
+    blatt["A4"] = "Currency: EUR"
+
+    kopf = ["Item", "Part No", "Customer Material", "Description", "Qty",
+            "Unit", "Unit price"]
+    for spalte, text in enumerate(kopf, start=1):
+        blatt.cell(row=6, column=spalte, value=text).font = Font(bold=True)
+
+    zeilen = [
+        (10, "DR-40527-NBR", "47110001", "Öldichtring NBR 40x52x7", "1,234.56",
+         "PCS", "12.85"),
+        (20, "OR-2503-FPM", "47110002", "O-Ring Viton 25x3 (Übermaß)", "1.234,56",
+         "Stk.", "8,90"),
+        (30, "GLR-KP40", "48200111", "Gleitringdichtung KP-40, größere Bauform",
+         "40", "St", "auf Anfrage"),
+        (40, "HS-DN12", "49900010", "Hydraulikschlauch DN12 2SN", "500", "Meter",
+         "6.95"),
+    ]
+    for index, zeile in enumerate(zeilen, start=7):
+        for spalte, wert in enumerate(zeile, start=1):
+            blatt.cell(row=index, column=spalte, value=wert)
+
+    blatt["A12"] = "Payment terms: 30 days net.  Prices ex works."
+    mappe.save(pfad)
+
+
+# ---------------------------------------------------------------------------
 
 def main() -> int:
     ZIEL.mkdir(parents=True, exist_ok=True)
@@ -331,6 +607,12 @@ def main() -> int:
         ("Preisanpassung_Muster.eml", mail_freitext),
         ("Preismitteilung.txt", textdatei),
         ("Preisliste_Muster.csv", csv_datei),
+        # -- die schwierigen Faelle --------------------------------------
+        ("Angebot_Fliesstext_Dichtungswerk.pdf", pdf_fliesstext),
+        ("Angebot_Kopfdaten_quer_verteilt.xlsx", excel_kopfdaten_quer),
+        ("Mail_mit_Ergaenzungen_im_Text.eml", mail_mit_ergaenzungen),
+        ("Angebot_Staffelpreise_zwei_Seiten.pdf", pdf_staffelpreise_zwei_seiten),
+        ("Quotation_vertauschte_Spalten.xlsx", excel_vertauschte_spalten),
     ]
     # Hinweis: Die Windows-Konsole nutzt cp1252 -- deshalb bewusst nur ASCII
     # ausgeben, sonst bricht die Ausgabe mit einem UnicodeEncodeError ab.

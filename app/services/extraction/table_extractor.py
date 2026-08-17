@@ -797,6 +797,12 @@ class TableExtractor:
             if len(present) < minimum:
                 if positions and self._is_continuation(values, present):
                     self._append_continuation(positions[-1], row, analysis)
+                    # In PDFs zerfaellt eine Staffelzeile ("ab 500 Stk 4,35 EUR")
+                    # oft ueber mehrere Spalten.  Fuer die Staffelsuche wird die
+                    # Zeile deshalb wieder zusammengesetzt -- sonst verschwaende
+                    # die Staffel stillschweigend im Beschreibungstext.
+                    positions.extend(self._tier_positions_from_row(
+                        positions[-1], row, document, label, row_index))
                     continue
                 skipped_rows += 1
                 continue
@@ -997,6 +1003,28 @@ class TableExtractor:
         if out:
             logger.debug("%d Staffelpreise zu Position %s erkannt", len(out),
                          base.display_name)
+        return out
+
+    def _tier_positions_from_row(self, base: OfferPosition, row: list[str],
+                                 document: RawDocument, label: str,
+                                 row_index: int) -> list[OfferPosition]:
+        """Staffel aus einer ueber mehrere Spalten verteilten Fortsetzungszeile."""
+        joined = " ".join(normalize_whitespace(cell) for cell in row if cell)
+        out: list[OfferPosition] = []
+        for quantity, price, raw in find_price_tiers(joined, self.decimal_style):
+            if base.price is not None and price == base.price:
+                continue
+            tier = _copy_position(base)
+            tier.source_kind = document.source_kind
+            tier.source_hint = f"{label}, Zeile {row_index + 1} (Staffel)"
+            tier.raw_text = joined
+            tier.set_field("quantity", quantity, FieldOrigin.UNCERTAIN)
+            tier.set_field("price", price, FieldOrigin.UNCERTAIN)
+            tier.set_field("min_order_qty", quantity, FieldOrigin.UNCERTAIN)
+            tier.set_field("remarks",
+                           _join_remark(base.remarks, f"Staffelpreis: {raw}"),
+                           FieldOrigin.EXTRACTED)
+            out.append(tier)
         return out
 
     @staticmethod

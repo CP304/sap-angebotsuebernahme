@@ -22,7 +22,11 @@ import re
 from datetime import date
 from decimal import Decimal
 
-from ..models.document_plan import PurchaseOrderPlan
+from ..models.document_plan import (
+    PurchaseOrderPlan,
+    apply_account_assignment,
+    validate_account_assignment,
+)
 from ..models.enums import ResultState
 from ..models.results import ActionResult
 from ..utils.parsing import format_date
@@ -44,6 +48,11 @@ class SapPurchaseOrderService(PurchaseOrderServiceBase):
         started = self._now_ms()
         connection = self.connection
 
+        # Kontierung zuerst vorbelegen, dann pruefen -- geprueft wird immer
+        # der Zustand, der tatsaechlich geschrieben wuerde.
+        for item in plan.items:
+            apply_account_assignment(item, self.settings)
+
         problem = self._validate(plan)
         if problem:
             return self._result("purchase_order", ResultState.FAILED, problem,
@@ -52,8 +61,11 @@ class SapPurchaseOrderService(PurchaseOrderServiceBase):
         transaction = (self.settings.transactions.purchase_order_change if plan.is_change
                        else self.settings.transactions.purchase_order_create)
         summary = plan.summary()
-        operation = ("purchase_order_from_contract" if plan.reference_contract
-                     else self.write_operation)
+        operations = [("purchase_order_from_contract" if plan.reference_contract
+                       else self.write_operation)]
+        if any(item.account_assignment for item in plan.items):
+            # Kontierte Positionen brauchen zusaetzlich das Kontierungsbild
+            operations.append("purchase_order_account")
 
         if context.dry_run:
             return self._result("purchase_order", ResultState.SIMULATED,
@@ -62,7 +74,8 @@ class SapPurchaseOrderService(PurchaseOrderServiceBase):
                                 started_ms=started)
 
         try:
-            self.selectors.ensure_ready(operation)
+            for operation in operations:
+                self.selectors.ensure_ready(operation)
         except Exception as exc:  # SelectorNotVerifiedError
             return self._result("purchase_order", ResultState.FAILED,
                                 "Schreiben gesperrt: SAP-Feld-IDs sind nicht geprueft.",
@@ -103,10 +116,18 @@ class SapPurchaseOrderService(PurchaseOrderServiceBase):
             if status.text:
                 messages.append(status.display())
             number = self._extract_number(status.text) or plan.existing_order_number
+            if not number:
+                # Ohne Belegnummer ist unklar, ob gesichert wurde -- das darf
+                # nicht als Erfolg durchgehen.
+                raise SapBusinessError(
+                    "SAP hat nach dem Sichern keine Bestellnummer gemeldet. Es ist "
+                    f"unklar, ob die Bestellung angelegt wurde -- bitte in "
+                    f"{self.settings.transactions.purchase_order_display} pruefen.")
             plan.document_number = number
             for index, item in enumerate(plan.items, start=1):
                 if not item.item_number:
                     item.item_number = f"{index * 10:05d}"
+            messages.extend(self._verify_document(number))
 
             return self._result("purchase_order", ResultState.SUCCESS,
                                 f"Bestellung angelegt ({summary})",
@@ -213,6 +234,14 @@ class SapPurchaseOrderService(PurchaseOrderServiceBase):
                 connection.send_vkey(0)
                 connection.raise_on_error_status("Kontraktbezug setzen")
 
+            # Kontierungstyp gehoert in die Positionszeile, bevor das
+            # Kontierungsbild ueberhaupt erscheint.
+            if item.account_assignment:
+                cell("purchase_order", "item_account_category_cell",
+                     item.account_assignment)
+                connection.send_vkey(0)
+                connection.raise_on_error_status("Kontierungstyp setzen")
+
             cell("purchase_order", "item_material_cell", item.material_number)
             cell("purchase_order", "item_quantity_cell", self._decimal_text(item.quantity))
             cell("purchase_order", "item_uom_cell", item.uom)
@@ -226,11 +255,76 @@ class SapPurchaseOrderService(PurchaseOrderServiceBase):
                 cell("purchase_order", "item_net_price_cell", self._decimal_text(item.net_price))
             item.item_number = item.item_number or f"{(index + 1) * 10:05d}"
 
+            if item.account_assignment:
+                self._fill_account_assignment(item, messages)
+
         connection.send_vkey(0)
         connection.raise_on_error_status("Bestellpositionen erfassen")
         reference = (f" mit Bezug auf Kontrakt {plan.reference_contract}"
                      if plan.reference_contract else "")
         messages.append(f"{len(plan.items)} Bestellposition(en) erfasst{reference}")
+
+    def _verify_document(self, number: str) -> list[str]:
+        """Nach dem Sichern nachsehen, ob die Bestellung wirklich existiert."""
+        if not self.settings.sap.verify_after_write:
+            return []
+        connection = self.connection
+        try:
+            connection.ensure_transaction(
+                self.settings.transactions.purchase_order_display)
+            status = connection.read_status()
+            if status.is_error:
+                meldung = (f"Ruecklese-Pruefung: Bestellung {number} ist in "
+                           f"{self.settings.transactions.purchase_order_display} nicht "
+                           f"aufrufbar ({status.text}).")
+                if self.settings.sap.verify_failure_is_error:
+                    raise SapBusinessError(meldung)
+                return [meldung]
+            return [f"Ruecklese-Pruefung: Bestellung {number} existiert."]
+        except SapBusinessError:
+            raise
+        except SapError as exc:
+            return [f"Ruecklese-Pruefung nicht moeglich: {exc.message}"]
+
+    def _fill_account_assignment(self, item, messages: list[str]) -> None:
+        """Kontierungsbild der Position oeffnen und fuellen.
+
+        Wird nur aufgerufen, wenn ein Kontierungstyp gesetzt ist.  Fehlt das
+        Bild oder ein Feld, wird abgebrochen -- eine Bestellung mit halber
+        Kontierung waere im Rechnungswesen ein Dauerproblem.
+        """
+        connection = self.connection
+        registry = self.selectors
+
+        if registry.has("purchase_order_account", "account_tab"):
+            tab_id = registry.id_for("purchase_order_account", "account_tab")
+            if connection.exists(tab_id):
+                connection.select_element(tab_id)
+                connection.raise_on_error_status("Registerkarte Kontierung")
+
+        werte = (("cost_center", item.cost_center, "Kostenstelle"),
+                 ("gl_account", item.gl_account, "Sachkonto"))
+        gesetzt: list[str] = []
+        for key, value, label in werte:
+            if not value:
+                continue
+            if not registry.has("purchase_order_account", key):
+                raise SapBusinessError(
+                    f"Kontierung unvollstaendig: Feld '{label}' ist nicht konfiguriert. "
+                    f"Es wurde nichts gesichert.")
+            element_id = registry.id_for("purchase_order_account", key)
+            if not connection.exists(element_id):
+                raise SapBusinessError(
+                    f"Kontierung unvollstaendig: Feld '{label}' ist im Kontierungsbild "
+                    f"nicht vorhanden. Es wurde nichts gesichert.")
+            connection.set_text(element_id, value)
+            gesetzt.append(f"{label} {value}")
+
+        connection.send_vkey(0)
+        connection.raise_on_error_status("Kontierung erfassen")
+        messages.append(f"Position {item.material_number}: Kontierung "
+                        f"'{item.account_assignment}'"
+                        + (f" ({', '.join(gesetzt)})" if gesetzt else ""))
 
     def _check_document(self, messages: list[str]) -> None:
         """SAP-eigene Belegpruefung ausloesen, bevor gesichert wird."""
@@ -272,6 +366,9 @@ class SapPurchaseOrderService(PurchaseOrderServiceBase):
             if not plan.reference_contract and item.net_price is None:
                 return (f"Position {item.material_number}: kein Preis erkannt "
                         f"(ohne Kontraktbezug ist der Preis zwingend).")
+            problem = validate_account_assignment(item, self.settings)
+            if problem:
+                return problem
         return ""
 
     @staticmethod

@@ -19,6 +19,7 @@ from ..models.results import ActionResult
 from ..models.sap_source_list import SapSourceList, SourceListEntry
 from ..utils.parsing import format_date, parse_date
 from .connection import SapBusinessError, SapError, SapPopupError
+from .info_record_service import verify_source_list_write
 from .interfaces import SourceListServiceBase, WriteContext
 
 logger = logging.getLogger(__name__)
@@ -159,6 +160,24 @@ class SapSourceListService(SourceListServiceBase):
                                     title=popup.get("title", ""))
             if status.text:
                 messages.append(status.display())
+
+            # Ruecklese-Pruefung: Die Statusleiste meldet "gesichert", auch wenn
+            # das Sperrkennzeichen gar nicht zurueckgenommen wurde.  Deshalb den
+            # Eintrag erneut lesen und den Ist-Zustand pruefen.
+            if self.settings.sap.verify_after_write:
+                erneut = self.read(position.material_number, position.plant)
+                position.sap_source_list = erneut
+                bestanden, pruefmeldungen = verify_source_list_write(
+                    erneut, position, self.settings)
+                messages.extend(pruefmeldungen)
+                if not bestanden and self.settings.sap.verify_failure_is_error:
+                    return self._result(
+                        "source_list", ResultState.FAILED,
+                        pruefmeldungen[0] if pruefmeldungen
+                        else "Ruecklese-Pruefung fehlgeschlagen.",
+                        transaction=transaction, old_value=old_value,
+                        new_value=new_value, started_ms=started,
+                        sap_messages=messages)
 
             return self._result(
                 "source_list", ResultState.SUCCESS,

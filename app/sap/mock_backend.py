@@ -21,7 +21,12 @@ from decimal import Decimal
 from pathlib import Path
 
 from ..config.settings import Settings
-from ..models.document_plan import ContractPlan, PurchaseOrderPlan
+from ..models.document_plan import (
+    ContractPlan,
+    PurchaseOrderPlan,
+    apply_account_assignment,
+    validate_account_assignment,
+)
 from ..models.enums import ResultState
 from ..models.offer_position import OfferPosition
 from ..models.results import ActionResult
@@ -33,6 +38,13 @@ from ..utils.parsing import (
     normalize_material_number,
     normalize_vendor_number,
     similarity,
+)
+from .info_record_service import (
+    scale_levels_for,
+    scale_not_written_message,
+    unverified_scale_selectors,
+    verify_info_record_write,
+    verify_source_list_write,
 )
 from .interfaces import (
     ContractServiceBase,
@@ -70,6 +82,13 @@ class MockSapSystem:
         self.contracts: dict[str, dict] = {}
         self.purchase_orders: dict[str, dict] = {}
         self.counters: dict[str, int] = {}
+        #: Pruefhilfe: Schluessel eines Infosatzes -> Preis, den das
+        #: Testsystem beim Sichern *statt* des uebergebenen Wertes ablegt.
+        #: Damit laesst sich der reale Fall nachstellen, in dem SAP
+        #: "gesichert" meldet, den Preis aber gar nicht uebernommen hat
+        #: (Feld nicht eingabebereit, Berechtigung auf Detailebene).
+        #: Wird bewusst NICHT gespeichert -- reine Laufzeit-Einstellung.
+        self.forced_price_deviations: dict[str, str] = {}
         self.load()
 
     # -- Schluessel -----------------------------------------------------
@@ -332,9 +351,42 @@ class MockInfoRecordService(_MockBase, InfoRecordServiceBase):
 
         number = (existing or {}).get("info_record_number") or \
             self.system.next_number("info_record", "530000")
+
+        messages: list[str] = [
+            f"Infosatz {number} wurde {'geaendert' if existing else 'angelegt'}"]
+
+        # -- Mengenstaffel -------------------------------------------------
+        staffel: list[list[str]] = []
+        if self.settings.workflow.info_record_write_scales and position.has_scales:
+            offen = unverified_scale_selectors(self.selectors)
+            if offen:
+                # Kein stillschweigendes Weglassen: nur Grundpreis, mit Vermerk.
+                messages.append(scale_not_written_message(offen, self.settings))
+            else:
+                stufen, hinweise = scale_levels_for(position, self.settings)
+                messages.extend(hinweise)
+                staffel = [[str(menge), str(preis)] for menge, preis in stufen]
+                if staffel:
+                    # Bewusst nur die *geschriebenen* Stufen nennen -- alles
+                    # andere waere eine Erfolgsmeldung fuer nicht Geleistetes.
+                    beschreibung = "; ".join(
+                        f"ab {format_decimal(menge, 3)}: {format_decimal(preis)}"
+                        for menge, preis in stufen)
+                    messages.append(f"Mengenstaffel mit {len(staffel)} Stufe(n) "
+                                    f"gepflegt: {beschreibung}")
+
+        # SAP legt den Konditionsbetrag zweistellig ab -- das Testsystem
+        # ebenso, sonst waere die Ruecklese-Pruefung unrealistisch scharf.
+        gespeicherter_preis = position.price
+        if gespeicherter_preis is not None:
+            gespeicherter_preis = gespeicherter_preis.quantize(Decimal("0.01"))
+        abweichung = self.system.forced_price_deviations.get(key)
+        if abweichung is not None:
+            gespeicherter_preis = _d(str(abweichung))
+
         self.system.info_records[key] = {
             "info_record_number": number,
-            "price": str(position.price) if position.price is not None else "0",
+            "price": str(gespeicherter_preis) if gespeicherter_preis is not None else "0",
             "price_unit": position.price_unit or 1,
             "currency": position.currency or self.settings.purchasing.currency,
             "order_unit": position.uom or self.settings.purchasing.order_unit,
@@ -345,16 +397,35 @@ class MockInfoRecordService(_MockBase, InfoRecordServiceBase):
             "vendor_material_number": position.vendor_material_number,
             "purchasing_group": self.settings.purchasing.purchasing_group,
             "conditions": [{"type": "PB00", "description": "Bruttopreis",
-                            "amount": str(position.price), "currency": position.currency,
+                            "amount": str(gespeicherter_preis), "currency": position.currency,
                             "price_unit": position.price_unit or 1, "uom": position.uom}],
+            "scales": staffel,
         }
         self.system.save()
+
+        # -- Ruecklese-Pruefung (wie im Echtbetrieb) ------------------------
+        if self.settings.sap.verify_after_write:
+            geprueft = self.read(position.material_number, position.vendor_number,
+                                 position.purchasing_org, position.plant)
+            in_ordnung, hinweise = verify_info_record_write(
+                geprueft, position, context, self.settings)
+            messages.extend(hinweise)
+            if not in_ordnung and self.settings.sap.verify_failure_is_error:
+                return self._result(
+                    "info_record", ResultState.FAILED, hinweise[0],
+                    transaction=transaction, document_number=number,
+                    old_value=old_value, new_value=new_value, started_ms=started,
+                    sap_messages=messages)
+            if not in_ordnung:
+                messages.append("Hinweis: Es wurde gesichert, die Ruecklese-Pruefung ist "
+                                "aber nicht sauber -- bitte nachsehen.")
+
         return self._result(
             "info_record", ResultState.SUCCESS,
             f"Infosatz {'geaendert' if existing else 'angelegt'}",
             transaction=transaction, document_number=number,
             old_value=old_value, new_value=new_value, started_ms=started,
-            sap_messages=[f"Infosatz {number} wurde {'geaendert' if existing else 'angelegt'}"],
+            sap_messages=messages,
         )
 
 
@@ -421,12 +492,24 @@ class MockSourceListService(_MockBase, SourceListServiceBase):
         if existing is None:
             rows.append(row)
         self.system.save()
+
+        messages = ["Orderbuchsaetze wurden gesichert"]
+        if self.settings.sap.verify_after_write:
+            geprueft = self.read(position.material_number, position.plant)
+            in_ordnung, hinweise = verify_source_list_write(geprueft, position,
+                                                           self.settings)
+            messages.extend(hinweise)
+            if not in_ordnung and self.settings.sap.verify_failure_is_error:
+                return self._result(
+                    "source_list", ResultState.FAILED, hinweise[0],
+                    transaction=transaction, old_value=old_value, new_value=new_value,
+                    started_ms=started, sap_messages=messages)
+
         return self._result(
             "source_list", ResultState.SUCCESS,
             f"Orderbucheintrag {'aktualisiert' if existing else 'angelegt'}, Lieferant aktiv",
             transaction=transaction, old_value=old_value, new_value=new_value,
-            started_ms=started,
-            sap_messages=["Orderbuchsaetze wurden gesichert"],
+            started_ms=started, sap_messages=messages,
         )
 
 
@@ -482,6 +565,40 @@ class MockContractService(_MockBase, ContractServiceBase):
     def __init__(self, system, settings, selectors) -> None:  # noqa: D107
         _MockBase.__init__(self, system, settings, selectors)
 
+    # ------------------------------------------------------------------
+    def find_existing_contract(self, vendor_number: str, purchasing_org: str,
+                               document_type: str, min_valid_to: date) -> str:
+        """Passenden laufenden Mengenkontrakt im Testbestand suchen.
+
+        Kriterien wie im Echtbetrieb: gleicher Lieferant, gleiche Einkaufs-
+        organisation, gleiche Belegart, Laufzeitende nicht vor
+        ``min_valid_to``.  Gibt es mehrere, gewinnt der am laengsten laufende
+        -- so landen Folgepositionen im tragfaehigsten Beleg.
+        """
+        gesucht = normalize_vendor_number(vendor_number)
+        treffer: list[tuple[date, str]] = []
+        for nummer, kontrakt in self.system.contracts.items():
+            if normalize_vendor_number(kontrakt.get("vendor", "")) != gesucht:
+                continue
+            if (kontrakt.get("purchasing_org") or "") != (purchasing_org or ""):
+                continue
+            if document_type and (kontrakt.get("document_type") or "") != document_type:
+                continue
+            rohes_ende = kontrakt.get("valid_to") or ""
+            if not rohes_ende:
+                continue
+            try:
+                ende = date.fromisoformat(rohes_ende)
+            except ValueError:
+                continue
+            if min_valid_to and ende < min_valid_to:
+                continue
+            treffer.append((ende, nummer))
+        if not treffer:
+            return ""
+        treffer.sort(reverse=True)
+        return treffer[0][1]
+
     def create(self, plan: ContractPlan, context: WriteContext) -> ActionResult:
         started = self._now_ms()
         transaction = (self.settings.transactions.contract_change if plan.is_change
@@ -494,36 +611,73 @@ class MockContractService(_MockBase, ContractServiceBase):
                                 f"Mengenkontrakt anlegen ({transaction}): {summary}",
                                 transaction=transaction, new_value=summary, started_ms=started)
 
+        bestand = self.system.contracts.get(plan.existing_contract_number or "")
+        erweitert = bool(plan.existing_contract_number and bestand is not None)
         number = plan.existing_contract_number or self.system.next_number("contract", "4600")
-        items = []
-        for index, item in enumerate(plan.items, start=1):
-            item.item_number = f"{index * 10:05d}"
-            items.append({
+
+        # Beim Erweitern wird hinter den vorhandenen Zeilen weitergezaehlt --
+        # die Bestellung muss spaeter auf die richtige Kontraktzeile zeigen.
+        vorhandene = list(bestand.get("items", [])) if erweitert else []
+        naechste = len(vorhandene) + 1
+        neue = []
+        for versatz, item in enumerate(plan.items):
+            item.item_number = f"{(naechste + versatz) * 10:05d}"
+            neue.append({
                 "item": item.item_number, "material": item.material_number,
                 "quantity": str(item.quantity) if item.quantity is not None else "",
                 "uom": item.uom,
                 "net_price": str(item.net_price) if item.net_price is not None else "",
                 "price_unit": item.price_unit or 1, "plant": item.plant,
             })
-        self.system.contracts[number] = {
-            "document_type": plan.document_type, "vendor": plan.vendor_number,
-            "purchasing_org": plan.purchasing_org, "purchasing_group": plan.purchasing_group,
-            "currency": plan.currency,
-            "valid_from": plan.valid_from.isoformat() if plan.valid_from else "",
-            "valid_to": plan.valid_to.isoformat() if plan.valid_to else "",
-            "target_value": str(plan.computed_target_value or ""),
-            "reference_offer": plan.reference_offer, "items": items,
-            "created_at": datetime.now().isoformat(),
-            "messages_suppressed": True,
-        }
+
+        if erweitert:
+            # Kopfdaten des Bestandskontrakts bleiben unangetastet -- vor
+            # allem die Laufzeit.  Es kommen nur Positionen hinzu.
+            bestand["items"] = vorhandene + neue
+            meldungen = [f"Kontrakt {number} wurde um {len(neue)} Position(en) erweitert",
+                         "Kopfdaten (Laufzeit) unveraendert uebernommen",
+                         "Nachrichtenfindung unterdrueckt (kein Versand)"]
+            nachricht = f"Mengenkontrakt erweitert ({summary})"
+        else:
+            self.system.contracts[number] = {
+                "document_type": plan.document_type, "vendor": plan.vendor_number,
+                "purchasing_org": plan.purchasing_org,
+                "purchasing_group": plan.purchasing_group,
+                "currency": plan.currency,
+                "valid_from": plan.valid_from.isoformat() if plan.valid_from else "",
+                "valid_to": plan.valid_to.isoformat() if plan.valid_to else "",
+                "target_value": str(plan.computed_target_value or ""),
+                "reference_offer": plan.reference_offer, "items": neue,
+                "created_at": datetime.now().isoformat(),
+                "messages_suppressed": True,
+            }
+            meldungen = [f"Kontrakt {number} wurde angelegt",
+                         "Nachrichtenfindung unterdrueckt (kein Versand)"]
+            nachricht = f"Mengenkontrakt angelegt ({summary})"
         self.system.save()
         plan.document_number = number
-        return self._result("contract", ResultState.SUCCESS,
-                            f"Mengenkontrakt angelegt ({summary})",
+
+        # Ohne Belegnummer waere voellig offen, was gesichert wurde.
+        if not number:
+            return self._result("contract", ResultState.FAILED,
+                                "SAP hat keine Kontraktnummer gemeldet -- es ist unklar, "
+                                "ob der Beleg angelegt wurde.",
+                                transaction=transaction, started_ms=started)
+        if self.settings.sap.verify_after_write and number not in self.system.contracts:
+            return self._result("contract", ResultState.FAILED,
+                                f"Ruecklese-Pruefung: Kontrakt {number} ist in "
+                                f"{self.settings.transactions.contract_display} nicht "
+                                f"auffindbar.",
+                                transaction=transaction, document_number=number,
+                                started_ms=started, sap_messages=meldungen)
+        if self.settings.sap.verify_after_write:
+            meldungen.append(f"Ruecklese-Pruefung: Kontrakt {number} existiert mit "
+                             f"{len(self.system.contracts[number]['items'])} Position(en).")
+
+        return self._result("contract", ResultState.SUCCESS, nachricht,
                             transaction=transaction, document_number=number,
                             new_value=summary, started_ms=started,
-                            sap_messages=[f"Kontrakt {number} wurde angelegt",
-                                          "Nachrichtenfindung unterdrueckt (kein Versand)"])
+                            sap_messages=meldungen)
 
 
 class MockPurchaseOrderService(_MockBase, PurchaseOrderServiceBase):
@@ -534,6 +688,16 @@ class MockPurchaseOrderService(_MockBase, PurchaseOrderServiceBase):
         started = self._now_ms()
         transaction = (self.settings.transactions.purchase_order_change if plan.is_change
                        else self.settings.transactions.purchase_order_create)
+
+        # Kontierung erst vorbelegen, dann pruefen -- und zwar bevor irgend
+        # etwas gespeichert wird.
+        for item in plan.items:
+            apply_account_assignment(item, self.settings)
+        for item in plan.items:
+            problem = validate_account_assignment(item, self.settings)
+            if problem:
+                return self._result("purchase_order", ResultState.FAILED, problem,
+                                    transaction=transaction, started_ms=started)
         reference = f" mit Bezug auf Kontrakt {plan.reference_contract}" if plan.reference_contract else ""
         total = plan.net_total
         summary = (f"{len(plan.items)} Position(en){reference}"
@@ -557,6 +721,9 @@ class MockPurchaseOrderService(_MockBase, PurchaseOrderServiceBase):
                 "delivery_date": item.delivery_date.isoformat() if item.delivery_date else "",
                 "contract_number": item.contract_number or plan.reference_contract,
                 "contract_item": item.contract_item,
+                "account_assignment": item.account_assignment,
+                "cost_center": item.cost_center,
+                "gl_account": item.gl_account,
             })
         self.system.purchase_orders[number] = {
             "document_type": plan.document_type, "vendor": plan.vendor_number,
@@ -569,9 +736,26 @@ class MockPurchaseOrderService(_MockBase, PurchaseOrderServiceBase):
         }
         self.system.save()
         plan.document_number = number
+
+        meldungen = [f"Normalbestellung {number} wurde angelegt",
+                     "Nachrichtenfindung unterdrueckt (kein Versand)"]
+        if not number:
+            return self._result("purchase_order", ResultState.FAILED,
+                                "SAP hat keine Bestellnummer gemeldet -- es ist unklar, "
+                                "ob die Bestellung angelegt wurde.",
+                                transaction=transaction, started_ms=started)
+        if self.settings.sap.verify_after_write:
+            if number not in self.system.purchase_orders:
+                return self._result("purchase_order", ResultState.FAILED,
+                                    f"Ruecklese-Pruefung: Bestellung {number} ist in "
+                                    f"{self.settings.transactions.purchase_order_display} "
+                                    f"nicht auffindbar.",
+                                    transaction=transaction, document_number=number,
+                                    started_ms=started, sap_messages=meldungen)
+            meldungen.append(f"Ruecklese-Pruefung: Bestellung {number} existiert.")
+
         return self._result("purchase_order", ResultState.SUCCESS,
                             f"Bestellung angelegt ({summary})",
                             transaction=transaction, document_number=number,
                             new_value=summary, started_ms=started,
-                            sap_messages=[f"Normalbestellung {number} wurde angelegt",
-                                          "Nachrichtenfindung unterdrueckt (kein Versand)"])
+                            sap_messages=meldungen)

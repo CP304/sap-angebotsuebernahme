@@ -35,7 +35,7 @@ from .base import DocumentReader, RawDocument, TableBlock
 logger = logging.getLogger(__name__)
 
 __all__ = ["EmailReader", "TextReader", "HtmlTableParser", "html_to_text",
-           "strip_signature", "SIGNATURE_MARKERS"]
+           "strip_signature", "text_tables", "SIGNATURE_MARKERS"]
 
 #: Zeilenanfaenge, ab denen der Rest einer Mail typischerweise nur noch
 #: Signatur, Disclaimer oder ein zitierter aelterer Verlauf ist.
@@ -202,6 +202,74 @@ def html_to_text(html: str) -> tuple[str, list[list[list[str]]]]:
         text = unescape(re.sub(r"<[^>]+>", " ", html))
         text = re.sub(r"\s+", " ", text).strip()
     return text, parser.tables
+
+
+# ---------------------------------------------------------------------------
+# Klartext -> Tabellen ("text-grid")
+# ---------------------------------------------------------------------------
+
+#: Trennzeichen, die im Alltag als Spaltentrenner auftauchen.  Das Komma fehlt
+#: bewusst: in deutschen Preisangaben ist es der Dezimaltrenner, eine Zeile wie
+#: "Dichtring, 12,85 EUR" waere sonst eine dreispaltige Tabelle.
+_GRID_DELIMITERS: tuple[str, ...] = ("\t", ";", "|")
+
+#: So viele Zeilen muss ein Block mindestens haben (Kopf + eine Datenzeile)
+_MIN_GRID_ROWS = 2
+
+
+def text_tables(text: str) -> list[TableBlock]:
+    """Trennzeichen-Tabellen in Klartext finden ("text-grid").
+
+    Eingefuegter Text aus der Zwischenablage und schlicht gespeicherte
+    Preislisten kommen haeufig als Semikolon- oder Tabulatorliste an -- ohne
+    Dateiendung, die den CSV-Leser aktivieren wuerde.  Diese Funktion holt
+    daraus wieder eine Tabellenstruktur heraus, damit die Spaltenerkennung
+    greifen kann.
+
+    Erkannt wird nur, was eindeutig ist: mindestens zwei aufeinanderfolgende
+    Zeilen mit demselben Trennzeichen und derselben Spaltenzahl.  Alles andere
+    bleibt Fliesstext -- lieber keine Tabelle als eine falsche.
+    """
+    if not text or not text.strip():
+        return []
+    lines = text.splitlines()
+    best: list[TableBlock] = []
+    best_cells = 0
+    for delimiter in _GRID_DELIMITERS:
+        blocks = _grid_blocks(lines, delimiter)
+        cells = sum(len(b.rows) * b.column_count for b in blocks)
+        if cells > best_cells:
+            best, best_cells = blocks, cells
+    return best
+
+
+def _grid_blocks(lines: list[str], delimiter: str) -> list[TableBlock]:
+    """Zusammenhaengende Bloecke gleich breiter Trennzeichenzeilen."""
+    blocks: list[TableBlock] = []
+    current: list[list[str]] = []
+
+    def flush() -> None:
+        if len(current) >= _MIN_GRID_ROWS:
+            blocks.append(TableBlock(rows=[list(r) for r in current],
+                                     origin="text-grid",
+                                     title="Textliste mit Trennzeichen"))
+        current.clear()
+
+    for line in lines:
+        if delimiter not in line:
+            flush()
+            continue
+        cells = [c.strip() for c in line.split(delimiter)]
+        if len(cells) < 2 or not any(cells):
+            flush()
+            continue
+        if current and len(cells) != len(current[0]):
+            # Andere Spaltenzahl: das ist ein neuer Block, kein Fortsetzen --
+            # sonst entstuenden aus Fliesstext krumme Pseudotabellen.
+            flush()
+        current.append(cells)
+    flush()
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +559,8 @@ class TextReader(DocumentReader):
                     document.tables.append(TableBlock(rows=cleaned, origin="html"))
         document.text = text.replace("\r\n", "\n")
         document.pages = [document.text]
+        if not document.tables:
+            document.tables.extend(text_tables(document.text))
         return document
 
     # ------------------------------------------------------------------
@@ -509,6 +579,8 @@ class TextReader(DocumentReader):
             content = plain
         document.text = content.replace("\r\n", "\n")
         document.pages = [document.text]
+        if not document.tables:
+            document.tables.extend(text_tables(document.text))
         return document
 
 

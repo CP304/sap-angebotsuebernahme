@@ -34,7 +34,8 @@ from app.models.offer_position import OfferPosition                     # noqa: 
 from app.models.sap_info_record import SapInfoRecord                    # noqa: E402
 from app.models.sap_source_list import SapSourceList, SourceListEntry   # noqa: E402
 from app.sap.connection import SapError                                 # noqa: E402
-from app.sap.gateway import SapGateway                                  # noqa: E402
+from app.sap.gateway import SapGateway
+from app.sap.mock_backend import MockSapSystem                                  # noqa: E402
 from app.sap.interfaces import VendorMatch                              # noqa: E402
 from app.sap.message_guard import MessageSuppressionError               # noqa: E402
 from app.services.batch_service import BatchProcessor, ProgressEvent    # noqa: E402
@@ -791,7 +792,8 @@ class TestBatchProcessor(unittest.TestCase):
         preview = self._prepare(offer)
         self.batch.run(offer, preview)
         contract_number = next(iter(self.gateway.mock_system.contracts))
-        rows = self.gateway.mock_system.source_lists["47110001|1000"]
+        rows = self.gateway.mock_system.source_lists[
+            MockSapSystem.sl_key("47110001", "1000")]
         row = next(r for r in rows if r["vendor_number"] == "0000100234")
         self.assertEqual(contract_number, row["agreement"])
 
@@ -799,7 +801,8 @@ class TestBatchProcessor(unittest.TestCase):
         offer = self._offer()
         preview = self._prepare(offer)
         self.batch.run(offer, preview)
-        record = self.gateway.mock_system.info_records["47110001|0000100234|1000|1000"]
+        record = self.gateway.mock_system.info_records[
+            MockSapSystem.ir_key("47110001", "0000100234", "1000", "1000")]
         self.assertEqual("12.85", record["price"])
 
     # ------------------------------------------------------------------
@@ -829,8 +832,9 @@ class TestBatchProcessor(unittest.TestCase):
 
         self.assertFalse(summary.aborted)
         self.assertIs(offer.positions[1].status, PositionStatus.SKIPPED)
-        self.assertNotIn("47119999|0000100234|1000|1000",
-                         self.gateway.mock_system.info_records)
+        self.assertNotIn(
+            MockSapSystem.ir_key("47119999", "0000100234", "1000", "1000"),
+            self.gateway.mock_system.info_records)
         self.assertIn("Übersprungen", offer.positions[1].result_text)
 
     def test_failed_contract_skips_dependent_purchase_order(self):
@@ -873,7 +877,8 @@ class TestBatchProcessor(unittest.TestCase):
         self.assertTrue(summary.dry_run)
         self.assertEqual({}, self.gateway.mock_system.contracts)
         self.assertEqual({}, self.gateway.mock_system.purchase_orders)
-        record = self.gateway.mock_system.info_records["47110001|0000100234|1000|1000"]
+        record = self.gateway.mock_system.info_records[
+            MockSapSystem.ir_key("47110001", "0000100234", "1000", "1000")]
         self.assertEqual("12.40", record["price"])
         self.assertTrue(preview.dry_run)
 

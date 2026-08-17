@@ -1175,5 +1175,189 @@ class RobustheitTests(TempDirCase):
                               "ein fehlendes Jahr darf nicht ergaenzt werden")
 
 
+# ==========================================================================
+# 7. Die schwierigen Beispieldateien
+# ==========================================================================
+
+def _beispiele():
+    """``sample_data/erzeuge_beispiele.py`` als Modul laden (kein Paket)."""
+    import importlib.util
+
+    pfad = Path(__file__).resolve().parent.parent / "sample_data" / "erzeuge_beispiele.py"
+    spec = importlib.util.spec_from_file_location("erzeuge_beispiele", pfad)
+    modul = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modul)
+    return modul
+
+
+class SchwierigeBeispieleTests(TempDirCase):
+    """Die harten Faelle aus ``sample_data`` -- ehrlich geprueft.
+
+    Diese Tests halten fest, was die Erkennung bei realistisch schwierigen
+    Angeboten wirklich leistet.  Sie behaupten bewusst *nicht*, dass alles
+    perfekt erkannt wird -- sie sichern, dass nichts erfunden und nichts
+    stillschweigend verschluckt wird.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.beispiele = _beispiele()
+
+    def _erzeuge(self, funktion, name: str) -> str:
+        pfad = Path(self.tmp) / name
+        funktion(pfad)
+        if not pfad.exists():
+            self.skipTest(f"{name} konnte nicht erzeugt werden (fehlende Bibliothek)")
+        return str(pfad)
+
+    def _import(self, funktion, name: str) -> Offer:
+        pfad = self._erzeuge(funktion, name)
+        service = OfferImportService(self.settings, InMemoryProfileStore())
+        return service.import_file(pfad)
+
+    # -- 1. PDF im Fliesstextstil ---------------------------------------
+    def test_B1_fliesstext_pdf_kopfdaten(self) -> None:
+        offer = self._import(self.beispiele.pdf_fliesstext, "fliesstext.pdf")
+        self.assertEqual(offer.offer_number, "AG-2026-3355")
+        self.assertEqual(offer.currency, "EUR")
+        self.assertIn("30 Tage netto", offer.payment_terms)
+
+    def test_B2_fliesstext_pdf_position_aus_dem_satz(self) -> None:
+        """"Fuer den Dichtring ..., Ihre Materialnummer 47110001, ... 12,85 EUR"."""
+        offer = self._import(self.beispiele.pdf_fliesstext, "fliesstext.pdf")
+        treffer = [p for p in offer.positions if p.material_number == "47110001"]
+        self.assertEqual(len(treffer), 1, [p.raw_text for p in offer.positions])
+        position = treffer[0]
+        self.assertEqual(position.price, Decimal("12.85"))
+        self.assertEqual(position.min_order_qty, Decimal("50"))
+        self.assertEqual(position.lead_time_days, 14)
+        self.assertIn("Dichtring", position.description)
+
+    def test_B3_fliesstext_pdf_auf_anfrage_erzeugt_keinen_preis(self) -> None:
+        """Ohne Betrag darf keine Position mit erfundenem Preis entstehen."""
+        offer = self._import(self.beispiele.pdf_fliesstext, "fliesstext.pdf")
+        for position in offer.positions:
+            if position.material_number == "48200111":
+                self.assertIsNone(position.price)
+
+    def test_B4_fliesstext_werte_sind_als_unsicher_gekennzeichnet(self) -> None:
+        offer = self._import(self.beispiele.pdf_fliesstext, "fliesstext.pdf")
+        self.assertTrue(offer.positions)
+        for position in offer.positions:
+            self.assertIn("price", position.uncertain_fields,
+                          "aus Fliesstext abgeleitete Preise sind zu pruefen")
+
+    # -- 2. Excel mit quer verteilten Kopfdaten -------------------------
+    def test_B5_kopfdaten_quer_verteilt(self) -> None:
+        offer = self._import(self.beispiele.excel_kopfdaten_quer, "quer.xlsx")
+        self.assertEqual(offer.offer_number, "ANG-2026-7788",
+                         "Angebotsnummer steht ganz rechts in H2")
+        self.assertEqual(offer.offer_date, datetime.date.today(),
+                         "Datum steht UNTER der Tabelle")
+        self.assertEqual(offer.currency, "EUR", "Waehrung nur in der Fusszeile")
+
+    def test_B6_kopfzeile_erst_in_zeile_12(self) -> None:
+        offer = self._import(self.beispiele.excel_kopfdaten_quer, "quer.xlsx")
+        self.assertEqual(len(offer.positions), 2, offer.extraction_notes)
+        self.assertEqual(offer.positions[0].material_number, "47110001")
+
+    def test_B7_umlaute_bleiben_erhalten(self) -> None:
+        offer = self._import(self.beispiele.excel_kopfdaten_quer, "quer.xlsx")
+        texte = " ".join(p.description for p in offer.positions)
+        self.assertIn("Öldichtring", texte)
+        self.assertIn("Meßstab", texte)
+
+    def test_B8_mengeneinheiten_werden_normalisiert(self) -> None:
+        """'Stk.' und 'Meter' muessen zu SAP-Einheiten werden."""
+        offer = self._import(self.beispiele.excel_kopfdaten_quer, "quer.xlsx")
+        einheiten = [p.uom for p in offer.positions]
+        self.assertIn("ST", einheiten)
+        self.assertIn("M", einheiten)
+
+    # -- 3. Staffelpreise ueber zwei Seiten -----------------------------
+    def test_B9_staffel_pdf_positionen_beider_seiten(self) -> None:
+        offer = self._import(self.beispiele.pdf_staffelpreise_zwei_seiten,
+                             "staffel.pdf")
+        nummern = {p.material_number for p in offer.positions}
+        self.assertIn("47110005", nummern, "Seite 1")
+        self.assertIn("47110004", nummern, "Seite 2")
+
+    def test_B10_staffelstufen_werden_eigene_positionen(self) -> None:
+        offer = self._import(self.beispiele.pdf_staffelpreise_zwei_seiten,
+                             "staffel.pdf")
+        staffeln = [p for p in offer.positions if "Staffel" in p.remarks]
+        self.assertGreaterEqual(len(staffeln), 3,
+                                "Staffeln duerfen nicht stillschweigend "
+                                "zusammengefasst werden")
+        preise = {p.price for p in offer.positions if p.material_number == "47110005"}
+        self.assertIn(Decimal("4.35"), preise)
+        self.assertIn(Decimal("4.10"), preise)
+
+    def test_B11_uebertrag_und_summe_sind_keine_positionen(self) -> None:
+        offer = self._import(self.beispiele.pdf_staffelpreise_zwei_seiten,
+                             "staffel.pdf")
+        texte = " ".join(p.description.lower() + p.raw_text.lower()
+                         for p in offer.positions)
+        self.assertNotIn("gesamtsumme", texte)
+        for position in offer.positions:
+            self.assertNotEqual(position.price, Decimal("15402.50"))
+
+    # -- 4. Vertauschte Spalten, englische Ueberschriften ---------------
+    def test_B12_englische_spalten_werden_richtig_zugeordnet(self) -> None:
+        """'Part No' ist SEINE Nummer, 'Customer Material' UNSERE."""
+        offer = self._import(self.beispiele.excel_vertauschte_spalten,
+                             "vertauscht.xlsx")
+        position = offer.positions[0]
+        self.assertEqual(position.material_number, "47110001")
+        self.assertEqual(position.vendor_material_number, "DR-40527-NBR")
+
+    def test_B13_gemischte_zahlenformate_in_einer_datei(self) -> None:
+        """1,234.56 (englisch) und 1.234,56 (deutsch) meinen dasselbe."""
+        offer = self._import(self.beispiele.excel_vertauschte_spalten,
+                             "vertauscht.xlsx")
+        mengen = [p.quantity for p in offer.positions[:2]]
+        self.assertEqual(mengen, [Decimal("1234.56"), Decimal("1234.56")])
+
+    def test_B14_auf_anfrage_bleibt_ohne_preis(self) -> None:
+        offer = self._import(self.beispiele.excel_vertauschte_spalten,
+                             "vertauscht.xlsx")
+        position = [p for p in offer.positions
+                    if p.material_number == "48200111"][0]
+        self.assertIsNone(position.price, "'auf Anfrage' darf keinen Preis erfinden")
+        self.assertIs(position.origin("price"), FieldOrigin.MISSING)
+
+    def test_B15_englische_einheiten_werden_normalisiert(self) -> None:
+        offer = self._import(self.beispiele.excel_vertauschte_spalten,
+                             "vertauscht.xlsx")
+        einheiten = [p.uom for p in offer.positions]
+        self.assertEqual(einheiten.count("ST"), 3, einheiten)
+        self.assertIn("M", einheiten)
+
+    # -- 5. Alle Beispieldateien entstehen ------------------------------
+    def test_B16_alle_beispieldateien_werden_erzeugt(self) -> None:
+        ziel = Path(self.tmp) / "erzeugt"
+        ziel.mkdir()
+        original = self.beispiele.ZIEL
+        try:
+            self.beispiele.ZIEL = ziel
+            self.beispiele.main()
+        finally:
+            self.beispiele.ZIEL = original
+        erwartet = (
+            "Angebot_Muster_Dichtungstechnik.xlsx",
+            "Preisliste_ohne_Kopfzeile.xlsx",
+            "Quotation_Nordtec_mit_Stoerfaellen.xlsx",
+            "Preisanpassung_Muster.eml",
+            "Preismitteilung.txt",
+            "Preisliste_Muster.csv",
+            "Angebot_Nordtec_mit_Anhang.eml",
+            "Angebot_Kopfdaten_quer_verteilt.xlsx",
+            "Mail_mit_Ergaenzungen_im_Text.eml",
+            "Quotation_vertauschte_Spalten.xlsx",
+        )
+        fehlend = [name for name in erwartet if not (ziel / name).exists()]
+        self.assertEqual(fehlend, [], f"nicht erzeugt: {fehlend}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -45,6 +45,160 @@ _NOT_FOUND_HINTS = (
 _DOC_NUMBER = re.compile(r"\b(\d{8,12})\b")
 
 
+# ---------------------------------------------------------------------------
+# Ruecklese-Pruefung
+# ---------------------------------------------------------------------------
+#
+# Warum es sie gibt: Die Statusleiste meldet "Infosatz gesichert", auch wenn
+# ein einzelnes Feld gar nicht uebernommen wurde -- weil es nicht eingabe-
+# bereit war, weil SAP still gerundet hat oder weil auf Detailebene eine
+# Berechtigung fehlte.  Erst der erneute Blick ueber die Anzeigetransaktion
+# ist ein Beweis.  Echtbetrieb und Testsystem verwenden dieselbe Pruefung,
+# damit sich beide identisch verhalten.
+
+def _decimal_display(value: Decimal | None) -> str:
+    from ..utils.parsing import format_decimal
+    return format_decimal(value) if value is not None else "kein Wert"
+
+
+def verify_info_record_write(record: SapInfoRecord, position: OfferPosition,
+                             context, settings) -> tuple[bool, list[str]]:
+    """Gelesenen Infosatz gegen den Sollzustand vergleichen.
+
+    Liefert ``(in_ordnung, meldungen)``.  Die Meldungen sind Klartext fuer den
+    Einkaeufer -- inklusive Hinweis, wo er in SAP nachsehen kann.
+    """
+    transaktion = settings.transactions.info_record_display
+    if record.read_error:
+        return False, [f"Ruecklese-Pruefung nicht moeglich: {record.read_error}"]
+    if not record.exists:
+        return False, [f"Ruecklese-Pruefung: SAP meldet 'gesichert', der Infosatz ist "
+                       f"aber nicht auffindbar -- bitte in {transaktion} pruefen."]
+
+    abweichungen: list[str] = []
+
+    # -- Preis (mit Toleranz, weil SAP im Bild rundet) -------------------
+    toleranz = Decimal(str(settings.sap.verify_price_tolerance or 0))
+    erwartet = position.price
+    if erwartet is not None:
+        if record.price is None:
+            abweichungen.append(f"SAP hat keinen Preis gespeichert, erwartet war "
+                                f"{_decimal_display(erwartet)}")
+        elif abs(record.price - erwartet) > toleranz:
+            abweichungen.append(f"SAP hat {_decimal_display(record.price)} gespeichert, "
+                                f"erwartet war {_decimal_display(erwartet)}")
+
+    # -- Preiseinheit ----------------------------------------------------
+    if position.price_unit and record.price_unit and \
+            int(record.price_unit) != int(position.price_unit):
+        abweichungen.append(f"Preiseinheit {record.price_unit} statt {position.price_unit}")
+
+    # -- Waehrung --------------------------------------------------------
+    if position.currency and record.currency and \
+            record.currency.upper() != position.currency.upper():
+        abweichungen.append(f"Waehrung {record.currency} statt {position.currency}")
+
+    # -- Gueltig bis -----------------------------------------------------
+    erwartetes_ende = getattr(context, "valid_to", None)
+    if erwartetes_ende and record.valid_to and record.valid_to != erwartetes_ende:
+        abweichungen.append(f"Gueltig bis {format_date(record.valid_to)} statt "
+                            f"{format_date(erwartetes_ende)}")
+
+    if abweichungen:
+        return False, ["Ruecklese-Pruefung fehlgeschlagen: " + "; ".join(abweichungen)
+                       + f" -- bitte in {transaktion} pruefen."]
+
+    bestaetigt = (f"{_decimal_display(record.price)} "
+                  f"{record.currency or position.currency}").strip()
+    if record.price_unit:
+        bestaetigt += f" / {record.price_unit}"
+    meldungen = [f"Ruecklese-Pruefung: Preis {bestaetigt} bestaetigt"]
+    if record.valid_to:
+        meldungen.append(f"Ruecklese-Pruefung: gueltig bis {format_date(record.valid_to)}")
+    return True, meldungen
+
+
+def verify_source_list_write(source_list, position: OfferPosition,
+                             settings) -> tuple[bool, list[str]]:
+    """Orderbuch nach dem Sichern erneut lesen und pruefen.
+
+    Entscheidend sind zwei Dinge, die in der Statusleiste nicht auftauchen:
+    Ist der Lieferant wirklich *aktiv* (nicht gesperrt) und ist eine
+    Gueltigkeit gesetzt?
+    """
+    transaktion = settings.transactions.source_list_display
+    if getattr(source_list, "read_error", ""):
+        return False, [f"Ruecklese-Pruefung nicht moeglich: {source_list.read_error}"]
+
+    gesucht = (position.vendor_number or "").lstrip("0")
+    eintrag = next((e for e in getattr(source_list, "entries", [])
+                    if (e.vendor_number or "").lstrip("0") == gesucht), None)
+    if eintrag is None:
+        return False, [f"Ruecklese-Pruefung: Lieferant {position.vendor_number} steht "
+                       f"nach dem Sichern nicht im Orderbuch -- bitte in "
+                       f"{transaktion} pruefen."]
+
+    abweichungen: list[str] = []
+    if settings.workflow.source_list_set_active and eintrag.blocked:
+        abweichungen.append("der Lieferant ist weiterhin gesperrt")
+    if not eintrag.valid_to:
+        abweichungen.append("es ist kein Gueltigkeitsende gesetzt")
+    if abweichungen:
+        return False, ["Ruecklese-Pruefung fehlgeschlagen: " + "; ".join(abweichungen)
+                       + f" -- bitte in {transaktion} pruefen."]
+    return True, [f"Ruecklese-Pruefung: Lieferant {position.vendor_number} aktiv, "
+                  f"gueltig bis {format_date(eintrag.valid_to)}"]
+
+
+def scale_levels_for(position: OfferPosition, settings) -> tuple[list[tuple[Decimal, Decimal]],
+                                                                 list[str]]:
+    """Zu schreibende Staffelstufen ermitteln (inklusive Kappung).
+
+    Mehr Stufen als ``max_scale_levels`` werden abgeschnitten -- aber niemals
+    stillschweigend: die Kappung steht als Meldung im Ergebnis.
+    """
+    stufen = position.sorted_scales()
+    meldungen: list[str] = []
+    grenze = max(1, int(settings.workflow.max_scale_levels or 1))
+    if len(stufen) > grenze:
+        entfallen = stufen[grenze:]
+        meldungen.append(
+            f"Staffel gekappt: {len(stufen)} Stufen erkannt, nur {grenze} geschrieben "
+            f"(Einstellung 'max_scale_levels'). Nicht geschrieben: "
+            + "; ".join(f"ab {_decimal_display(m)} -> {_decimal_display(p)}"
+                        for m, p in entfallen))
+        stufen = stufen[:grenze]
+    return stufen, meldungen
+
+
+#: Feld-IDs, ohne die eine Staffel nicht gepflegt werden kann
+SCALE_SELECTOR_KEYS = ("scale_quantity_cell", "scale_amount_cell")
+
+
+def unverified_scale_selectors(registry) -> list[str]:
+    """Welche Staffel-Feld-IDs sind (noch) nicht geprueft?
+
+    Leere Liste = die Staffel darf geschrieben werden.  Echtbetrieb und
+    Testsystem verwenden dieselbe Pruefung.
+    """
+    offen: list[str] = []
+    for key in SCALE_SELECTOR_KEYS:
+        if not registry.has("info_record_conditions", key):
+            offen.append(key)
+            continue
+        if not registry.get("info_record_conditions", key).verified:
+            offen.append(key)
+    return offen
+
+
+def scale_not_written_message(offen: list[str], settings) -> str:
+    """Einheitlicher Klartext, wenn die Staffel nicht geschrieben wurde."""
+    return ("Staffel nicht geschrieben: Feld-IDs ungeprueft ("
+            + ", ".join("info_record_conditions." + key for key in offen)
+            + "). Es wurde nur der Grundpreis gepflegt -- die Staffel bitte in "
+            + f"{settings.transactions.info_record_change} von Hand nachtragen.")
+
+
 class SapInfoRecordService(InfoRecordServiceBase):
     """Echte Infosatzpflege ueber SAP GUI Scripting."""
 
@@ -185,6 +339,23 @@ class SapInfoRecordService(InfoRecordServiceBase):
                 messages.append(status.display())
             number = self._extract_number(status.text) or existing.info_record_number
             position.created_info_record = number
+
+            # -- Beweis statt Statusleiste ------------------------------
+            if self.settings.sap.verify_after_write:
+                geprueft = self.read(position.material_number, position.vendor_number,
+                                     position.purchasing_org, position.plant)
+                in_ordnung, hinweise = verify_info_record_write(
+                    geprueft, position, context, self.settings)
+                messages.extend(hinweise)
+                if not in_ordnung:
+                    if self.settings.sap.verify_failure_is_error:
+                        return self._result(
+                            "info_record", ResultState.FAILED, hinweise[0],
+                            transaction=transaction, document_number=number,
+                            old_value=old_value, new_value=new_value,
+                            started_ms=started, sap_messages=messages)
+                    messages.append("Hinweis: Es wurde gesichert, die Ruecklese-Pruefung "
+                                    "ist aber nicht sauber -- bitte nachsehen.")
 
             return self._result(
                 "info_record", ResultState.SUCCESS,
@@ -364,6 +535,59 @@ class SapInfoRecordService(InfoRecordServiceBase):
         messages.append(f"Konditionen gueltig {format_date(valid_from)} – "
                         f"{format_date(valid_to) or 'offen'}")
 
+        self._write_scales(position, messages)
+
+    def _write_scales(self, position: OfferPosition, messages: list[str]) -> None:
+        """Mengenstaffel im Konditionsbild pflegen.
+
+        Sind die Staffel-Feld-IDs nicht geprueft, wird die Staffel NICHT
+        geschrieben.  Der Grundpreis steht dann trotzdem korrekt im Satz --
+        aber der Anwender erfaehrt es, statt es spaeter im Beleg zu merken.
+        """
+        if not self.settings.workflow.info_record_write_scales:
+            return
+        if not position.has_scales:
+            return
+
+        registry = self.selectors
+        connection = self.connection
+        ungeprueft = unverified_scale_selectors(registry)
+        if ungeprueft:
+            messages.append(scale_not_written_message(ungeprueft, self.settings))
+            logger.warning("Staffel fuer %s/%s uebersprungen: ungepruefte Feld-IDs",
+                           position.material_number, position.vendor_number)
+            return
+
+        stufen, hinweise = scale_levels_for(position, self.settings)
+        messages.extend(hinweise)
+
+        if registry.has("info_record_conditions", "scales_button"):
+            element_id = registry.id_for("info_record_conditions", "scales_button")
+            if connection.exists(element_id):
+                connection.press_button(element_id)
+                connection.raise_on_error_status("Wechsel ins Staffelbild")
+
+        geschrieben = 0
+        for row, (menge, preis) in enumerate(stufen):
+            mengen_id = registry.id_for("info_record_conditions", "scale_quantity_cell",
+                                        row=row)
+            betrag_id = registry.id_for("info_record_conditions", "scale_amount_cell",
+                                        row=row)
+            if not connection.exists(mengen_id) or not connection.exists(betrag_id):
+                messages.append(f"Staffel unvollstaendig: Zeile {row + 1} ist in SAP nicht "
+                                f"vorhanden -- bitte in "
+                                f"{self.settings.transactions.info_record_change} pruefen.")
+                break
+            connection.set_text(mengen_id, self._decimal_text(menge))
+            connection.set_text(betrag_id, self._decimal_text(preis))
+            geschrieben += 1
+
+        connection.send_vkey(0)
+        connection.raise_on_error_status("Staffel setzen")
+        if geschrieben:
+            messages.append(f"Mengenstaffel mit {geschrieben} Stufe(n) gepflegt: "
+                            f"{position.scale_display()}")
+
     # -- Lesehilfen ----------------------------------------------------
     def _read_general_screen(self, record: SapInfoRecord) -> None:
         connection = self.connection
@@ -474,6 +698,8 @@ class SapInfoRecordService(InfoRecordServiceBase):
             text += f", ab {format_date(context.valid_from)}"
         if context.valid_to:
             text += f" bis {format_date(context.valid_to)}"
+        if position.has_scales:
+            text += f" (Staffel: {position.scale_display()})"
         return text
 
     @staticmethod

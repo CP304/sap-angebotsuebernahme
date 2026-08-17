@@ -179,6 +179,48 @@ class PurchaseOrderPlan:
 
 
 # ---------------------------------------------------------------------------
+# Kontierung
+# ---------------------------------------------------------------------------
+
+def apply_account_assignment(item: DocumentItem, settings) -> None:
+    """Kontierung einer Bestellposition vorbelegen.
+
+    Was an der Position gepflegt ist, gewinnt immer.  Erst wenn dort nichts
+    steht, greift die Vorbelegung aus den Einstellungen.  Es wird nichts
+    erfunden: ist beides leer, bleibt das Feld leer -- die Position ist dann
+    eine Lagerbestellung ohne Kontierungsbild.
+    """
+    purchasing = settings.purchasing
+    if not item.account_assignment:
+        item.account_assignment = purchasing.account_assignment_category or ""
+    if not item.account_assignment:
+        return
+    if not item.cost_center:
+        item.cost_center = purchasing.default_cost_center or ""
+    if not item.gl_account:
+        item.gl_account = purchasing.default_gl_account or ""
+
+
+def validate_account_assignment(item: DocumentItem, settings) -> str:
+    """Kontierung pruefen, BEVOR etwas nach SAP geschrieben wird.
+
+    Liefert einen Klartext-Grund oder "" (in Ordnung).
+    """
+    category = (item.account_assignment or "").strip()
+    if not category:
+        return ""
+    label = item.material_number or item.description[:40] or "Position"
+    if settings.purchasing.require_gl_account_when_assigned and not item.gl_account:
+        return (f"Position {label}: Kontierungstyp '{category}' ist gesetzt, aber es "
+                f"fehlt das Sachkonto. Bitte Sachkonto pflegen oder die Kontierung "
+                f"entfernen -- ohne Sachkonto wird nicht bestellt.")
+    if category.upper() == "K" and not item.cost_center:
+        return (f"Position {label}: Kontierungstyp 'K' verlangt eine Kostenstelle, "
+                f"es ist aber keine hinterlegt.")
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Buendelung
 # ---------------------------------------------------------------------------
 

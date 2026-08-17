@@ -27,6 +27,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+from ...models.enums import FieldOrigin
 from ...models.offer import Offer
 from ...models.offer_position import TRACKED_FIELDS, OfferPosition
 from ...utils.parsing import (
@@ -285,6 +286,50 @@ def _learn_columns(original: Offer, corrected: Offer, document: RawDocument,
                 changed = True
                 logger.info("Gelernt: Spalte '%s' ist '%s' (Profil %s)",
                             header, field_name, profile.label)
+        changed |= _learn_material_confirmation(target, cells, profile, config, report)
+    return changed
+
+
+def _learn_material_confirmation(target: OfferPosition, cells: dict[str, str],
+                                 profile: VendorProfile, config: LearningConfig,
+                                 report: LearningReport) -> bool:
+    """Bestaetigte Artikelnummern-Rolle merken -- auch ohne Wertaenderung.
+
+    Der haeufigste Fall in der Praxis: die Heuristik hat den Wert *richtig*
+    uebernommen, aber nur unsicher ("Artikelnummer" kann beides sein).  Traegt
+    der Anwender ihn in genau dem Feld ein, in dem er ohnehin schon steht, ist
+    das keine Korrektur -- aber sehr wohl eine Aussage: *diese Spalte ist bei
+    diesem Lieferanten diese Nummer*.  Genau das wird hier festgehalten, damit
+    das naechste Angebot nicht wieder gelb markiert werden muss.
+
+    Gelernt wird ausschliesslich die Spaltenrolle, nie der Wert selbst.
+    """
+    changed = False
+    for field_name in _MATERIAL_FIELDS:
+        value = getattr(target, field_name, "")
+        if not value:
+            continue
+        if target.field_origins.get(field_name) is not FieldOrigin.MANUAL:
+            continue
+        header = _find_header_for_value(cells, value)
+        if not header:
+            report.observations.append(
+                f"Die bestaetigte Artikelnummer liess sich keiner Spalte zuordnen -- "
+                "es wird nichts gelernt.")
+            continue
+        if profile.material_column_role.get(header) == field_name:
+            continue
+        key = f"column_map:{header}={field_name}"
+        if _confirm(profile, key, config.column_map_confirmations, report):
+            profile.material_column_role[header] = field_name
+            profile.column_map[header] = field_name
+            _clear_opposite_role(profile, header, field_name)
+            report.observations.append(
+                f"Spalte '{header}' gilt bei diesem Lieferanten ab sofort als "
+                f"'{_MATERIAL_LABEL[field_name]}' (vom Anwender bestaetigt).")
+            changed = True
+            logger.info("Bestaetigt: Spalte '%s' ist '%s' (Profil %s)",
+                        header, field_name, profile.label)
     return changed
 
 

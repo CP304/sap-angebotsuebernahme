@@ -123,8 +123,41 @@ _TOTALS = re.compile(
     r"\b(?:summe|gesamt|total|zwischensumme|mwst|mehrwertsteuer|umsatzsteuer|vat|"
     r"netto\s+gesamt|rechnungsbetrag|versandkosten|frachtkosten)\b", re.I)
 
+#: Mindestbestellmenge im Fliesstext
+_MIN_ORDER = re.compile(
+    r"Mindest(?:bestell|abnahme)?menge\s*(?:von|betr(?:ae|ä)gt|:)?\s*"
+    r"(\d{1,3}(?:[.\s]\d{3})*|\d{1,7})",
+    re.I,
+)
+
+#: Lieferzeit im Fliesstext ("die Lieferzeit 14 Tage", "Lieferzeit: 21 Tage")
+_LEAD_TIME = re.compile(
+    r"Lieferzeit\s*(?:von|betr(?:ae|ä)gt|:)?\s*(\d{1,3})\s*(?:Arbeits|Werk)?tage?n?\b",
+    re.I,
+)
+
 #: Aufzaehlungszeichen am Zeilenanfang
 _BULLET = re.compile(r"^\s*(?:[-*•·–—o]|\d{1,3}[.)])\s+")
+
+#: Zeilenende, an dem ein Satz erkennbar zu Ende ist
+_SENTENCE_END = re.compile(r"[.!?:;]\s*$")
+
+#: Zeilenende, das erkennbar *nicht* das Satzende ist ("... bieten wir Ihnen
+#: bei" / "..., Ihre Materialnummer 47110001,").  Danach darf auch eine gross
+#: beginnende Folgezeile angehaengt werden.
+_HANGING_END = re.compile(
+    r"(?:,|\b(?:bei|und|oder|von|vom|der|die|das|den|dem|des|ein|eine|einen|"
+    r"einem|einer|im|in|mit|zu|zum|zur|auf|an|am|f(?:ue|ü)r|je|pro|per|bis|ab|"
+    r"nach|(?:ue|ü)ber|unter|sowie|wir|Ihnen|Ihre|unsere)\s*)$", re.I)
+
+#: "Fuer den Dichtring NBR 40x52x7, Ihre Materialnummer ..." -- die Bezeichnung
+#: steht am Satzanfang und endet am ersten Komma.
+_ITEM_FOR = re.compile(
+    r"\bf(?:ue|ü)r\s+(?:den|die|das|dem)\s+(?P<name>[^,]{3,60}),", re.I)
+
+#: "Den O-Ring Viton 25x3, Ihre Materialnummer 47110002, liefern wir zu ..."
+_ITEM_LEAD = re.compile(
+    r"^(?:den|die|das)\s+(?P<name>[^,]{3,60}),", re.I)
 
 _MAX_LINE_LENGTH = 300
 
@@ -170,7 +203,7 @@ class FreetextExtractor:
                      source_label: str = "Freitext") -> FreetextResult:
         positions: list[OfferPosition] = []
         notes: list[str] = []
-        lines = text.splitlines()
+        lines = _reflow(text.splitlines())
         used_lines: set[int] = set()
 
         for index, raw_line in enumerate(lines):
@@ -258,6 +291,23 @@ class FreetextExtractor:
                 position.set_field("price_unit", unit, FieldOrigin.UNCERTAIN)
                 consumed.append(unit_match.span())
 
+        # Mindestbestellmenge und Lieferzeit stehen in Angebotsschreiben oft im
+        # selben Satz wie der Preis ("... die Mindestbestellmenge betraegt 50
+        # Stueck, die Lieferzeit 14 Tage.").
+        min_match = _MIN_ORDER.search(line)
+        if min_match:
+            minimum = parse_number(min_match.group(1), self.decimal_style)
+            if minimum is not None and minimum > 0:
+                position.set_field("min_order_qty", minimum, FieldOrigin.UNCERTAIN)
+                consumed.append(min_match.span())
+
+        lead_match = _LEAD_TIME.search(line)
+        if lead_match:
+            days = parse_int(lead_match.group(1))
+            if days is not None and days > 0:
+                position.set_field("lead_time_days", days, FieldOrigin.UNCERTAIN)
+                consumed.append(lead_match.span())
+
         date_match = _VALID_FROM.search(line)
         if date_match:
             valid_from = parse_date(date_match.group(1))
@@ -336,8 +386,10 @@ class FreetextExtractor:
 
     def _find_description(self, line: str, consumed: list[tuple[int, int]]) -> str:
         """Beschreibung ableiten -- bevorzugt aus 'Preis fuer <X> ...'."""
-        named = _PRICE_FOR.search(line)
-        if named:
+        for pattern in (_PRICE_FOR, _ITEM_FOR, _ITEM_LEAD):
+            named = pattern.search(line)
+            if not named:
+                continue
             candidate = normalize_whitespace(named.group("name")).strip(" .,;:-")
             if len(candidate) >= 3:
                 return candidate[:80]
@@ -486,3 +538,42 @@ class FreetextExtractor:
 
 def _overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
     return a[0] < b[1] and b[0] < a[1]
+
+
+def _reflow(lines: list[str]) -> list[str]:
+    """Umbrochene Saetze wieder zusammensetzen.
+
+    In PDF-Angeboten steht der entscheidende Satz oft ueber drei Zeilen::
+
+        Fuer den Dichtring NBR 40x52x7, Ihre Materialnummer 47110001, bieten wir
+        Ihnen bei Abnahme von 500 Stueck einen Preis von 12,85 EUR je Stueck an.
+
+    Zeilenweise gelesen faende die Erkennung den Preis ohne Materialnummer --
+    und damit eine Position, die niemandem hilft.  Angehaengt wird nur sehr
+    zurueckhaltend: die Vorzeile darf nicht mit einem Satzzeichen enden, und
+    die Folgezeile muss klein anfangen.  Ein Aufzaehlungspunkt oder ein
+    Grossbuchstabe beginnt einen neuen Gedanken und bleibt eigenstaendig.
+
+    Die Liste behaelt ihre Laenge: der zusammengesetzte Satz steht an der
+    Stelle der *ersten* Zeile, die aufgenommenen Zeilen werden leer.  So
+    bleiben die Zeilennummern im ``source_hint`` nachvollziehbar.
+    """
+    out = list(lines)
+    for index in range(len(out) - 1):
+        current = out[index].strip()
+        if not current or _SENTENCE_END.search(current):
+            continue
+        offset = index + 1
+        while offset < len(out):
+            follower = out[offset].strip()
+            if not follower or _BULLET.match(out[offset]):
+                break
+            if not follower[0].islower() and not _HANGING_END.search(current):
+                break
+            current = f"{current} {follower}"
+            out[index] = current
+            out[offset] = ""
+            if _SENTENCE_END.search(current):
+                break
+            offset += 1
+    return out

@@ -31,6 +31,7 @@ from ..models.issue import Issue
 from ..models.offer import Offer
 from ..models.offer_position import OfferPosition
 from ..utils.parsing import normalize_uom
+from .extraction.email_merge import apply_email_header, apply_email_supplements
 from .extraction.freetext_extractor import FreetextExtractor
 from .extraction.header_rules import apply_header_matches, extract_header_fields, \
     label_value_text, missing_header_note
@@ -73,6 +74,8 @@ class OfferImportService:
         self.registry = ReaderRegistry(settings.extraction)
         self._last_document: RawDocument | None = None
         self._last_profile: VendorProfile | None = None
+        #: Mails, deren Text erst nach dem Anhang ausgewertet wird
+        self._deferred: list[tuple[RawDocument, str]] = []
 
     # ------------------------------------------------------------------
     # Auskunft
@@ -162,18 +165,89 @@ class OfferImportService:
     # ------------------------------------------------------------------
     def _process_documents(self, documents: list[RawDocument], offer: Offer) -> None:
         raw_parts: list[str] = []
+        # Mailtexte, deren Auswertung zurueckgestellt wird, weil erst der Anhang
+        # feststehen muss (siehe _finish_deferred).
+        self._deferred: list[tuple[RawDocument, str]] = []
+        merge = self.settings.extraction.merge_email_and_attachment
+        has_other_files = any(d.email is None for d in documents)
 
         for document in documents:
             offer.source_kind = _merge_source_kind(offer.source_kind, document.source_kind)
             if document.email is not None and offer.email is None:
                 offer.email = document.email
             raw_parts.append(document.all_text())
-            self._process_one(document, offer, prefix="")
+            defer = bool(merge and document.email is not None
+                         and (document.attachments or has_other_files))
+            self._process_one(document, offer, prefix="", defer_email=defer)
 
+        self._finish_deferred(offer)
         offer.raw_text = "\n\n".join(p for p in raw_parts if p)[:_MAX_RAW_TEXT]
         self._postprocess(offer)
 
-    def _process_one(self, document: RawDocument, offer: Offer, prefix: str) -> None:
+    # ------------------------------------------------------------------
+    def _finish_deferred(self, offer: Offer) -> None:
+        """Mailtexte auswerten, nachdem die Anhaenge gelesen sind.
+
+        Liegen Positionen aus dem Anhang (oder einer zweiten Datei) vor, wird
+        der Mailtext als *Ergaenzung* dazu verstanden -- Kopfdaten und
+        Positionsangaben werden zusammengefuehrt.  Gibt es keine, bleibt es
+        beim bisherigen Verhalten: der Mailtext ist dann selbst die Quelle der
+        Positionen.
+        """
+        deferred, self._deferred = getattr(self, "_deferred", []), []
+        for document, header_text in deferred:
+            matches = extract_header_fields(header_text, document.email,
+                                            source=document.display_name)
+            base = [p for p in offer.positions
+                    if p.source_kind is not SourceKind.EMAIL_BODY]
+            body = (document.email.body_text if document.email is not None
+                    else document.text)
+            if not base:
+                # Kein Anhang, kein zweites Dokument, keine Positionen: die Mail
+                # steht fuer sich -- also der gewohnte Ablauf.
+                apply_header_matches(offer, matches)
+                self._freetext_positions(document, offer)
+                continue
+
+            for note in apply_email_header(offer, matches, self.settings,
+                                           source="Mailtext"):
+                offer.add_note(note)
+            if self.settings.extraction.apply_email_supplements:
+                notes = apply_email_supplements(offer, body, self.settings,
+                                                source="Mailtext")
+                for note in notes:
+                    offer.add_note(note)
+                if notes:
+                    offer.add_note(
+                        f"Mail und Anhang wurden zu EINEM Angebot zusammengefuehrt: "
+                        f"{len(notes)} Angabe(n) aus dem Mailtext uebernommen -- "
+                        "die betroffenen Positionen sind im Herkunftshinweis "
+                        "entsprechend gekennzeichnet.")
+            else:
+                offer.add_note("Ergaenzungen aus dem Mailtext wurden laut Einstellung "
+                               "nicht angewendet (apply_email_supplements = aus).")
+
+    def _freetext_positions(self, document: RawDocument, offer: Offer) -> None:
+        """Positionen aus dem Fliesstext eines Dokuments nachtragen."""
+        if not self.settings.extraction.enable_freetext_positions:
+            return
+        profile = self._last_profile
+        freetext = FreetextExtractor(
+            self.settings,
+            decimal_style=(profile.decimal_style if profile else "auto"))
+        result = freetext.extract(document)
+        for note in result.notes:
+            offer.add_note(f"{document.display_name}: {note}")
+        if not result.positions:
+            return
+        self._check_material_roles(offer, result.positions)
+        for position in result.positions:
+            self._attach_position(offer, position, document, prefix="")
+        offer.add_note(f"{document.display_name}: {len(result.positions)} Position(en) "
+                       "aus Fliesstext abgeleitet (bitte pruefen).")
+
+    def _process_one(self, document: RawDocument, offer: Offer, prefix: str,
+                     defer_email: bool = False) -> None:
         """Ein Dokument (inkl. seiner Anhaenge) in das Angebot uebernehmen."""
         for warning in document.warnings:
             offer.issues.add(Issue("reader_warning", warning, IssueSeverity.WARNING,
@@ -198,10 +272,13 @@ class OfferImportService:
             profile.sample_count += 1
             apply_profile(profile, document, offer)
 
-        # 2. Kopfdaten
-        matches = extract_header_fields(header_text, document.email,
-                                        source=document.display_name)
-        apply_header_matches(offer, matches)
+        # 2. Kopfdaten.  Bei einer Mail mit Anhang wird das zurueckgestellt:
+        #    erst muss feststehen, was im Anhang steht, sonst laesst sich
+        #    "die Mail gewinnt bei Widerspruch" gar nicht entscheiden.
+        if not defer_email:
+            matches = extract_header_fields(header_text, document.email,
+                                            source=document.display_name)
+            apply_header_matches(offer, matches)
 
         # 3. Positionen aus Tabellen
         table_extractor = TableExtractor(self.settings, profile)
@@ -214,7 +291,7 @@ class OfferImportService:
                            f"aus Tabellenstruktur erkannt.")
 
         # 4. Freitext -- nur wenn die Tabellenerkennung zu wenig geliefert hat
-        if (len(positions) < _FREETEXT_THRESHOLD
+        if (not defer_email and len(positions) < _FREETEXT_THRESHOLD
                 and self.settings.extraction.enable_freetext_positions):
             freetext = FreetextExtractor(
                 self.settings,
@@ -239,6 +316,10 @@ class OfferImportService:
         for attachment in document.attachments:
             name = attachment.meta.get("attachment_name") or attachment.display_name
             self._process_attachment(attachment, offer, name)
+
+        # 6. Zurueckgestellte Mail vormerken (siehe _finish_deferred)
+        if defer_email:
+            self._deferred.append((document, header_text))
 
     def _process_attachment(self, document: RawDocument, offer: Offer,
                             name: str) -> None:

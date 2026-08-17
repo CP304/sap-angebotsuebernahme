@@ -186,6 +186,30 @@ def main() -> int:
         _aufnehmen(app, ergebnis, "09_ergebnis")
         ergebnis.close()
 
+    # -- Mail mit Ergaenzungen im Text ----------------------------------
+    # Der Alltagsfall: Preistabelle im Anhang, die entscheidenden Zusaetze
+    # ("Position 30 entfaellt", "Mindestmenge 500") stehen im Mailtext.
+    mail = BEISPIELE / "Mail_mit_Ergaenzungen_im_Text.eml"
+    if mail.exists() and services.import_service is not None:
+        try:
+            zusammengefuehrt = services.import_service.import_file(str(mail))
+            fenster._offer_loaded(zusammengefuehrt)
+            for position in zusammengefuehrt.positions:
+                if position.material_number and position.vendor_number:
+                    services.gateway.load_position_state(position)
+            if services.comparison:
+                services.comparison.compare_offer(zusammengefuehrt)
+            if services.validation:
+                services.validation.validate_offer(zusammengefuehrt)
+            fenster.table_model.refresh_all()
+            fenster._update_counters()
+            if zusammengefuehrt.positions:
+                fenster.details.set_position(zusammengefuehrt.positions[0])
+            _warten(app)
+            _aufnehmen(app, fenster, "18_mail_mit_anhang_zusammengefuehrt")
+        except Exception as fehler:  # noqa: BLE001
+            print(f"  [uebersprungen] Mail-Ansicht: {fehler}")
+
     # -- Auffang 1: Tabelle einfuegen -----------------------------------
     tabelle = TableImportDialog(settings, "Muster Dichtungstechnik GmbH", fenster)
     tabelle.set_grid(TableImportDialog._parse_text(

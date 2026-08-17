@@ -65,6 +65,15 @@ class OfferPosition:
     valid_from: date | None = None
     remarks: str = ""
 
+    #: Mengenstaffel: Liste aus (ab-Menge, Preis), aufsteigend nach ab-Menge.
+    #: Die niedrigste Ab-Menge ist zugleich der Grundpreis (``price``).  Die
+    #: Liste bleibt leer, solange das Angebot keine Staffel nennt -- es wird
+    #: niemals eine Staffel erfunden.
+    scale_quantities: list[tuple[Decimal, Decimal]] = field(default_factory=list)
+    #: uids der Positionen, die zu dieser Staffel zusammengefasst wurden.
+    #: Dient allein der Nachvollziehbarkeit im Ergebnis.
+    merged_scale_uids: list[int] = field(default_factory=list)
+
     # -- Zuordnung -------------------------------------------------------
     vendor_number: str = ""        # aufgeloester SAP-Lieferant (Kopf oder Position)
     purchasing_org: str = ""
@@ -135,6 +144,25 @@ class OfferPosition:
     def key(self) -> tuple[str, str, str, str]:
         """Fachlicher Schluessel: Material / Lieferant / EKorg / Werk."""
         return (self.material_number, self.vendor_number, self.purchasing_org, self.plant)
+
+    @property
+    def has_scales(self) -> bool:
+        """Traegt diese Position eine echte Mengenstaffel (mehr als eine Stufe)?"""
+        return len(self.scale_quantities) > 1
+
+    def sorted_scales(self) -> list[tuple[Decimal, Decimal]]:
+        """Staffel aufsteigend nach Ab-Menge, ohne doppelte Stufen."""
+        gesehen: dict[Decimal, Decimal] = {}
+        for menge, preis in self.scale_quantities:
+            if menge is None or preis is None:
+                continue
+            gesehen.setdefault(Decimal(menge), Decimal(preis))
+        return sorted(gesehen.items(), key=lambda eintrag: eintrag[0])
+
+    def scale_display(self) -> str:
+        """Staffel als lesbarer Text fuer Vorschau und Protokoll."""
+        return "; ".join(f"ab {format_decimal(menge, 3)}: {format_decimal(preis)}"
+                         for menge, preis in self.sorted_scales())
 
     @property
     def old_price(self) -> Decimal | None:

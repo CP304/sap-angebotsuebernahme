@@ -80,14 +80,55 @@ FALLBACK_OWN_PATTERN = r"^\d{6,18}$"
 # Muster und Ueberschriften
 # --------------------------------------------------------------------------
 
+def _is_balanced(pattern: str) -> bool:
+    """Sind Klammern und geschweifte Klammern im Muster paarweise geschlossen?
+
+    Python nimmt ``^\\d{6,18`` klaglos an und deutet ``{6,18`` als *Text* -- das
+    Muster trifft dann nie etwas, und die Erkennung waere still kaputt.  Ein
+    offensichtlicher Tippfehler in der Konfiguration soll aber auffallen und
+    zum Auslieferungszustand zuruecklaufen, statt lautlos alles zu verwerfen.
+    """
+    pairs = {")": "(", "]": "[", "}": "{"}
+    stack: list[str] = []
+    escaped = False
+    in_class = False
+    for char in pattern:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if in_class:
+            if char == "]":
+                in_class = False
+                if not stack or stack.pop() != "[":
+                    return False
+            continue
+        if char == "[":
+            in_class = True
+            stack.append(char)
+        elif char in "({":
+            stack.append(char)
+        elif char in ")}":
+            if not stack or stack.pop() != pairs[char]:
+                return False
+    return not stack and not in_class
+
+
 def compile_own_pattern(pattern: str) -> re.Pattern[str]:
     """Muster fuer die eigene Materialnummer uebersetzen.
 
     Ein kaputtes Muster aus der Konfiguration darf den Import nicht stoppen --
     dann greift der Auslieferungszustand, und das steht im Protokoll.
     """
+    text = pattern or FALLBACK_OWN_PATTERN
+    if not _is_balanced(text):
+        logger.error("Muster fuer die eigene Materialnummer ist unvollstaendig (%r) -- "
+                     "es wird %r verwendet", pattern, FALLBACK_OWN_PATTERN)
+        return re.compile(FALLBACK_OWN_PATTERN)
     try:
-        return re.compile(pattern or FALLBACK_OWN_PATTERN)
+        return re.compile(text)
     except re.error as exc:
         logger.error("Ungueltiges Muster fuer die eigene Materialnummer (%r): %s -- "
                      "es wird %r verwendet", pattern, exc, FALLBACK_OWN_PATTERN)
@@ -185,9 +226,13 @@ def resolve_position_roles(position: OfferPosition, own_re: re.Pattern[str],
 
 #: "Ihre Materialnummer 47110001", "Kundenartikelnummer: 47110001",
 #: "unter Ihrer Art.-Nr. 47110001", "Customer part 47110001"
+#: Die Reihenfolge der Alternativen ist bedeutsam: Python nimmt die *erste*
+#: passende.  Stuende "art" vor "artikel", bliebe von "Artikelnummer" der Rest
+#: "ikelnummer" stehen -- und genau der landete dann als Artikelnummer in der
+#: Position.  Deshalb immer das laengere Wort zuerst.
 _CUSTOMER_LABELLED = re.compile(
-    r"(?:"
-    r"ihre?r?\s*(?:art|artikel|material|mat|teile?|sach|bestell|zeichnungs)"
+    r"\b(?:"
+    r"ihre?r?\s*(?:artikel|material|teile?|sach|bestell|zeichnungs|art|mat)"
     r"[\s.\-]{0,3}(?:nummer|nr|no)?"
     r"|kunden[\s.\-]?(?:artikel|material|teile?|sach|bestell)?"
     r"[\s.\-]{0,3}(?:nummer|nr|no)"
@@ -202,8 +247,8 @@ _CUSTOMER_LABELLED = re.compile(
 
 #: "unsere Artikelnummer DR-40527", "our part no. X-12", "Hersteller-Nr. ABC"
 _SUPPLIER_LABELLED = re.compile(
-    r"(?:"
-    r"unsere?r?\s*(?:art|artikel|material|mat|sach|teile?|bestell)"
+    r"\b(?:"
+    r"unsere?r?\s*(?:artikel|material|sach|teile?|bestell|art|mat)"
     r"[\s.\-]{0,3}(?:nummer|nr|no)?"
     r"|(?:lieferanten|hersteller)[\s.\-]?(?:artikel|material|teile?)?"
     r"[\s.\-]{0,3}(?:nummer|nr|no)"

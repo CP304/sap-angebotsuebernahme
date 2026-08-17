@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from .email_merge import (
+    MAIL_SOURCE_MARK,
+    apply_email_header,
+    apply_email_supplements,
+    mail_segments,
+)
 from .freetext_extractor import FreetextExtractor, FreetextResult
 from .header_rules import (
     HEADER_RULES,
@@ -47,6 +53,10 @@ from .table_extractor import (
 )
 
 __all__ = [
+    "MAIL_SOURCE_MARK",
+    "apply_email_header",
+    "apply_email_supplements",
+    "mail_segments",
     "CUSTOMER_MARKERS",
     "SUPPLIER_MARKERS",
     "compile_own_pattern",

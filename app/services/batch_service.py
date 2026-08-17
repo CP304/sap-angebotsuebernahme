@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Callable
 
 from ..config.settings import Settings
@@ -127,6 +127,10 @@ class _Run:
     contract_units: list[ContractPlan] = field(default_factory=list)
     source_units: list[OfferPosition] = field(default_factory=list)
     order_units: list[PurchaseOrderPlan] = field(default_factory=list)
+
+    #: Zu einer Mengenstaffel zusammengefasste Positionen:
+    #: uid der eingesparten Position -> Klartext fuer das Protokoll
+    scale_notes: dict[int, str] = field(default_factory=dict)
 
     done: set[tuple[str, int]] = field(default_factory=set)
     blocked_uids: set[int] = field(default_factory=set)
@@ -240,13 +244,87 @@ class BatchProcessor:
                             if p.do_source_list and p.source_list_action in
                             (SourceListAction.CREATE, SourceListAction.UPDATE)]
         run.order_units = list(run.preview.purchase_order_plans)
+        self._merge_scale_positions(run)
         run.total = (len(run.info_units) + len(run.contract_units)
                      + len(run.source_units) + len(run.order_units))
+
+    # ------------------------------------------------------------------
+    # Mengenstaffeln
+    # ------------------------------------------------------------------
+    def _merge_scale_positions(self, run: _Run) -> None:
+        """Staffelpreise zu EINER Infosatz-Position zusammenfassen.
+
+        Die Erkennung liefert Staffelpreise als eigene Zeilen: gleiches
+        Material, gleicher Lieferant, gleiche EKorg, gleiches Werk -- nur
+        Menge und Preis unterscheiden sich.  Wuerde man das so verarbeiten,
+        ueberschriebe jede Zeile den Preis der vorherigen; im Infosatz bliebe
+        zufaellig die letzte stehen.
+
+        Deshalb wird hier zusammengefasst: die Position mit der *niedrigsten*
+        Ab-Menge fuehrt (ihr Preis ist der Grundpreis), die uebrigen werden
+        als Staffelstufen angehaengt und nicht noch einmal verarbeitet.
+        Kontrakt und Bestellung bleiben unberuehrt -- dort sind es weiterhin
+        eigenstaendige Positionen.
+        """
+        if not self.settings.workflow.info_record_write_scales:
+            return
+
+        gruppen: dict[tuple[str, str, str, str], list[OfferPosition]] = {}
+        for position in run.info_units:
+            if not position.material_number or not position.vendor_number:
+                continue
+            gruppen.setdefault(position.key, []).append(position)
+
+        eingespart: set[int] = set()
+        for schluessel, mitglieder in gruppen.items():
+            if len(mitglieder) < 2:
+                continue
+            # Ohne Menge oder Preis laesst sich keine Staffel bilden -- dann
+            # wird lieber nichts zusammengefasst als etwas geraten.
+            if any(p.quantity is None or p.price is None for p in mitglieder):
+                logger.info("Positionen zu %s nicht zur Staffel zusammengefasst: "
+                            "Menge oder Preis fehlt.", schluessel[0])
+                continue
+            mengen = [p.quantity for p in mitglieder]
+            if len(set(mengen)) != len(mengen):
+                logger.info("Positionen zu %s nicht zur Staffel zusammengefasst: "
+                            "gleiche Ab-Mengen.", schluessel[0])
+                continue
+
+            sortiert = sorted(mitglieder, key=lambda p: p.quantity)
+            fuehrend = sortiert[0]
+            fuehrend.scale_quantities = [(p.quantity, p.price) for p in sortiert]
+            fuehrend.price = sortiert[0].price          # Grundpreis = kleinste Menge
+            fuehrend.merged_scale_uids = [p.uid for p in sortiert[1:]]
+
+            for position in sortiert[1:]:
+                eingespart.add(position.uid)
+                run.scale_notes[position.uid] = (
+                    f"Zur Mengenstaffel von Position "
+                    f"{fuehrend.position_number or fuehrend.uid} zusammengefasst "
+                    f"(Material {fuehrend.material_number}): ab "
+                    f"{position.quantity} zu {position.price}. Der Infosatz wird "
+                    f"einmal mit der kompletten Staffel gepflegt.")
+            logger.info("Mengenstaffel gebildet fuer %s/%s: %s", fuehrend.material_number,
+                        fuehrend.vendor_number, fuehrend.scale_display())
+
+        if eingespart:
+            run.info_units = [p for p in run.info_units if p.uid not in eingespart]
 
     # ------------------------------------------------------------------
     # 1. Infosaetze
     # ------------------------------------------------------------------
     def _phase_info_records(self, run: _Run) -> None:
+        # Zusammengefasste Positionen zuerst sichtbar machen -- es darf
+        # nichts kommentarlos verschwinden.
+        for uid, hinweis in run.scale_notes.items():
+            position = run.positions.get(uid)
+            if position is None:
+                continue
+            self._record(run, position, ActionResult(
+                action="info_record", state=ResultState.SKIPPED, message=hinweis,
+            ), "info_record", advance=False)
+
         for position in run.info_units:
             key = ("info_record", position.uid)
             if key in run.done:
@@ -301,6 +379,8 @@ class BatchProcessor:
                 run.index += 1
                 continue
 
+            reuse_note = self._reuse_existing_contract(plan)
+
             context = self.gateway.write_context(valid_from=plan.valid_from,
                                                  valid_to=plan.valid_to)
             try:
@@ -316,6 +396,8 @@ class BatchProcessor:
             except SapError as exc:
                 result = self._failure("contract", exc)
 
+            if reuse_note:
+                result.sap_messages.insert(0, reuse_note)
             run.summary.document_results.append(result)
             number = plan.document_number or result.document_number
             if result.ok:
@@ -328,6 +410,56 @@ class BatchProcessor:
                     run.contract_failed_uids.add(item.position_uid)
 
             self._record_plan(run, plan, result, "contract", number)
+
+    def _reuse_existing_contract(self, plan: ContractPlan) -> str:
+        """Vor der Neuanlage nach einem laufenden Kontrakt suchen.
+
+        Gefunden -> der Beleg wird erweitert (ME32K), die Kopfdaten des
+        Bestandskontrakts bleiben unangetastet.  Nicht gefunden oder Suche
+        nicht moeglich -> Neuanlage wie bisher, mit Protokolleintrag.  Es
+        wird nie geraten: eine unsichere Suche fuehrt zur Neuanlage, nicht
+        zu einem falschen Belegbezug.
+        """
+        workflow = self.settings.workflow
+        if not workflow.contract_reuse_existing or plan.existing_contract_number:
+            return ""
+        finder = getattr(self.gateway.contracts, "find_existing_contract", None)
+        if finder is None:
+            return ""
+
+        document_type = (workflow.contract_search_document_type
+                         or plan.document_type
+                         or self.settings.purchasing.contract_document_type)
+        min_valid_to = date.today() + timedelta(
+            days=max(0, int(workflow.contract_min_remaining_days or 0)))
+        try:
+            number = finder(plan.vendor_number, plan.purchasing_org, document_type,
+                            min_valid_to)
+        except Exception as exc:  # noqa: BLE001 - Suche darf den Lauf nie killen
+            logger.warning("Kontraktsuche fehlgeschlagen (%s) -- es wird neu angelegt.", exc)
+            return ("Kontraktsuche nicht moeglich -- es wurde ein neuer Kontrakt "
+                    f"angelegt. Grund: {exc}")
+
+        if not number:
+            if not self.gateway.is_mock and not self.gateway.selectors.is_ready_for(
+                    "contract_search"):
+                # Ehrlich bleiben: es wurde gar nicht gesucht.
+                logger.info("Kontraktsuche nicht ausgefuehrt: Maske 'contract_search' "
+                            "ist ungeprueft.")
+                return ("Es wurde NICHT nach einem bestehenden Kontrakt gesucht: die "
+                        "Feld-IDs der Maske 'contract_search' sind ungeprueft. Es "
+                        "wurde ein neuer Kontrakt angelegt.")
+            logger.info("Kein passender Bestandskontrakt zu Lieferant %s/%s gefunden.",
+                        plan.vendor_number, plan.purchasing_org)
+            return ("Kein laufender Kontrakt mit ausreichender Restlaufzeit gefunden "
+                    "-- es wird ein neuer angelegt.")
+
+        plan.existing_contract_number = number
+        logger.info("Bestehender Kontrakt %s wird erweitert (Lieferant %s).",
+                    number, plan.vendor_number)
+        return (f"Bestehender Kontrakt {number} gefunden -- die Positionen werden "
+                f"angehaengt ({self.settings.transactions.contract_change}), die "
+                f"Laufzeit des Bestandskontrakts bleibt unveraendert.")
 
     # ------------------------------------------------------------------
     # 3. Orderbuch
