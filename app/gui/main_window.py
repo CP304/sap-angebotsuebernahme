@@ -43,6 +43,7 @@ from ..models.enums import FieldOrigin, PositionStatus
 from ..models.offer import Offer
 from ..models.offer_position import OfferPosition
 from ..sap.gateway import SapGateway
+from ..services.queue_service import OfferQueue
 from ..utils.logging_setup import GuiLogHandler
 from ..utils.parsing import format_date
 from .dialogs import (
@@ -60,6 +61,7 @@ from .history_view import HistoryView
 from .mapping_view import MappingView
 from .offer_table import POSITION_ROLE, OfferFilterProxy, OfferTableModel, OfferTableView
 from .position_details import PositionDetails
+from .queue_bar import QueueBar
 from .selector_view import SelectorView
 from .settings_view import SettingsView
 from .table_import_dialog import TableImportDialog
@@ -89,6 +91,8 @@ class MainWindow(QMainWindow):
         self.startup_problems: list[str] = services.get("problems", [])
 
         self.offer: Offer | None = None
+        self.queue = OfferQueue()
+        self._queue_index_loading: int = -1
         self._offer_before_edits: Offer | None = None
         self._worker = None
 
@@ -361,6 +365,13 @@ class MainWindow(QMainWindow):
         self.proxy = OfferFilterProxy(self)
         self.proxy.setSourceModel(self.table_model)
 
+        self.queue_bar = QueueBar()
+        self.queue_bar.entrySelected.connect(self._queue_entry_selected)
+        self.queue_bar.skipRequested.connect(self._skip_current_queue_entry)
+        self.queue_bar.nextRequested.connect(
+            lambda: self._load_next_from_queue(force=False))
+        self.queue_bar.clearRequested.connect(self._clear_queue)
+        layout.addWidget(self.queue_bar)
         layout.addWidget(self._build_header_card())
         layout.addWidget(self._build_selection_bar())
 
@@ -599,16 +610,144 @@ class MainWindow(QMainWindow):
             self.open_offers(paths)
 
     def open_offers(self, paths: list[str]) -> None:
+        """Angebote oeffnen.
+
+        Bei mehreren Dateien ist die entscheidende Frage, ob es sich um *ein*
+        Angebot handelt (Anschreiben plus Preisliste) oder um mehrere
+        eigenstaendige, die nacheinander abzuarbeiten sind.  Das kann die
+        Anwendung nicht wissen -- also fragt sie, statt zu raten.
+        """
         if self.import_service is None:
             show_error(self, "Import nicht verfuegbar",
                        "Die Erkennungskomponente konnte nicht geladen werden.")
             return
+
+        if len(paths) > 1 and self.settings.ui.ask_batch_or_merge:
+            als_stapel = self._ask_batch_or_merge(paths)
+            if als_stapel is None:
+                return
+            if als_stapel:
+                self.queue.add_paths(paths)
+                self.queue_bar.bind(self.queue)
+                self._load_next_from_queue(force=True)
+                return
+
         if not self._confirm_discard():
             return
+        self._queue_index_loading = -1
         worker = ImportWorker(self.import_service, paths=paths)
         worker.finished_ok.connect(self._offer_loaded)
         worker.failed.connect(lambda m, d: show_error(self, "Import fehlgeschlagen", m, d))
         self._start_worker(worker, f"{len(paths)} Datei(en) werden gelesen ...")
+
+    def _ask_batch_or_merge(self, paths: list[str]) -> bool | None:
+        """True = nacheinander, False = ein gemeinsames Angebot, None = Abbruch."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Mehrere Dateien")
+        box.setText(f"{len(paths)} Dateien ausgewaehlt.")
+        box.setInformativeText(
+            "Gehoeren sie zu einem gemeinsamen Angebot (z. B. Anschreiben und "
+            "Preisliste), oder sind es mehrere eigenstaendige Angebote?")
+        box.setDetailedText("\n".join(Path(p).name for p in paths))
+        stapel = box.addButton("Nacheinander abarbeiten",
+                               QMessageBox.ButtonRole.AcceptRole)
+        gemeinsam = box.addButton("Ein gemeinsames Angebot",
+                                  QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Abbrechen", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(stapel)
+        box.exec()
+
+        geklickt = box.clickedButton()
+        if geklickt is stapel:
+            return True
+        if geklickt is gemeinsam:
+            return False
+        return None
+
+    # ------------------------------------------------------------------
+    # Arbeitsvorrat: mehrere Angebote nacheinander
+    # ------------------------------------------------------------------
+    def _load_next_from_queue(self, force: bool = False) -> None:
+        index = self.queue.next_pending_index()
+        if index < 0:
+            self.queue_bar.refresh()
+            self._show_queue_finished()
+            return
+        if not force and not self._confirm_discard():
+            return
+        self._open_queue_entry(index)
+
+    def _open_queue_entry(self, index: int) -> None:
+        eintrag = self.queue.select(index)
+        if eintrag is None:
+            return
+        if eintrag.offer is not None:
+            # Schon gelesen -- nur wieder anzeigen, nicht erneut einlesen
+            self._queue_index_loading = -1
+            self.offer = eintrag.offer
+            self.table_model.set_offer(eintrag.offer)
+            self.table.apply_column_widths()
+            self._fill_header()
+            self._revalidate()
+            self._update_counters()
+            self.queue_bar.refresh()
+            return
+
+        self._queue_index_loading = index
+        worker = ImportWorker(self.import_service, paths=[eintrag.path])
+        worker.finished_ok.connect(self._offer_loaded)
+        worker.failed.connect(self._queue_import_failed)
+        self._start_worker(worker, f"{eintrag.name} wird gelesen ...")
+
+    def _queue_import_failed(self, message: str, detail: str) -> None:
+        """Eine nicht lesbare Datei darf den Stapel nicht anhalten."""
+        index = self._queue_index_loading
+        if index < 0:
+            show_error(self, "Import fehlgeschlagen", message, detail)
+            return
+        self.queue.mark_import_failed(index, message)
+        self.queue_bar.refresh()
+        self.counter_label.setText(f"{self.queue.entries[index].name}: {message}")
+        logger.warning("Angebot im Arbeitsvorrat nicht lesbar: %s", message)
+        if self.settings.ui.auto_advance_queue:
+            self._load_next_from_queue(force=True)
+
+    def _queue_entry_selected(self, index: int) -> None:
+        if index == self.queue.current_index:
+            return
+        if not self._confirm_discard():
+            self.queue_bar.refresh()
+            return
+        self._open_queue_entry(index)
+
+    def _skip_current_queue_entry(self) -> None:
+        if self.queue.current_index < 0:
+            return
+        name = self.queue.entries[self.queue.current_index].name
+        self.queue.mark_skipped(self.queue.current_index,
+                                "vom Anwender uebersprungen")
+        self.queue_bar.refresh()
+        self.counter_label.setText(f"{name} uebersprungen")
+        self._load_next_from_queue(force=True)
+
+    def _clear_queue(self) -> None:
+        if self.queue.is_empty:
+            return
+        if not ask_yes_no(self, "Arbeitsvorrat leeren",
+                          f"{self.queue.total} Angebot(e) aus der Liste entfernen?",
+                          "Bereits verarbeitete Angebote bleiben in SAP und in der "
+                          "Historie erhalten."):
+            return
+        self.queue.clear()
+        self.queue_bar.refresh()
+        self.counter_label.setText("Arbeitsvorrat geleert")
+
+    def _show_queue_finished(self) -> None:
+        if self.queue.is_empty or not self.queue.is_finished:
+            return
+        QMessageBox.information(self, "Arbeitsvorrat abgearbeitet",
+                                self.queue.overall_result())
 
     def paste_offer_text(self) -> None:
         if self.import_service is None:
@@ -648,6 +787,10 @@ class MainWindow(QMainWindow):
         for path in offer.source_files:
             self.settings.add_recent_file(path)
 
+        if self._queue_index_loading >= 0:
+            self.queue.mark_loaded(self._queue_index_loading, offer)
+            self._queue_index_loading = -1
+        self.queue_bar.refresh()
         self._fill_extraction_notes(offer)
         logger.info("Angebot geladen: %s (%d Positionen)", offer.source_label,
                     len(offer.positions))
@@ -1144,6 +1287,19 @@ class MainWindow(QMainWindow):
             self.undo.clear()
 
         ResultDialog(summary, self).exec()
+
+        # Arbeitsvorrat fortschreiben und -- wenn gewuenscht -- weiterblaettern
+        if self.queue.current_index >= 0:
+            self.queue.mark_processed(self.queue.current_index, summary)
+            self.queue_bar.refresh()
+            if self.settings.ui.auto_advance_queue and self.queue.pending:
+                if ask_yes_no(
+                        self, "Naechstes Angebot",
+                        f"Noch {self.queue.pending} Angebot(e) im Arbeitsvorrat.",
+                        "Soll das naechste jetzt geoeffnet werden?"):
+                    self._load_next_from_queue(force=True)
+            else:
+                self._show_queue_finished()
 
     def cancel_worker(self) -> None:
         if self._worker is not None and self._worker.isRunning():

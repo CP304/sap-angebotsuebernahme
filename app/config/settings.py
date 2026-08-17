@@ -72,6 +72,71 @@ class PurchasingDefaults:
 
 
 @dataclass
+class ConditionTypes:
+    """Konditionsarten des Infosatzes.
+
+    Bisher wurde nur der Bruttopreis geschrieben.  Ein Angebot enthaelt aber
+    regelmaessig mehr: Rabatte, Zu- und Abschlaege, Frachtkosten.  Diese
+    gehoeren als *eigene* Konditionen in den Infosatz -- nicht in den
+    Nettopreis eingerechnet, sonst ist spaeter nicht mehr nachvollziehbar,
+    woraus der Preis entstand.
+
+    TODO: kundenspezifisch pruefen.  Die hier eingetragenen Konditionsarten
+    sind die SAP-Standardauslieferung; in vielen Systemen kommen eigene
+    Z-Konditionen dazu.
+    """
+
+    gross_price: str = "PB00"          # Bruttopreis
+    discount_percent: str = "RA01"     # Rabatt in Prozent
+    discount_absolute: str = "RB00"    # Abschlag absolut
+    surcharge_percent: str = "ZA01"    # Zuschlag in Prozent (haeufig Z-Kondition)
+    surcharge_absolute: str = "ZB00"   # Zuschlag absolut
+    freight_percent: str = "FRA1"      # Frachtkosten in Prozent
+    freight_absolute: str = "FRB1"     # Frachtkosten absolut
+    cash_discount: str = "SKTO"        # Skonto
+
+    #: Zusatzkonditionen ueberhaupt schreiben
+    write_additional_conditions: bool = True
+    #: Alternative: Rabatte in den Nettopreis einrechnen statt eigener
+    #: Kondition.  Einfacher, aber die Herkunft des Preises geht verloren --
+    #: deshalb standardmaessig aus.
+    fold_discounts_into_net_price: bool = False
+    #: Mehr Zusatzkonditionen als hier zugelassen werden abgeschnitten
+    #: (mit Protokolleintrag)
+    max_additional_conditions: int = 8
+
+
+@dataclass
+class CurrencySettings:
+    """Fremdwaehrungsangebote.
+
+    Grundsatz: Es wird **nie** ein umgerechneter Betrag nach SAP geschrieben.
+    SAP fuehrt eigene Kurse; ein hier umgerechneter Wert waere eine zweite,
+    abweichende Wahrheit.  Der Kurs dient ausschliesslich dazu, den Vergleich
+    "alter Preis gegen neuer Preis" ueberhaupt sinnvoll zu machen, wenn das
+    Angebot in einer anderen Waehrung kommt als der Infosatz.
+    """
+
+    #: Hauswaehrung (Vergleichsbasis)
+    company_currency: str = "EUR"
+    #: Fuer den Vergleich umrechnen.  Aus = Fremdwaehrung wird nur angezeigt,
+    #: die Prozentangabe entfaellt.
+    convert_for_comparison: bool = True
+    #: Manuell gepflegte Kurse: wie viel Hauswaehrung ist eine Einheit der
+    #: Fremdwaehrung wert (1 USD = 0,92 EUR)
+    exchange_rates: dict[str, str] = field(default_factory=lambda: {
+        "USD": "0.92", "CHF": "1.06", "GBP": "1.17", "PLN": "0.23",
+        "CZK": "0.040", "SEK": "0.088", "DKK": "0.134", "NOK": "0.086",
+    })
+    #: Datum der Kurspflege (TT.MM.JJJJ) -- alte Kurse sind gefaehrlich
+    rate_date: str = ""
+    #: Warnen, wenn die Kurse aelter sind als
+    max_rate_age_days: int = 30
+    #: Bei Fremdwaehrung immer warnen, auch mit gueltigem Kurs
+    warn_on_foreign_currency: bool = True
+
+
+@dataclass
 class Thresholds:
     """Grenzwerte fuer die Plausibilitaetspruefung."""
 
@@ -435,6 +500,12 @@ class UiSettings:
     max_recent_files: int = 12
     #: Positionen nach dem Import automatisch selektieren
     autoselect_after_import: bool = True
+    #: Mehrere Angebote nacheinander abarbeiten: nach dem Abschluss eines
+    #: Angebots automatisch das naechste aus der Liste oeffnen
+    auto_advance_queue: bool = True
+    #: Beim Oeffnen mehrerer Dateien fragen, ob sie als Stapel oder als ein
+    #: gemeinsames Angebot behandelt werden sollen
+    ask_batch_or_merge: bool = True
     #: Standardhaken je Position
     default_do_info_record: bool = True
     default_do_source_list: bool = False
@@ -447,6 +518,8 @@ class Settings:
     """Gesamtkonfiguration der Anwendung."""
 
     purchasing: PurchasingDefaults = field(default_factory=PurchasingDefaults)
+    conditions: ConditionTypes = field(default_factory=ConditionTypes)
+    currency: CurrencySettings = field(default_factory=CurrencySettings)
     thresholds: Thresholds = field(default_factory=Thresholds)
     transactions: Transactions = field(default_factory=Transactions)
     sap: SapRuntime = field(default_factory=SapRuntime)
