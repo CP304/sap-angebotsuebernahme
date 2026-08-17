@@ -51,6 +51,13 @@ __all__ = [
 #: Felder, deren Spaltenzuordnung gelernt werden darf
 _LEARNABLE_POSITION_FIELDS = tuple(f for f in TRACKED_FIELDS if f != "position_number")
 
+#: Die beiden Artikelnummern -- ihre Rolle wird gesondert gemerkt
+_MATERIAL_FIELDS = ("material_number", "vendor_material_number")
+_MATERIAL_LABEL = {
+    "material_number": "unsere Materialnummer",
+    "vendor_material_number": "Artikelnummer des Lieferanten",
+}
+
 #: Kopffelder, fuer die eine Regel abgeleitet werden darf
 _LEARNABLE_HEADER_FIELDS = (
     "vendor_name", "vendor_number", "offer_number", "offer_date", "currency",
@@ -158,6 +165,7 @@ def forget_rule(profile: VendorProfile, key: str) -> bool:
     if kind == "column_map":
         header, _, _field = payload.partition("=")
         removed |= profile.column_map.pop(header, None) is not None
+        removed |= profile.material_column_role.pop(header, None) is not None
     elif kind == "header_regex":
         field_name, _, _pattern = payload.partition("=")
         removed |= profile.header_regexes.pop(field_name, None) is not None
@@ -180,6 +188,9 @@ def describe_learning(profile: VendorProfile) -> list[str]:
     for header, field_name in sorted(profile.column_map.items()):
         count = profile.rule_counters.get(f"column_map:{header}={field_name}", 1)
         lines.append(f"Spalte '{header}' -> Feld '{field_name}' ({count}x bestaetigt)")
+    for header, field_name in sorted(profile.material_column_role.items()):
+        lines.append(f"Spalte '{header}' ist bei diesem Lieferanten "
+                     f"'{_MATERIAL_LABEL.get(field_name, field_name)}'")
     for field_name, pattern in sorted(profile.header_regexes.items()):
         lines.append(f"Kopffeld '{field_name}' ueber Muster {pattern!r}")
     for pattern in profile.skip_patterns:
@@ -262,10 +273,32 @@ def _learn_columns(original: Offer, corrected: Offer, document: RawDocument,
             key = f"column_map:{header}={field_name}"
             if _confirm(profile, key, config.column_map_confirmations, report):
                 profile.column_map[header] = field_name
+                if field_name in _MATERIAL_FIELDS:
+                    # Die Rolle der Artikelnummern-Spalte wird zusaetzlich
+                    # eigens gemerkt.  Sie hat spaeter Vorrang vor jeder
+                    # Inhaltsheuristik: der Anwender hat es bestaetigt.
+                    profile.material_column_role[header] = field_name
+                    _clear_opposite_role(profile, header, field_name)
+                    report.observations.append(
+                        f"Spalte '{header}' gilt bei diesem Lieferanten ab sofort "
+                        f"als '{_MATERIAL_LABEL[field_name]}'.")
                 changed = True
                 logger.info("Gelernt: Spalte '%s' ist '%s' (Profil %s)",
                             header, field_name, profile.label)
     return changed
+
+
+def _clear_opposite_role(profile: VendorProfile, header: str, field_name: str) -> None:
+    """Widerspruechliche Altzuordnung derselben Spalte entfernen.
+
+    Eine Spalte kann nicht gleichzeitig unsere *und* die Nummer des
+    Lieferanten sein.  Die juengste Korrektur des Anwenders gewinnt.
+    """
+    for other, role in list(profile.material_column_role.items()):
+        if other != header and role == field_name:
+            profile.material_column_role.pop(other, None)
+            logger.info("Rolle '%s' von Spalte '%s' auf '%s' umgehaengt",
+                        field_name, other, header)
 
 
 def _learn_header_rules(original: Offer, corrected: Offer, document: RawDocument,

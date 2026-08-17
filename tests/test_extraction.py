@@ -3,14 +3,19 @@
 Abgedeckt werden bewusst *verschiedene Lieferantenformate*, denn genau darin
 liegt die Schwierigkeit des Imports:
 
-* Excel mit und ohne Kopfzeile, mehrzeilige Koepfe, mehrdeutige Preisspalten
-* deutsche und englische Zahlenformate
-* PDF-Layout (ueber die Wortkoordinaten-Rekonstruktion, ohne echtes PDF)
+* die beiden Artikelnummern und ihre mehrdeutigen Spaltenueberschriften
+  ("Artikelnummer" kann unsere oder seine Nummer sein)
+* Excel mit und ohne Kopfzeile, mehrzeilige Koepfe, Beschriftung/Wert-Paare
+* deutsche und englische Zahlenformate, Waehrungszeichen
+* Summenzeilen, Fortsetzungszeilen, Staffelpreise
 * E-Mails: Freitext, HTML-Preistabelle, Anhang, Signaturschnitt
 * Outlook-.msg (Compound File wird im Test selbst erzeugt)
-* Staffelpreise, Summenzeilen, Fortsetzungszeilen
-* defekte Dateien (duerfen nie eine Exception nach aussen geben)
+* Falsch-Treffer in den Kopfregeln ("lautet" ist keine Angebotsnummer)
 * Lernen aus Anwenderkorrekturen
+* defekte Dateien (duerfen nie eine Exception nach aussen geben)
+
+Leitgedanke aller Tests: **lieber leer als falsch.**  Ein nicht erkanntes Feld
+ist in Ordnung, ein stillschweigend falsches nicht.
 """
 
 from __future__ import annotations
@@ -26,41 +31,48 @@ from decimal import Decimal
 from email.message import EmailMessage
 from pathlib import Path
 
-from app.config.settings import Settings
-from app.models.enums import FieldOrigin, SourceKind
-from app.models.offer import EmailContext, Offer
-from app.services.extraction.freetext_extractor import FreetextExtractor
-from app.services.extraction.header_rules import (
+_TEMP_HOME = tempfile.mkdtemp(prefix="sap_extraction_")
+os.environ.setdefault("SAP_ANGEBOT_HOME", _TEMP_HOME)
+
+from app.config.settings import Settings                                # noqa: E402
+from app.models.enums import FieldOrigin, SourceKind                    # noqa: E402
+from app.models.offer import EmailContext, Offer                        # noqa: E402
+from app.models.offer_position import OfferPosition                     # noqa: E402
+from app.services.extraction.freetext_extractor import FreetextExtractor  # noqa: E402
+from app.services.extraction.header_rules import (                      # noqa: E402
     extract_header_fields,
     find_incoterm,
+    label_value_pairs,
+    label_value_text,
     vendor_name_from_signature,
 )
-from app.services.extraction.learning import (
-    LearningConfig,
+from app.services.extraction.learning import (                          # noqa: E402
     describe_learning,
     forget_rule,
-    learn_from_corrections,
 )
-from app.services.extraction.profiles import (
+from app.services.extraction.material_roles import (                    # noqa: E402
+    compile_own_pattern,
+    find_labelled_material_numbers,
+    header_role,
+    matches_own_pattern,
+    own_ratio,
+    resolve_position_roles,
+)
+from app.services.extraction.profiles import (                          # noqa: E402
     InMemoryProfileStore,
     VendorProfile,
-    fingerprint,
     match_profile,
-    new_profile,
 )
-from app.services.extraction.table_extractor import (
+from app.services.extraction.table_extractor import (                   # noqa: E402
     TableExtractor,
     find_price_tiers,
     is_summary_row,
     parse_number,
 )
-from app.services.offer_import_service import OfferImportService
-from app.services.readers import ReaderRegistry
-from app.services.readers.base import RawDocument, TableBlock
-from app.services.readers.email_reader import html_to_text, strip_signature
-from app.services.readers.excel_reader import XLS_HINT, detect_delimiter
-from app.services.readers.pdf_reader import SCAN_WARNING, make_word, words_to_tables
-from app.utils.msg_reader import CompoundFile, read_msg, read_msg_bytes
+from app.services.offer_import_service import OfferImportService        # noqa: E402
+from app.services.readers.base import RawDocument, TableBlock           # noqa: E402
+from app.services.readers.email_reader import html_to_text, strip_signature  # noqa: E402
+from app.utils.msg_reader import read_msg                               # noqa: E402
 
 
 # ==========================================================================
@@ -77,6 +89,16 @@ def make_document(rows: list[list[str]], title: str = "Preise",
         text=text,
         tables=[TableBlock(rows=[list(r) for r in rows], origin="excel", title=title)],
     )
+
+
+def first_position(rows: list[list[str]], settings: Settings | None = None,
+                   profile: VendorProfile | None = None) -> OfferPosition:
+    """Erste Position aus einer Tabelle -- Kurzform fuer viele Tests."""
+    settings = settings or Settings()
+    result = TableExtractor(settings, profile).extract(make_document(rows))
+    if not result.positions:
+        raise AssertionError(f"keine Position erkannt (Notizen: {result.notes})")
+    return result.positions[0]
 
 
 class _CfbNode:
@@ -210,26 +232,8 @@ def _build_cfb(root_children: list[_CfbNode]) -> bytes:
     return bytes(header) + b"".join(sectors)
 
 
-def _substg(prop_id: int, prop_type: int, data: bytes) -> _CfbNode:
-    return _CfbNode(f"__substg1.0_{prop_id:04X}{prop_type:04X}", data)
-
-
 def _unicode_prop(prop_id: int, text: str) -> _CfbNode:
-    return _substg(prop_id, 0x001F, text.encode("utf-16-le"))
-
-
-def _filetime(value: datetime.datetime) -> bytes:
-    ticks = int((value - datetime.datetime(1601, 1, 1)).total_seconds() * 10_000_000)
-    return struct.pack("<Q", ticks)
-
-
-def _properties(entries: list[tuple[int, int, bytes]], header_size: int) -> _CfbNode:
-    blob = bytearray(b"\x00" * header_size)
-    for prop_id, prop_type, value in entries:
-        blob.extend(struct.pack("<I", (prop_id << 16) | prop_type))
-        blob.extend(struct.pack("<I", 6))
-        blob.extend(value.ljust(8, b"\x00")[:8])
-    return _CfbNode("__properties_version1.0", bytes(blob))
+    return _CfbNode(f"__substg1.0_{prop_id:04X}001F", text.encode("utf-16-le"))
 
 
 class TempDirCase(unittest.TestCase):
@@ -242,62 +246,343 @@ class TempDirCase(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def path(self, name: str) -> str:
-        return os.path.join(self.tmp, name)
-
-    def write(self, name: str, content: bytes) -> str:
-        target = self.path(name)
-        Path(target).write_bytes(content)
-        return target
+    def write(self, name: str, data: bytes) -> str:
+        path = Path(self.tmp) / name
+        path.write_bytes(data)
+        return str(path)
 
 
 # ==========================================================================
-# 1 -- Tabellen aus Excel
+# 1. Die beiden Artikelnummern -- der Kern der Aufgabe
 # ==========================================================================
 
-class TabellenTests(unittest.TestCase):
+class ArtikelnummerSpaltenTests(unittest.TestCase):
+    """Welche Spalte ist UNSERE Materialnummer, welche die des Lieferanten?
+
+    Der Lieferant beschriftet aus *seiner* Sicht: unsere SAP-Nummer heisst bei
+    ihm "Kundenartikelnummer"/"Ihre Art.-Nr.", seine eigene schlicht
+    "Artikelnummer".  Dieselbe Ueberschrift kann also je nach Lieferant das
+    eine oder das andere bedeuten.
+    """
+
     def setUp(self) -> None:
         self.settings = Settings()
 
-    def test_01_excel_mit_kopfzeile(self) -> None:
-        """Klassische Preisliste mit Kopfzeile."""
+    def _analyse(self, rows: list[list[str]], profile: VendorProfile | None = None):
+        extractor = TableExtractor(self.settings, profile)
+        analysis = extractor.analyze(make_document(rows).tables[0].normalized())
+        return analysis, {a.field: i for i, a in analysis.columns.items()}
+
+    # -- Fall A: "Artikel-Nr." (seine) + "Ihre Artikelnummer" (unsere) ------
+    def test_01_fall_a_deutsch_beide_spalten(self) -> None:
         rows = [
-            ["Pos", "Material", "Bezeichnung", "Menge", "ME", "Einzelpreis"],
-            ["10", "4711002", "Dichtring 40x52x7", "100", "Stk", "12,85"],
-            ["20", "4711003", "O-Ring 25x3", "250", "Stk", "3,40"],
+            ["Pos", "Artikel-Nr.", "Ihre Artikelnummer", "Bezeichnung", "Menge", "Preis"],
+            ["10", "DR-40527-NBR", "47110001", "Dichtring", "500", "12,85"],
+        ]
+        _, felder = self._analyse(rows)
+        self.assertEqual(felder["material_number"], 2)
+        self.assertEqual(felder["vendor_material_number"], 1)
+        position = first_position(rows, self.settings)
+        self.assertEqual(position.material_number, "47110001")
+        self.assertEqual(position.vendor_material_number, "DR-40527-NBR")
+
+    # -- Fall B: "Unsere Art.-Nr." (seine) + "Kundenartikelnummer" (unsere) -
+    def test_02_fall_b_unsere_art_nr_ist_die_des_lieferanten(self) -> None:
+        rows = [
+            ["Pos", "Unsere Art.-Nr.", "Kundenartikelnummer", "Bezeichnung",
+             "Menge", "Preis"],
+            ["10", "DR-40527-NBR", "47110001", "Dichtring", "500", "12,85"],
+        ]
+        _, felder = self._analyse(rows)
+        self.assertEqual(felder["vendor_material_number"], 1,
+                         "'Unsere Art.-Nr.' ist die Nummer des Lieferanten")
+        self.assertEqual(felder["material_number"], 2)
+        position = first_position(rows, self.settings)
+        self.assertEqual(position.material_number, "47110001")
+        self.assertEqual(position.vendor_material_number, "DR-40527-NBR")
+
+    # -- Fall C: nur "Artikelnummer", Inhalt ist unsere Nummer -------------
+    def test_03_fall_c_neutrale_ueberschrift_inhalt_entscheidet(self) -> None:
+        rows = [
+            ["Pos", "Artikelnummer", "Bezeichnung", "Menge", "Preis"],
+            ["10", "47110001", "Dichtring", "500", "12,85"],
+            ["20", "47110002", "O-Ring", "200", "8,90"],
+        ]
+        analysis, felder = self._analyse(rows)
+        self.assertIn("material_number", felder,
+                      "8-stellig numerisch -> das ist unsere Materialnummer")
+        self.assertNotIn("vendor_material_number", felder)
+        self.assertTrue(any("sieht nach unserer Materialnummer aus" in n
+                            for n in analysis.notes), analysis.notes)
+
+    def test_04_fall_c_wird_als_unsicher_gekennzeichnet(self) -> None:
+        rows = [
+            ["Pos", "Artikelnummer", "Bezeichnung", "Menge", "Preis"],
+            ["10", "47110001", "Dichtring", "500", "12,85"],
+        ]
+        position = first_position(rows, self.settings)
+        self.assertEqual(position.material_number, "47110001")
+        self.assertIn("material_number", position.uncertain_fields,
+                      "Inhaltsbasierte Zuordnung muss geprueft werden")
+
+    def test_05_fall_c_notiz_landet_im_angebot(self) -> None:
+        service = OfferImportService(self.settings, InMemoryProfileStore())
+        offer = service.import_text(
+            "Pos;Artikelnummer;Bezeichnung;Menge;Preis\n"
+            "10;47110001;Dichtring;500;12,85\n", "artikel.csv")
+        self.assertTrue(any("sieht nach unserer Materialnummer aus" in n
+                            for n in offer.extraction_notes),
+                        offer.extraction_notes)
+
+    # -- Fall D: englische Ueberschriften ----------------------------------
+    def test_06_fall_d_englisch(self) -> None:
+        rows = [
+            ["Item", "Part No", "Customer part no", "Description", "Qty", "Price"],
+            ["10", "DR-40527-NBR", "47110001", "Sealing ring", "500", "12.85"],
+        ]
+        _, felder = self._analyse(rows)
+        self.assertEqual(felder["material_number"], 2)
+        self.assertEqual(felder["vendor_material_number"], 1)
+        self.assertEqual(felder["position_number"], 0)
+
+    def test_07_weitere_englische_schreibweisen(self) -> None:
+        for kunde, lieferant in (("Your part number", "Supplier part no"),
+                                 ("Customer material", "Our part number"),
+                                 ("Your ref.", "Manufacturer part no")):
+            with self.subTest(kunde=kunde):
+                rows = [["Pos", lieferant, kunde, "Description", "Qty", "Price"],
+                        ["10", "AB-99", "47110001", "Ring", "5", "12.85"]]
+                _, felder = self._analyse(rows)
+                self.assertEqual(felder.get("material_number"), 2, felder)
+                self.assertEqual(felder.get("vendor_material_number"), 1, felder)
+
+    def test_08_weitere_deutsche_schreibweisen(self) -> None:
+        for kunde in ("Ihre Art.-Nr.", "Kd-Art-Nr.", "Ihre Materialnummer",
+                      "Kundenmaterial", "Ihre Bestellnummer", "Bestellnummer Kunde"):
+            with self.subTest(kunde=kunde):
+                rows = [["Pos", "Sachnummer", kunde, "Bezeichnung", "Menge", "Preis"],
+                        ["10", "AB-99", "47110001", "Ring", "5", "12,85"]]
+                _, felder = self._analyse(rows)
+                self.assertEqual(felder.get("material_number"), 2, felder)
+                self.assertEqual(felder.get("vendor_material_number"), 1, felder)
+
+    def test_09_lieferantenmarker_in_der_ueberschrift(self) -> None:
+        for lieferant in ("Unsere Artikelnummer", "Hersteller-Nr.", "Typ",
+                          "Lieferantenmaterial", "Supplier part no"):
+            with self.subTest(lieferant=lieferant):
+                rows = [["Pos", "Materialnummer", lieferant, "Bezeichnung",
+                         "Menge", "Preis"],
+                        ["10", "47110001", "AB-99", "Ring", "5", "12,85"]]
+                _, felder = self._analyse(rows)
+                self.assertEqual(felder.get("vendor_material_number"), 2, felder)
+
+    # -- Tauscherkennung ---------------------------------------------------
+    def test_10_swap_erkennung_tauscht_vertauschte_nummern(self) -> None:
+        """Inhalt schlaegt Ueberschrift: hier hat der Lieferant verwechselt."""
+        position = OfferPosition()
+        position.set_field("material_number", "DR-40527-NBR", FieldOrigin.EXTRACTED)
+        position.set_field("vendor_material_number", "47110001", FieldOrigin.EXTRACTED)
+        note = resolve_position_roles(position, compile_own_pattern(r"^\d{6,18}$"))
+        self.assertEqual(position.material_number, "47110001")
+        self.assertEqual(position.vendor_material_number, "DR-40527-NBR")
+        self.assertIn("getauscht", note)
+
+    def test_11_swap_setzt_beide_felder_auf_unsicher(self) -> None:
+        position = OfferPosition()
+        position.set_field("material_number", "DR-40527-NBR", FieldOrigin.EXTRACTED)
+        position.set_field("vendor_material_number", "47110001", FieldOrigin.EXTRACTED)
+        resolve_position_roles(position, compile_own_pattern(r"^\d{6,18}$"))
+        self.assertIn("material_number", position.uncertain_fields)
+        self.assertIn("vendor_material_number", position.uncertain_fields)
+
+    def test_12_swap_ueber_den_importdienst(self) -> None:
+        service = OfferImportService(self.settings, InMemoryProfileStore())
+        offer = service.import_text(
+            "Pos;Materialnummer;Lieferantenmaterial;Bezeichnung;Menge;Preis\n"
+            "10;DR-40527-NBR;47110001;Dichtring;500;12,85\n", "swap.csv")
+        position = offer.positions[0]
+        self.assertEqual(position.material_number, "47110001")
+        self.assertEqual(position.vendor_material_number, "DR-40527-NBR")
+        self.assertTrue(any("getauscht" in n for n in offer.extraction_notes),
+                        offer.extraction_notes)
+
+    def test_13_kein_tausch_wenn_alles_stimmt(self) -> None:
+        position = OfferPosition()
+        position.set_field("material_number", "47110001", FieldOrigin.EXTRACTED)
+        position.set_field("vendor_material_number", "DR-40527-NBR",
+                           FieldOrigin.EXTRACTED)
+        note = resolve_position_roles(position, compile_own_pattern(r"^\d{6,18}$"))
+        self.assertEqual(note, "")
+        self.assertEqual(position.material_number, "47110001")
+        self.assertEqual(position.uncertain_fields, [])
+
+    def test_14_kein_tausch_wenn_beide_unpassend(self) -> None:
+        """Passt keine der beiden Nummern, wird nichts umsortiert."""
+        position = OfferPosition()
+        position.set_field("material_number", "AB-1", FieldOrigin.EXTRACTED)
+        position.set_field("vendor_material_number", "CD-2", FieldOrigin.EXTRACTED)
+        self.assertEqual(resolve_position_roles(
+            position, compile_own_pattern(r"^\d{6,18}$")), "")
+        self.assertEqual(position.material_number, "AB-1")
+
+    def test_15_swap_abschaltbar(self) -> None:
+        self.settings.extraction.swap_detection = False
+        service = OfferImportService(self.settings, InMemoryProfileStore())
+        offer = service.import_text(
+            "Pos;Materialnummer;Lieferantenmaterial;Bezeichnung;Menge;Preis\n"
+            "10;DR-40527-NBR;47110001;Dichtring;500;12,85\n", "swap.csv")
+        self.assertEqual(offer.positions[0].material_number, "DR-40527-NBR")
+
+    # -- Muster und Konfiguration ------------------------------------------
+    def test_16_eigenes_nummernkreismuster_ist_konfigurierbar(self) -> None:
+        """Der Kunde muss sein Schema eintragen koennen (hier: 'M-' + 5 Ziffern)."""
+        self.settings.extraction.own_material_pattern = r"^M-\d{5}$"
+        rows = [["Pos", "Artikelnummer", "Bezeichnung", "Menge", "Preis"],
+                ["10", "M-40527", "Dichtring", "500", "12,85"]]
+        _, felder = self._analyse(rows)
+        self.assertIn("material_number", felder)
+
+    def test_17_inhaltserkennung_abschaltbar(self) -> None:
+        self.settings.extraction.own_material_pattern_active = False
+        rows = [["Pos", "Artikelnummer", "Bezeichnung", "Menge", "Preis"],
+                ["10", "47110001", "Dichtring", "500", "12,85"]]
+        _, felder = self._analyse(rows)
+        self.assertIn("vendor_material_number", felder,
+                      "ohne Inhaltspruefung zaehlt allein die Ueberschrift")
+
+    def test_18_kaputtes_muster_faellt_auf_den_standard_zurueck(self) -> None:
+        regex = compile_own_pattern(r"^\d{6,18")       # Klammer fehlt
+        self.assertTrue(matches_own_pattern("47110001", regex))
+
+    def test_19_muster_greift_nicht_bei_zu_kurzen_nummern(self) -> None:
+        regex = compile_own_pattern(r"^\d{6,18}$")
+        self.assertTrue(matches_own_pattern("47110001", regex))
+        self.assertFalse(matches_own_pattern("4711", regex))
+        self.assertFalse(matches_own_pattern("DR-40527-NBR", regex))
+
+    def test_20_anteil_passender_werte_einer_spalte(self) -> None:
+        regex = compile_own_pattern(r"^\d{6,18}$")
+        self.assertEqual(own_ratio(["47110001", "47110002"], regex), 1.0)
+        self.assertEqual(own_ratio(["47110001", "AB-1"], regex), 0.5)
+        self.assertEqual(own_ratio([], regex), 0.0)
+
+    def test_21_ueberschriftenmarker(self) -> None:
+        self.assertEqual(header_role("Ihre Artikelnummer"), "material_number")
+        self.assertEqual(header_role("Customer part no"), "material_number")
+        self.assertEqual(header_role("Unsere Art.-Nr."), "vendor_material_number")
+        self.assertEqual(header_role("Supplier part no"), "vendor_material_number")
+        self.assertEqual(header_role("Artikelnummer"), "",
+                         "neutrale Ueberschrift entscheidet nichts")
+
+    def test_22_gemischte_spalte_wird_nicht_umgetragen(self) -> None:
+        """Unter 70 % passender Werte bleibt es bei der Ueberschrift."""
+        rows = [
+            ["Pos", "Artikelnummer", "Bezeichnung", "Menge", "Preis"],
+            ["10", "AB-1234", "Dichtring", "500", "12,85"],
+            ["20", "CD-5678", "O-Ring", "200", "8,90"],
+            ["30", "EF-9012", "Flachdichtung", "100", "3,40"],
+        ]
+        _, felder = self._analyse(rows)
+        self.assertIn("vendor_material_number", felder)
+        self.assertNotIn("material_number", felder)
+
+    # -- Freitext ----------------------------------------------------------
+    def test_23_freitext_kundenbeschriftung_ist_unsere_nummer(self) -> None:
+        for text in ("Ihre Materialnummer 47110001",
+                     "Kundenartikelnummer: 47110001",
+                     "unter Ihrer Art.-Nr. 47110001",
+                     "Customer part 47110001"):
+            with self.subTest(text=text):
+                eigen, fremd = find_labelled_material_numbers(text)
+                self.assertEqual(eigen, "47110001", f"{text!r} -> {eigen!r}")
+                self.assertEqual(fremd, "")
+
+    def test_24_freitext_lieferantenbeschriftung(self) -> None:
+        for text in ("unsere Artikelnummer DR-40527",
+                     "our part no. DR-40527",
+                     "Hersteller-Nr. DR-40527"):
+            with self.subTest(text=text):
+                eigen, fremd = find_labelled_material_numbers(text)
+                self.assertEqual(fremd, "DR-40527", f"{text!r} -> {fremd!r}")
+                self.assertEqual(eigen, "")
+
+    def test_25_freitextposition_mit_kundenbeschriftung(self) -> None:
+        extractor = FreetextExtractor(self.settings)
+        result = extractor.extract_text(
+            "Dichtring, Ihre Materialnummer 47110001, 12,85 EUR je Stueck")
+        self.assertTrue(result.positions)
+        self.assertEqual(result.positions[0].material_number, "47110001")
+
+    def test_26_freitextposition_mit_lieferantenbeschriftung(self) -> None:
+        service = OfferImportService(self.settings, InMemoryProfileStore())
+        offer = service.import_text(
+            "Dichtring, unsere Artikelnummer DR-40527, 12,85 EUR je Stueck",
+            "mail.txt")
+        self.assertTrue(offer.positions)
+        self.assertEqual(offer.positions[0].vendor_material_number, "DR-40527")
+
+    # -- Gelernte Rolle ----------------------------------------------------
+    def test_27_gelernte_spaltenrolle_schlaegt_die_heuristik(self) -> None:
+        """Hat der Anwender korrigiert, gilt das beim naechsten Angebot."""
+        profile = VendorProfile(profile_id="p1", vendor_key="123456")
+        profile.material_column_role["artikelnummer"] = "vendor_material_number"
+        rows = [["Pos", "Artikelnummer", "Bezeichnung", "Menge", "Preis"],
+                ["10", "47110001", "Dichtring", "500", "12,85"]]
+        _, felder = self._analyse(rows, profile)
+        self.assertIn("vendor_material_number", felder,
+                      "die bestaetigte Rolle darf nicht ueberstimmt werden")
+
+    def test_28_gelernte_rolle_traegt_spalte_um(self) -> None:
+        profile = VendorProfile(profile_id="p1", vendor_key="123456")
+        profile.material_column_role["sachnummer"] = "material_number"
+        rows = [["Pos", "Sachnummer", "Bezeichnung", "Menge", "Preis"],
+                ["10", "AB-4711", "Dichtring", "500", "12,85"]]
+        analysis, felder = self._analyse(rows, profile)
+        self.assertIn("material_number", felder)
+        self.assertTrue(any("Lieferantenprofil" in n for n in analysis.notes),
+                        analysis.notes)
+
+
+# ==========================================================================
+# 2. Tabellenstruktur
+# ==========================================================================
+
+class TabellenTests(unittest.TestCase):
+    """Kopfzeilen, Zahlenformate, Summen-, Fortsetzungs- und Staffelzeilen."""
+
+    def setUp(self) -> None:
+        self.settings = Settings()
+
+    def test_30_excel_mit_kopfzeile(self) -> None:
+        rows = [
+            ["Pos", "Materialnummer", "Bezeichnung", "Menge", "ME", "Preis"],
+            ["10", "47110001", "Dichtring NBR", "500", "St", "12,85"],
+            ["20", "47110002", "O-Ring Viton", "200", "St", "8,90"],
         ]
         result = TableExtractor(self.settings).extract(make_document(rows))
         self.assertEqual(len(result.positions), 2)
-        first = result.positions[0]
-        self.assertEqual(first.material_number, "4711002")
-        self.assertEqual(first.description, "Dichtring 40x52x7")
-        self.assertEqual(first.quantity, Decimal("100"))
-        self.assertEqual(first.uom, "ST")
-        self.assertEqual(first.price, Decimal("12.85"))
-        self.assertEqual(first.origin("price"), FieldOrigin.EXTRACTED)
-
-    def test_02_excel_ohne_kopfzeile(self) -> None:
-        """Ganz ohne Kopfzeile entscheiden die Datentypen der Spalten."""
-        rows = [
-            ["4711002", "Dichtring 40x52x7", "100", "ST", "12,85", "01.09.2026"],
-            ["4711003", "O-Ring 25x3", "250", "ST", "3,40", "01.09.2026"],
-            ["4711004", "Flachdichtung 60", "50", "ST", "7,90", "01.09.2026"],
-        ]
-        document = make_document(rows)
-        extractor = TableExtractor(self.settings)
-        analysis = extractor.analyze(document.tables[0].normalized())
-        self.assertIsNone(analysis.header_row_index)
-        result = extractor.extract(document)
-        self.assertEqual(len(result.positions), 3)
         position = result.positions[0]
-        self.assertEqual(position.material_number, "4711002")
+        self.assertEqual(position.material_number, "47110001")
         self.assertEqual(position.price, Decimal("12.85"))
-        self.assertEqual(position.valid_from, datetime.date(2026, 9, 1))
-        # Ohne Ueberschrift ist alles nur "unsicher" erkannt
-        self.assertIn("price", position.uncertain_fields)
+        self.assertEqual(position.uom, "ST")
+        self.assertEqual(position.quantity, Decimal("500"))
 
-    def test_03_mehrzeilige_kopfzeile(self) -> None:
-        """Kopfzeile ueber zwei Zeilen ("Preis" / "EUR je Stueck")."""
+    def test_31_excel_ohne_kopfzeile(self) -> None:
+        """Ohne Ueberschriften muss die Spaltenart aus den Daten kommen."""
+        rows = [
+            ["47110005", "Kugellager 6204-2RS", "1000", "ST", "4,55", "01.09.2026"],
+            ["49900010", "Hydraulikschlauch DN12", "300", "M", "7,20", "01.09.2026"],
+            ["48200111", "Gleitringdichtung KP-40", "40", "ST", "289,00", "01.09.2026"],
+        ]
+        result = TableExtractor(self.settings).extract(make_document(rows))
+        self.assertEqual(len(result.positions), 3)
+        self.assertEqual(result.positions[0].material_number, "47110005")
+        self.assertEqual(result.positions[0].price, Decimal("4.55"))
+        self.assertIn("price", result.positions[0].uncertain_fields,
+                      "ohne Ueberschrift ist alles nur unsicher erkannt")
+
+    def test_32_mehrzeilige_kopfzeile(self) -> None:
+        """Kopfzeile ueber zwei Zeilen ("Netto" / "Preis")."""
         rows = [
             ["Pos", "Artikel", "Bezeichnung", "Menge", "Netto"],
             ["Nr.", "Nummer", "", "", "Preis"],
@@ -305,811 +590,455 @@ class TabellenTests(unittest.TestCase):
             ["20", "4711003", "O-Ring", "250", "3,40"],
         ]
         extractor = TableExtractor(self.settings)
-        document = make_document(rows)
-        analysis = extractor.analyze(document.tables[0].normalized())
+        analysis = extractor.analyze(make_document(rows).tables[0].normalized())
         self.assertEqual(analysis.data_start, 2)
-        result = extractor.extract(document)
+        result = extractor.extract(make_document(rows))
         self.assertEqual(len(result.positions), 2)
         self.assertEqual(result.positions[0].price, Decimal("12.85"))
 
-    def test_04_deutsche_zahlen(self) -> None:
+    def test_33_datenzeile_wird_nicht_als_kopffortsetzung_verschmolzen(self) -> None:
+        rows = [
+            ["Material", "Bezeichnung", "Menge", "Preis"],
+            ["4711002", "Dichtring", "100", "12,85"],
+        ]
+        extractor = TableExtractor(self.settings)
+        analysis = extractor.analyze(make_document(rows).tables[0].normalized())
+        self.assertEqual(analysis.data_start, 1)
+
+    def test_34_deutsche_zahlen(self) -> None:
         rows = [
             ["Material", "Bezeichnung", "Menge", "Preis"],
             ["4711002", "Dichtring", "1.500", "1.234,56"],
         ]
-        result = TableExtractor(self.settings).extract(make_document(rows))
-        self.assertEqual(result.positions[0].quantity, Decimal("1500"))
-        self.assertEqual(result.positions[0].price, Decimal("1234.56"))
+        position = first_position(rows, self.settings)
+        self.assertEqual(position.quantity, Decimal("1500"))
+        self.assertEqual(position.price, Decimal("1234.56"))
 
-    def test_05_englische_zahlen(self) -> None:
+    def test_35_englische_zahlen(self) -> None:
         rows = [
             ["Part No", "Description", "Quantity", "Unit price"],
             ["4711002", "Sealing ring", "1,500", "1,234.56"],
         ]
-        result = TableExtractor(self.settings).extract(make_document(rows))
-        position = result.positions[0]
+        position = first_position(rows, self.settings)
         self.assertEqual(position.quantity, Decimal("1500"))
         self.assertEqual(position.price, Decimal("1234.56"))
 
-    def test_06_dezimalstil_aus_profil(self) -> None:
-        """Gelerntes Zahlenformat deutet mehrdeutige Werte um."""
+    def test_36_dezimalstil_deutet_mehrdeutige_werte_um(self) -> None:
+        """Ein gelerntes Zahlenformat loest '1.234' eindeutig auf."""
         self.assertEqual(parse_number("1,234", "en"), Decimal("1234"))
         self.assertEqual(parse_number("1.234", "en"), Decimal("1.234"))
         self.assertEqual(parse_number("1.234", "de"), Decimal("1234"))
+        self.assertEqual(parse_number("1,234", "de"), Decimal("1.234"))
         self.assertEqual(parse_number("12,85", "de"), Decimal("12.85"))
+        self.assertEqual(parse_number("12.85", "en"), Decimal("12.85"))
 
-    def test_07_summenzeilen_werden_verworfen(self) -> None:
+    def test_37_waehrungszeichen_am_preis(self) -> None:
+        for zelle, waehrung in (("12,85 EUR", "EUR"), ("€ 12,85", "EUR"),
+                                ("12.85 USD", "USD")):
+            with self.subTest(zelle=zelle):
+                rows = [["Material", "Bezeichnung", "Menge", "Preis"],
+                        ["4711002", "Dichtring", "100", zelle]]
+                position = first_position(rows, self.settings)
+                self.assertEqual(position.price, Decimal("12.85"))
+                self.assertEqual(position.currency, waehrung)
+
+    def test_38_summenzeilen_werden_verworfen(self) -> None:
         rows = [
             ["Pos", "Material", "Bezeichnung", "Menge", "Preis"],
             ["10", "4711002", "Dichtring", "100", "12,85"],
             ["", "", "Zwischensumme", "", "1.285,00"],
-            ["", "", "zzgl. MwSt 19%", "", "244,15"],
-            ["", "", "Gesamt", "", "1.529,15"],
+            ["", "", "MwSt 19 %", "", "244,15"],
+            ["", "", "Gesamtbetrag", "", "1.529,15"],
         ]
         result = TableExtractor(self.settings).extract(make_document(rows))
+        texte = " ".join(p.description.lower() for p in result.positions)
+        self.assertNotIn("zwischensumme", texte)
+        self.assertNotIn("gesamtbetrag", texte)
         self.assertEqual(len(result.positions), 1)
-        self.assertTrue(any("Summenzeile" in note for note in result.notes))
-        self.assertTrue(is_summary_row(["", "Netto gesamt", "1.285,00"]))
-        self.assertFalse(is_summary_row(["4711002", "Dichtring", "12,85"]))
 
-    def test_08_fortsetzungszeile(self) -> None:
+    def test_39_summenzeilen_erkennung_direkt(self) -> None:
+        self.assertTrue(is_summary_row(["", "", "Zwischensumme", "", "1.285,00"]))
+        self.assertTrue(is_summary_row(["", "", "Total", "", "100"]))
+        self.assertTrue(is_summary_row(["", "", "VAT 19 %", "", "19"]))
+        self.assertFalse(is_summary_row(["10", "4711002", "Dichtring", "100", "12,85"]))
+
+    def test_40_fortsetzungszeilen_werden_angehaengt(self) -> None:
         rows = [
             ["Pos", "Material", "Bezeichnung", "Menge", "Preis"],
-            ["10", "4711002", "Dichtring 40x52x7", "100", "12,85"],
-            ["", "", "Werkstoff NBR 70 Shore", "", ""],
+            ["10", "4711002", "Dichtring NBR", "100", "12,85"],
+            ["", "", "40x52x7, lebensmittelecht", "", ""],
             ["20", "4711003", "O-Ring", "250", "3,40"],
         ]
         result = TableExtractor(self.settings).extract(make_document(rows))
         self.assertEqual(len(result.positions), 2)
-        self.assertIn("NBR 70", result.positions[0].description)
+        self.assertIn("lebensmittelecht", result.positions[0].description)
 
-    def test_09_staffelpreis_in_der_zelle(self) -> None:
+    def test_41_staffelpreise_werden_eigene_positionen(self) -> None:
         rows = [
-            ["Pos", "Material", "Bezeichnung", "Menge", "Preis"],
-            ["10", "4711002", "Dichtring (ab 100 Stk 11,90)", "1", "12,85"],
+            ["Pos", "Material", "Bezeichnung", "Menge", "Preis", "Bemerkung"],
+            ["10", "4711002", "Dichtring", "100", "12,85", "ab 500 Stk 11,90 EUR"],
         ]
         result = TableExtractor(self.settings).extract(make_document(rows))
-        self.assertEqual(len(result.positions), 2)
+        self.assertEqual(len(result.positions), 2,
+                         "Staffel darf nicht stillschweigend zusammengefasst werden")
         staffel = result.positions[1]
         self.assertEqual(staffel.price, Decimal("11.90"))
-        self.assertEqual(staffel.quantity, Decimal("100"))
-        self.assertIn("Staffelpreis", staffel.remarks)
-        self.assertEqual(staffel.material_number, "4711002")
+        self.assertEqual(staffel.quantity, Decimal("500"))
+        self.assertIn("Staffel", staffel.remarks)
 
-    def test_10_staffelpreis_als_folgezeile(self) -> None:
-        rows = [
-            ["Pos", "Material", "Bezeichnung", "Menge", "Preis"],
-            ["10", "4711003", "O-Ring", "250", "3,40"],
-            ["", "", "", "500", "3,10"],
-        ]
-        result = TableExtractor(self.settings).extract(make_document(rows))
-        self.assertEqual(len(result.positions), 2)
-        self.assertEqual(result.positions[1].material_number, "4711003")
-        self.assertIn("Staffelpreis", result.positions[1].remarks)
+    def test_42_staffelpreise_im_text_finden(self) -> None:
+        treffer = find_price_tiers("ab 100 Stk 11,90 EUR, ab 500: 10,50 EUR")
+        self.assertEqual(len(treffer), 2)
+        self.assertEqual(treffer[0][0], Decimal("100"))
+        self.assertEqual(treffer[0][1], Decimal("11.90"))
 
-    def test_11_mehrdeutige_preisspalten(self) -> None:
-        """Listenpreis vs. Nettopreis -- die Entscheidung wird protokolliert."""
-        rows = [
-            ["Pos", "Material", "Bezeichnung", "Listenpreis", "Netto EUR"],
-            ["10", "4711002", "Dichtring", "15,00", "12,85"],
-        ]
-        extractor = TableExtractor(self.settings)
-        document = make_document(rows)
-        result = extractor.extract(document)
-        self.assertEqual(result.positions[0].price, Decimal("12.85"))
-        self.assertIn("Listenpreis", result.positions[0].remarks)
-        self.assertTrue(any("Mehrdeutige Spalten" in note for note in result.notes))
-
-    def test_12_gesamtpreis_wird_nicht_als_preis_genommen(self) -> None:
-        rows = [
-            ["Pos", "Material", "Menge", "Einzelpreis", "Gesamtpreis"],
-            ["10", "4711002", "100", "12,85", "1.285,00"],
-        ]
-        result = TableExtractor(self.settings).extract(make_document(rows))
-        self.assertEqual(result.positions[0].price, Decimal("12.85"))
-
-    def test_13_zu_wenig_felder_wird_verworfen(self) -> None:
-        rows = [
-            ["Pos", "Material", "Bezeichnung", "Menge", "Preis"],
-            ["10", "4711002", "Dichtring", "100", "12,85"],
-            ["", "", "", "", ""],
-            ["Hinweis", "", "", "", ""],
-        ]
-        result = TableExtractor(self.settings).extract(make_document(rows))
-        self.assertEqual(len(result.positions), 1)
-
-    def test_14_menge_mit_einheit_in_einer_zelle(self) -> None:
-        rows = [
-            ["Artikelnummer", "Bezeichnung", "Menge", "Preis"],
-            ["4711002", "Dichtring", "100 Stk", "12,85 EUR"],
-        ]
-        result = TableExtractor(self.settings).extract(make_document(rows))
-        position = result.positions[0]
-        self.assertEqual(position.quantity, Decimal("100"))
-        self.assertEqual(position.uom, "ST")
-        self.assertEqual(position.currency, "EUR")
-
-    def test_15_staffelpreis_erkennung_ignoriert_datumsangaben(self) -> None:
+    def test_43_datum_ist_kein_staffelpreis(self) -> None:
         self.assertEqual(find_price_tiers("gueltig ab 01.09.2026"), [])
-        tiers = find_price_tiers("ab 500 Stk 10,50 EUR")
-        self.assertEqual(tiers[0][0], Decimal("500"))
-        self.assertEqual(tiers[0][1], Decimal("10.50"))
+
+    def test_44_mehrdeutige_preisspalten_werden_aufgeloest(self) -> None:
+        rows = [
+            ["Material", "Bezeichnung", "Listenpreis", "Nettopreis"],
+            ["4711002", "Dichtring", "15,00", "12,85"],
+        ]
+        result = TableExtractor(self.settings).extract(make_document(rows))
+        self.assertEqual(result.positions[0].price, Decimal("12.85"),
+                         "der Nettopreis ist der massgebliche")
+        self.assertTrue(any("Mehrdeutige Spalten" in n for n in result.notes),
+                        result.notes)
+
+    def test_45_gesamtpreisspalte_wird_nicht_als_preis_genommen(self) -> None:
+        rows = [
+            ["Material", "Bezeichnung", "Menge", "Einzelpreis", "Gesamtpreis"],
+            ["4711002", "Dichtring", "100", "12,85", "1285,00"],
+        ]
+        position = first_position(rows, self.settings)
+        self.assertEqual(position.price, Decimal("12.85"))
 
 
 # ==========================================================================
-# 2 -- Kopfdaten
+# 3. Kopfdaten
 # ==========================================================================
 
 class KopfdatenTests(unittest.TestCase):
-    DEUTSCH = (
-        "Muster Dichtungstechnik GmbH\n"
-        "Angebot Nr. AN-2026-4711\n"
-        "Angebotsdatum: 15.08.2026\n"
-        "Ihre Kundennummer: 100234\n"
-        "Lieferantennummer: 0000123456\n"
-        "Waehrung: EUR\n"
-        "Angebot gueltig bis 31.12.2026\n"
-        "Preise gueltig ab 01.09.2026\n"
-        "Incoterms 2020: FCA Muenchen\n"
-        "Zahlungsbedingungen: 30 Tage netto, 2% Skonto bei 10 Tagen\n"
-        "Ansprechpartner: Frau Erika Muster\n"
-    )
-
-    def test_16_kopfregeln_deutsch(self) -> None:
-        matches = extract_header_fields(self.DEUTSCH)
-        self.assertEqual(matches["offer_number"].value, "AN-2026-4711")
-        self.assertEqual(matches["offer_date"].value, datetime.date(2026, 8, 15))
-        self.assertEqual(matches["valid_to"].value, datetime.date(2026, 12, 31))
-        self.assertEqual(matches["valid_from"].value, datetime.date(2026, 9, 1))
-        self.assertEqual(matches["currency"].value, "EUR")
-        self.assertEqual(matches["vendor_number"].value, "123456")
-        self.assertEqual(matches["customer_number"].value, "100234")
-        self.assertEqual(matches["contact"].value, "Frau Erika Muster")
-        self.assertIn("Skonto", matches["payment_terms"].value)
-        self.assertEqual(matches["vendor_name"].value, "Muster Dichtungstechnik GmbH")
-
-    def test_17_kopfregeln_englisch(self) -> None:
-        text = ("Sample Sealing Ltd\n"
-                "Quotation No. Q-2026-88\n"
-                "Offer Date: 2026-08-15\n"
-                "Currency: USD\n"
-                "valid until 2026-12-31\n"
-                "Terms of payment: net 30 days\n"
-                "Delivery terms: CIF Hamburg\n")
-        matches = extract_header_fields(text)
-        self.assertEqual(matches["offer_number"].value, "Q-2026-88")
-        self.assertEqual(matches["offer_date"].value, datetime.date(2026, 8, 15))
-        self.assertEqual(matches["currency"].value, "USD")
-        self.assertEqual(matches["valid_to"].value, datetime.date(2026, 12, 31))
-        self.assertEqual(matches["incoterm"].value, "CIF")
-        self.assertEqual(matches["incoterm_location"].value, "Hamburg")
-
-    def test_18_incoterm_varianten(self) -> None:
-        for text, expected in (
-            ("Lieferbedingung: EXW Werk Muenchen", "EXW"),
-            ("Incoterms: DDP Sassenberg", "DDP"),
-            ("Delivery terms FOB Shanghai", "FOB"),
-            ("Versand: DAP Hamburg", "DAP"),
-        ):
-            code, _location, confidence = find_incoterm(text)
-            self.assertEqual(code, expected, msg=text)
-            self.assertGreater(confidence, 0.5)
-
-    def test_19_konfidenz_steuert_die_herkunft(self) -> None:
-        """Unsichere Treffer duerfen nicht als gesichert gelten."""
-        matches = extract_header_fields("Rechnung vom 15.08.2026")
-        self.assertIn("offer_date", matches)
-        self.assertEqual(matches["offer_date"].origin, FieldOrigin.EXTRACTED)
-        weak = extract_header_fields("Ort, den 15.08.2026")
-        self.assertEqual(weak["offer_date"].origin, FieldOrigin.UNCERTAIN)
-
-    def test_20_kein_wert_wird_erfunden(self) -> None:
-        matches = extract_header_fields("Guten Tag, anbei die Unterlagen.")
-        self.assertNotIn("offer_number", matches)
-        self.assertNotIn("offer_date", matches)
-        self.assertNotIn("currency", matches)
-
-    def test_21_lieferantenname_aus_signatur_und_domaene(self) -> None:
-        name, confidence = vendor_name_from_signature(
-            "Mit freundlichen Gruessen\nErika Muster\nMuster Dichtungstechnik GmbH")
-        self.assertEqual(name, "Muster Dichtungstechnik GmbH")
-        self.assertGreater(confidence, 0.5)
-        # Keine Fehlgriffe auf Fliesstext mit "ab"
-        self.assertEqual(vendor_name_from_signature("gueltig ab 01.09.2026")[0], "")
-
-        context = EmailContext(from_address="e.muster@muster-dichtung.de")
-        matches = extract_header_fields("Preise wie besprochen.", context)
-        self.assertIn("vendor_name", matches)
-        self.assertEqual(matches["vendor_name"].origin, FieldOrigin.UNCERTAIN)
-
-
-# ==========================================================================
-# 3 -- PDF-Layout
-# ==========================================================================
-
-class PdfLayoutTests(TempDirCase):
-    def test_22_wortkoordinaten_werden_zu_spalten(self) -> None:
-        """Tabellenrekonstruktion aus Wortkoordinaten (PDF-Layout)."""
-        spalten = (60.0, 140.0, 300.0, 400.0, 460.0)
-        zeilen = [
-            ["Pos", "Artikel", "Bezeichnung", "Menge", "Preis"],
-            ["10", "4711002", "Dichtring", "100", "12,85"],
-            ["20", "4711003", "O-Ring", "250", "3,40"],
-            ["30", "4711004", "Flachdichtung", "50", "7,90"],
-        ]
-        words = []
-        for row_index, row in enumerate(zeilen):
-            y = 100.0 + row_index * 20.0
-            for x, text in zip(spalten, row):
-                words.append(make_word(x, y, x + 40.0, y + 10.0, text))
-        blocks = words_to_tables(words, page=1)
-        self.assertEqual(len(blocks), 1)
-        self.assertEqual(blocks[0].origin, "pdf-layout")
-        self.assertEqual(blocks[0].rows[1], ["10", "4711002", "Dichtring", "100", "12,85"])
-
-        document = RawDocument(source_kind=SourceKind.PDF, tables=blocks)
-        result = TableExtractor(Settings()).extract(document)
-        self.assertEqual(len(result.positions), 3)
-        self.assertEqual(result.positions[0].price, Decimal("12.85"))
-
-    def test_23_fliesstext_ergibt_keine_tabelle(self) -> None:
-        """Ein Absatz darf nicht als Tabelle missverstanden werden."""
-        words = []
-        satz = "Wir bedanken uns fuer Ihre Anfrage und unterbreiten Ihnen folgendes"
-        x = 60.0
-        for index, wort in enumerate(satz.split()):
-            words.append(make_word(x, 100.0, x + len(wort) * 5.0, 110.0, wort))
-            x += len(wort) * 5.0 + 4.0
-            if index == 6:
-                x = 60.0
-        self.assertEqual(words_to_tables(words, page=1), [])
-
-    def test_24_pdf_ohne_textebene_wird_gemeldet(self) -> None:
-        """Ein Scan wird klar benannt -- es wird nichts geraten."""
-        try:
-            import fitz  # noqa: F401
-        except ImportError:  # pragma: no cover
-            self.skipTest("PyMuPDF ist nicht installiert")
-        import fitz
-
-        document = fitz.open()
-        document.new_page()
-        target = self.path("scan.pdf")
-        document.save(target)
-        document.close()
-
-        raw = ReaderRegistry(self.settings.extraction).read(target)
-        self.assertTrue(raw.meta.get("scanned"))
-        self.assertIn(SCAN_WARNING, raw.warnings)
-
-    def test_25_pdf_mit_text_wird_gelesen(self) -> None:
-        try:
-            import fitz
-        except ImportError:  # pragma: no cover
-            self.skipTest("PyMuPDF ist nicht installiert")
-
-        document = fitz.open()
-        page = document.new_page()
-        page.insert_text((60, 60), "Angebot Nr. AN-2026-4711")
-        page.insert_text((60, 80), "Angebotsdatum: 15.08.2026")
-        target = self.path("angebot.pdf")
-        document.save(target)
-        document.close()
-
-        offer = OfferImportService(self.settings).import_file(target)
-        self.assertEqual(offer.offer_number, "AN-2026-4711")
-        self.assertEqual(offer.offer_date, datetime.date(2026, 8, 15))
-
-
-# ==========================================================================
-# 4 -- E-Mail
-# ==========================================================================
-
-def _build_eml(html: str = "", attachments: list[tuple[str, bytes, str]] | None = None,
-               body: str = "") -> bytes:
-    message = EmailMessage()
-    message["Subject"] = "Angebot Nr. AN-2026-4711 - Preisanpassung"
-    message["From"] = ('"Erika Muster (Muster Dichtungstechnik GmbH)" '
-                       "<e.muster@muster-dichtung.de>")
-    message["To"] = "einkauf@technotrans.de"
-    message["Date"] = "Mon, 17 Aug 2026 09:15:00 +0200"
-    message.set_content(body or "Guten Tag,\n\nPreise wie besprochen.\n")
-    if html:
-        message.add_alternative(html, subtype="html")
-    for name, data, subtype in attachments or []:
-        message.add_attachment(data, maintype="application", subtype=subtype,
-                               filename=name)
-    return message.as_bytes()
-
-
-class EmailTests(TempDirCase):
-    def test_26_email_freitext_als_angebotsquelle(self) -> None:
-        body = ("Guten Tag,\n\n"
-                "wir erhoehen den Preis fuer Dichtring 40x52x7 zum 01.09.2026 "
-                "auf 12,85 EUR.\n"
-                "Mat.-Nr. 47110001, Preis 3,40 EUR/St ab 01.09.2026\n\n"
-                "Mit freundlichen Gruessen\n"
-                "Erika Muster\nMuster Dichtungstechnik GmbH\n")
-        target = self.write("mail.eml", _build_eml(body=body))
-        offer = OfferImportService(self.settings).import_file(target)
-
-        self.assertEqual(offer.offer_number, "AN-2026-4711")
-        self.assertEqual(offer.vendor_name, "Muster Dichtungstechnik GmbH")
-        self.assertGreaterEqual(len(offer.positions), 2)
-        for position in offer.positions:
-            self.assertEqual(position.source_kind, SourceKind.EMAIL_BODY)
-            self.assertTrue(position.raw_text)
-            self.assertIn("price", position.uncertain_fields)
-        preise = {p.price for p in offer.positions}
-        self.assertIn(Decimal("12.85"), preise)
-        self.assertIn(Decimal("3.40"), preise)
-
-    def test_27_html_preistabelle_in_der_mail(self) -> None:
-        html = ("<html><body><p>Guten Tag,</p>"
-                "<table><tr><th>Artikelnummer</th><th>Bezeichnung</th>"
-                "<th>Menge</th><th>Preis</th></tr>"
-                "<tr><td>4711002</td><td>Dichtring 40x52x7</td><td>100 Stk</td>"
-                "<td>12,85 EUR</td></tr>"
-                "<tr><td>4711003</td><td>O-Ring 25x3</td><td>250 Stk</td>"
-                "<td>3,40 EUR</td></tr></table></body></html>")
-        target = self.write("mail.eml", _build_eml(html=html))
-        offer = OfferImportService(self.settings).import_file(target)
-        self.assertEqual(len(offer.positions), 2)
-        self.assertEqual(offer.positions[0].vendor_material_number, "4711002")
-        self.assertEqual(offer.positions[0].quantity, Decimal("100"))
-        self.assertEqual(offer.positions[0].price, Decimal("12.85"))
-        self.assertEqual(offer.positions[0].currency, "EUR")
-
-    def test_28_html_parser_liefert_text_und_tabellen(self) -> None:
-        text, tables = html_to_text(
-            "<div>Hallo</div><table><tr><td>A</td><td>B</td></tr>"
-            "<tr><td>1</td><td>2</td></tr></table><script>x=1</script>")
-        self.assertIn("Hallo", text)
-        self.assertNotIn("x=1", text)
-        self.assertEqual(tables, [[["A", "B"], ["1", "2"]]])
-
-    def test_29_anhang_wird_mitgelesen(self) -> None:
-        try:
-            from openpyxl import Workbook
-        except ImportError:  # pragma: no cover
-            self.skipTest("openpyxl ist nicht installiert")
-
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = "Preise"
-        sheet.append(["Pos", "Material", "Bezeichnung", "Menge", "ME", "Netto EUR"])
-        sheet.append([10, "4711002", "Dichtring", 100, "Stk", 12.85])
-        sheet.append([None, None, "Summe", None, None, 1285.0])
-        xlsx = self.path("preise.xlsx")
-        workbook.save(xlsx)
-
-        subtype = "vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        target = self.write("mail.eml", _build_eml(
-            attachments=[("preise.xlsx", Path(xlsx).read_bytes(), subtype)]))
-
-        offer = OfferImportService(self.settings).import_file(target)
-        anhang = [p for p in offer.positions
-                  if p.source_kind is SourceKind.EMAIL_ATTACHMENT]
-        self.assertEqual(len(anhang), 1)
-        self.assertEqual(anhang[0].material_number, "4711002")
-        self.assertIn("Anhang: preise.xlsx", anhang[0].source_hint)
-
-    def test_30_unerwuenschter_anhang_wird_gemeldet(self) -> None:
-        target = self.write("mail.eml", _build_eml(
-            attachments=[("virus.exe", b"MZ egal", "octet-stream")]))
-        raw = ReaderRegistry(self.settings.extraction).read(target)
-        self.assertFalse(raw.attachments)
-        self.assertTrue(any("virus.exe" in w for w in raw.warnings))
-
-    def test_31_signatur_wird_abgeschnitten(self) -> None:
-        text = ("Preise wie besprochen: 12,85 EUR\n"
-                "weitere Zeile mit Inhalt\n"
-                "Mit freundlichen Gruessen\n"
-                "Erika Muster\n"
-                "Diese E-Mail enthaelt vertrauliche Informationen.\n")
-        head, tail = strip_signature(text)
-        self.assertIn("Preise wie besprochen", head)
-        self.assertNotIn("vertrauliche", head)
-        self.assertIn("Erika Muster", tail)
-
-        # Sehr kurze Nachricht: es wird NICHT abgeschnitten
-        kurz = "Mit freundlichen Gruessen\nErika"
-        self.assertEqual(strip_signature(kurz)[0], kurz)
-
-
-# ==========================================================================
-# 5 -- Outlook .msg
-# ==========================================================================
-
-class MsgTests(TempDirCase):
-    def _minimal_msg(self) -> bytes:
-        attachment = _CfbNode("__attach_version1.0_#00000000", None, [
-            _unicode_prop(0x3707, "preise.csv"),
-            _substg(0x3701, 0x0102, "Material;Preis\r\n4711002;12,85\r\n".encode("cp1252")),
-        ])
-        return _build_cfb([
-            _unicode_prop(0x0037, "Angebot Nr. AN-2026-4711"),
-            _unicode_prop(0x0C1A, "Erika Muster"),
-            _unicode_prop(0x5D01, "e.muster@muster-dichtung.de"),
-            _unicode_prop(0x0E04, "einkauf@technotrans.de"),
-            _unicode_prop(0x1000, "Guten Tag,\r\n\r\nder Preis fuer Artikel 4711002 "
-                                  "betraegt ab 01.09.2026 12,85 EUR.\r\n"),
-            _substg(0x1013, 0x0102, b"<html><body><p>Preise</p></body></html>"),
-            _substg(0x007D, 0x001E, b"Date: Mon, 17 Aug 2026 09:15:00 +0200\r\n"
-                                    b"Message-ID: <abc@muster-dichtung.de>\r\n"),
-            _properties([(0x0039, 0x0040,
-                          _filetime(datetime.datetime(2026, 8, 17, 9, 15)))], 32),
-            attachment,
-        ])
-
-    def test_32_msg_parser_liest_alle_kopffelder(self) -> None:
-        message = read_msg_bytes(self._minimal_msg(), "test.msg")
-        self.assertEqual(message.errors, [])
-        self.assertEqual(message.subject, "Angebot Nr. AN-2026-4711")
-        self.assertEqual(message.sender_name, "Erika Muster")
-        self.assertEqual(message.sender_email, "e.muster@muster-dichtung.de")
-        self.assertEqual(message.sender_domain, "muster-dichtung.de")
-        self.assertEqual(message.to, "einkauf@technotrans.de")
-        self.assertIn("12,85 EUR", message.body)
-        self.assertIn("<html>", message.html)
-        self.assertEqual(message.sent, datetime.datetime(2026, 8, 17, 9, 15))
-        self.assertEqual(message.header_value("Message-ID"),
-                         "<abc@muster-dichtung.de>")
-        self.assertEqual([a.name for a in message.attachments], ["preise.csv"])
-
-    def test_33_msg_import_ueber_den_dienst(self) -> None:
-        target = self.write("angebot.msg", self._minimal_msg())
-        offer = OfferImportService(self.settings).import_file(target)
-        self.assertEqual(offer.offer_number, "AN-2026-4711")
-        self.assertIsNotNone(offer.email)
-        self.assertEqual(offer.email.sender_domain, "muster-dichtung.de")
-        self.assertTrue(offer.positions)
-        anhang = [p for p in offer.positions
-                  if p.source_kind is SourceKind.EMAIL_ATTACHMENT]
-        self.assertTrue(anhang, "Der CSV-Anhang muss ausgewertet werden")
-        self.assertEqual(anhang[0].price, Decimal("12.85"))
-
-    def test_34_defekte_msg_gibt_teilergebnis(self) -> None:
-        """Eine kaputte Datei darf niemals eine Exception nach aussen geben."""
-        kaputt = self.write("kaputt.msg", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-                                          + b"\x00" * 600)
-        message = read_msg(kaputt)
-        self.assertFalse(message.ok)
-        self.assertTrue(message.errors)
-        self.assertEqual(message.subject, "")
-
-        unsinn = self.write("unsinn.msg", b"Das ist keine Outlook-Datei")
-        message = read_msg(unsinn)
-        self.assertTrue(message.errors)
-
-        offer = OfferImportService(self.settings).import_file(unsinn)
-        self.assertFalse(offer.positions)
-        self.assertTrue(offer.issues.has_blocking)
-
-    def test_35_compound_file_erkennt_zyklen(self) -> None:
-        data = bytearray(self._minimal_msg())
-        # FAT-Eintrag 0 auf sich selbst zeigen lassen -> Zyklus
-        compound = CompoundFile(bytes(data))
-        self.assertTrue(compound.ok)
-        self.assertGreater(len(compound.entries), 1)
-
-
-# ==========================================================================
-# 6 -- Freitext
-# ==========================================================================
-
-class FreitextTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.extractor = FreetextExtractor(Settings())
-
-    def test_36_typische_freitextzeilen(self) -> None:
-        text = ("Artikel 4711 / 100 Stueck / 12,85 EUR\n"
-                "Mat.-Nr. 47110001, Preis 3,40 EUR/St ab 01.09.2026\n"
-                "- 4711-002  Dichtring  50 St  9,90 EUR\n")
-        result = self.extractor.extract_text(text)
-        self.assertEqual(len(result.positions), 3)
-        erste = result.positions[0]
-        self.assertEqual(erste.material_number, "4711")
-        self.assertEqual(erste.quantity, Decimal("100"))
-        self.assertEqual(erste.price, Decimal("12.85"))
-        self.assertEqual(erste.currency, "EUR")
-        zweite = result.positions[1]
-        self.assertEqual(zweite.material_number, "47110001")
-        self.assertEqual(zweite.valid_from, datetime.date(2026, 9, 1))
-        self.assertEqual(result.positions[2].material_number, "4711-002")
-
-    def test_37_preisaenderung_im_satz(self) -> None:
-        text = ("Wir erhoehen den Preis fuer Dichtring 40x52x7 "
-                "zum 01.09.2026 auf 12,85 EUR.")
-        result = self.extractor.extract_text(text)
-        self.assertEqual(len(result.positions), 1)
-        position = result.positions[0]
-        self.assertEqual(position.description, "Dichtring 40x52x7")
-        self.assertEqual(position.price, Decimal("12.85"))
-        self.assertEqual(position.valid_from, datetime.date(2026, 9, 1))
-        self.assertEqual(position.origin("price"), FieldOrigin.UNCERTAIN)
-
-    def test_38_ohne_preis_keine_position(self) -> None:
-        text = ("Sehr geehrte Damen und Herren,\n"
-                "die Lieferzeit betraegt 6 Wochen.\n"
-                "Tel. 0123 456789\n"
-                "Summe: 1.234,00 EUR\n")
-        result = self.extractor.extract_text(text)
-        self.assertEqual(result.positions, [])
-
-    def test_39_beschriftungsblock(self) -> None:
-        text = ("Artikel: 4711-002\n"
-                "Bezeichnung: Dichtring 40x52x7\n"
-                "Menge: 100 Stk\n"
-                "Preis: 12,85 EUR\n")
-        result = self.extractor.extract_text(text)
-        self.assertEqual(len(result.positions), 1)
-        position = result.positions[0]
-        self.assertEqual(position.material_number, "4711-002")
-        self.assertEqual(position.description, "Dichtring 40x52x7")
-        self.assertEqual(position.quantity, Decimal("100"))
-        self.assertEqual(position.price, Decimal("12.85"))
-
-    def test_40_datum_ohne_jahr_wird_nicht_geraten(self) -> None:
-        result = self.extractor.extract_text(
-            "Neuer Preis fuer Artikel 4711002 ab 01.09. betraegt 12,85 EUR")
-        self.assertEqual(len(result.positions), 1)
-        self.assertIsNone(result.positions[0].valid_from)
-        self.assertTrue(any("ohne Jahresangabe" in note for note in result.notes))
-
-
-# ==========================================================================
-# 7 -- Leser (CSV, Excel, defekte Dateien)
-# ==========================================================================
-
-class LeserTests(TempDirCase):
-    def test_41_csv_trennzeichen_und_kodierung(self) -> None:
-        content = ("Material;Bezeichnung;Menge;Preis\r\n"
-                   "4711002;Dichtring gross;100;12,85\r\n"
-                   "4711003;Gehäusedeckel;50;3,40\r\n").encode("cp1252")
-        target = self.write("preise.csv", content)
-        raw = ReaderRegistry(self.settings.extraction).read(target)
-        self.assertEqual(raw.meta["delimiter"], ";")
-        self.assertEqual(raw.meta["encoding"], "cp1252")
-        self.assertIn("Gehäusedeckel", raw.text)
-        offer = OfferImportService(self.settings).import_file(target)
-        self.assertEqual(len(offer.positions), 2)
-        self.assertEqual(offer.positions[0].price, Decimal("12.85"))
-
-    def test_42_csv_trennzeichenerkennung(self) -> None:
-        self.assertEqual(detect_delimiter("a;b;c\n1;2;3\n"), ";")
-        self.assertEqual(detect_delimiter("a\tb\tc\n1\t2\t3\n"), "\t")
-        self.assertEqual(detect_delimiter("a|b|c\n1|2|3\n"), "|")
-
-    def test_43_xls_gibt_freundlichen_hinweis(self) -> None:
-        target = self.write("alt.xls", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 100)
-        raw = ReaderRegistry(self.settings.extraction).read(target)
-        try:
-            import xlrd  # noqa: F401
-        except ImportError:
-            self.assertIn(XLS_HINT, raw.warnings)
-            self.assertTrue(raw.meta.get("needs_conversion"))
-
-    def test_44_defekte_dateien_stuerzen_nicht_ab(self) -> None:
-        registry = ReaderRegistry(self.settings.extraction)
-        for name, content in (("kaputt.pdf", b"%PDF-1.4 nur Muell"),
-                              ("kaputt.xlsx", b"PK\x03\x04 kein Excel"),
-                              ("kaputt.eml", b"\x00\x01\x02")):
-            raw = registry.read(self.write(name, content))
-            self.assertIsInstance(raw, RawDocument)
-            self.assertFalse(raw.tables, msg=name)
-
-    def test_45_unbekanntes_format_wird_benannt(self) -> None:
-        target = self.write("zeichnung.dwg", b"egal")
-        service = OfferImportService(self.settings)
-        self.assertFalse(service.can_import(target))
-        offer = service.import_file(target)
-        self.assertTrue(any("wird nicht unterstuetzt" in str(i) for i in offer.issues))
-        self.assertTrue(offer.issues.has_blocking)
-
-    def test_46_fehlende_datei(self) -> None:
-        raw = ReaderRegistry(self.settings.extraction).read(self.path("gibtsnicht.pdf"))
-        self.assertTrue(any("nicht gefunden" in w for w in raw.warnings))
-
-
-# ==========================================================================
-# 8 -- Profile und Lernen
-# ==========================================================================
-
-class ProfilTests(unittest.TestCase):
-    ROWS = [
-        ["Pos", "Artikel", "Bezeichnung", "Menge", "Listenpreis", "Netto EUR"],
-        ["10", "4711002", "Dichtring", "100", "15,00", "12,85"],
-        ["20", "4711003", "O-Ring", "250", "4,00", "3,40"],
-    ]
+    """Kopffelder aus Fliesstext und aus Beschriftung/Wert-Zellen."""
 
     def setUp(self) -> None:
         self.settings = Settings()
 
-    def _document(self) -> RawDocument:
-        return make_document(self.ROWS, title="Preise")
+    # -- Beschriftung links, Wert rechts daneben ---------------------------
+    def test_50_label_wert_paare_aus_nachbarzellen(self) -> None:
+        rows = [
+            ["Muster Dichtungstechnik GmbH", "", "", ""],
+            ["Angebot Nr.:", "ANG-2026-04711", "Zahlungsbedingungen:",
+             "30 Tage netto"],
+            ["Angebotsdatum:", "17.08.2026", "Incoterm:", "FCA Bielefeld"],
+        ]
+        paare = dict(label_value_pairs(rows))
+        self.assertEqual(paare["Angebot Nr."], "ANG-2026-04711")
+        self.assertEqual(paare["Angebotsdatum"], "17.08.2026")
+        self.assertEqual(paare["Zahlungsbedingungen"], "30 Tage netto")
 
-    def _extract(self, document: RawDocument,
-                 profile: VendorProfile | None = None) -> Offer:
-        offer = Offer()
-        result = TableExtractor(self.settings, profile).extract(document)
-        offer.positions = result.positions
-        return offer
+    def test_51_wert_steht_in_der_zelle_darunter(self) -> None:
+        rows = [["Waehrung:", ""], ["EUR", ""]]
+        paare = dict(label_value_pairs(rows))
+        self.assertEqual(paare.get("Waehrung"), "EUR")
 
-    def test_47_fingerabdruck_ist_stabil_und_wertfrei(self) -> None:
-        erste = self._document()
-        zweite = make_document(
-            [self.ROWS[0], ["10", "4711002", "Dichtring", "100", "19,00", "16,00"]],
-            title="Preise")
-        # Gleiche Ueberschriften, andere Preise -> gleicher Fingerabdruck
-        self.assertEqual(fingerprint(erste), fingerprint(zweite))
-        andere = make_document([["Teil", "Text", "Anzahl", "Wert"],
-                                ["1", "x", "2", "3"]], title="Preise")
-        self.assertNotEqual(fingerprint(erste), fingerprint(andere))
+    def test_52_beschriftung_ohne_wert_liefert_nichts(self) -> None:
+        rows = [["Angebot Nr.:", ""], ["", ""]]
+        self.assertEqual(label_value_pairs(rows), [])
 
-    def test_48_profil_wird_ueber_domaene_gefunden(self) -> None:
-        document = self._document()
+    def test_53_beschriftung_folgt_keiner_beschriftung(self) -> None:
+        rows = [["Angebot Nr.:", "Angebotsdatum:"], ["", ""]]
+        self.assertEqual(label_value_pairs(rows), [])
+
+    def test_54_kopffelder_aus_label_wert_paaren(self) -> None:
+        rows = [
+            ["Angebot Nr.:", "ANG-2026-04711"],
+            ["Angebotsdatum:", "17.08.2026"],
+            ["Gueltig bis:", "15.11.2026"],
+            ["Waehrung:", "EUR"],
+        ]
+        treffer = extract_header_fields(label_value_text(
+            [TableBlock(rows=rows, origin="excel")]))
+        self.assertEqual(treffer["offer_number"].value, "ANG-2026-04711")
+        self.assertEqual(treffer["offer_date"].value, datetime.date(2026, 8, 17))
+        self.assertEqual(treffer["valid_to"].value, datetime.date(2026, 11, 15))
+        self.assertEqual(treffer["currency"].value, "EUR")
+
+    def test_55_spaltenkopfzeile_wird_nicht_als_beschriftung_gedeutet(self) -> None:
+        """'Gueltig ab' als Spaltenueberschrift ist kein Kopfdatenfeld."""
+        rows = [["Pos", "Material", "Bezeichnung", "Menge", "Preis", "Gueltig ab"],
+                ["10", "4711002", "Dichtring", "100", "12,85", "01.09.2026"]]
+        self.assertEqual(label_value_pairs(rows), [])
+
+    # -- Falsch-Treffer ----------------------------------------------------
+    def test_56_fuellwort_ist_keine_angebotsnummer(self) -> None:
+        """"Unsere Angebotsnummer lautet ANG-2026-04712" -- nicht 'lautet'."""
+        treffer = extract_header_fields(
+            "Unsere Angebotsnummer lautet ANG-2026-04712, das Angebot ist "
+            "60 Tage gueltig.")
+        self.assertIn("offer_number", treffer)
+        self.assertEqual(treffer["offer_number"].value, "ANG-2026-04712")
+
+    def test_57_weitere_fuellwoerter(self) -> None:
+        for satz, erwartet in (
+                ("Die Angebotsnummer ist ANG-2026-04712", "ANG-2026-04712"),
+                ("Unsere Angebotsnummer war AG-1188", "AG-1188"),
+                ("Angebots-Nr.: ANG-2026-04711", "ANG-2026-04711")):
+            with self.subTest(satz=satz):
+                treffer = extract_header_fields(satz)
+                self.assertIn("offer_number", treffer)
+                self.assertEqual(treffer["offer_number"].value, erwartet)
+
+    def test_58_kein_kopffeld_enthaelt_ein_fuellwort(self) -> None:
+        """Systematisch: kein Kopfwert darf ein blosses Fuellwort sein."""
+        fuellwoerter = {"lautet", "ist", "war", "folgende", "folgender", "nummer",
+                        "nr", "no", "is", "reads", "sind", "waren"}
+        saetze = (
+            "Unsere Angebotsnummer lautet ANG-2026-04712",
+            "Die Lieferantennummer ist 100234",
+            "Ihre Kundennummer lautet 47110",
+            "Angebotsdatum ist der 17.08.2026",
+            "Zahlungsbedingungen sind 30 Tage netto",
+            "Our offer number is Q-2026-8842",
+            "Die Waehrung ist EUR",
+        )
+        for satz in saetze:
+            with self.subTest(satz=satz):
+                for feld, treffer in extract_header_fields(satz).items():
+                    text = str(treffer.value).strip().lower()
+                    self.assertNotIn(text, fuellwoerter,
+                                     f"{feld} wurde zu '{treffer.value}' geraten")
+
+    def test_59_ohne_erkennbaren_wert_bleibt_das_feld_leer(self) -> None:
+        """Lieber leer als falsch."""
+        treffer = extract_header_fields("Die Angebotsnummer teilen wir spaeter mit.")
+        wert = treffer.get("offer_number")
+        self.assertTrue(wert is None or any(c.isdigit() for c in str(wert.value)),
+                        f"unplausibler Fund: {wert}")
+
+    def test_60_belegnummer_braucht_ziffer_oder_bindestrich(self) -> None:
+        treffer = extract_header_fields("Angebots-Nr.: AB-CDEF")
+        self.assertEqual(treffer["offer_number"].value, "AB-CDEF")
+        treffer = extract_header_fields("Angebots-Nr.: siehe")
+        self.assertNotIn("offer_number", treffer)
+
+    # -- uebrige Kopfregeln ------------------------------------------------
+    def test_61_kopffelder_aus_fliesstext(self) -> None:
+        text = (
+            "Pumpen Weber GmbH & Co. KG\n"
+            "Angebots-Nr.:  AG-2026-1188\n"
+            "Datum:  17.08.2026\n"
+            "Freibleibend gueltig bis:  16.10.2026\n"
+            "Kundennummer:  47110\n"
+            "Zahlungsziel:  60 Tage netto\n"
+            "Lieferbedingung:  CPT Werk\n"
+            "Waehrung:  EUR\n"
+        )
+        treffer = extract_header_fields(text)
+        self.assertEqual(treffer["offer_number"].value, "AG-2026-1188")
+        self.assertEqual(treffer["offer_date"].value, datetime.date(2026, 8, 17))
+        self.assertEqual(treffer["valid_to"].value, datetime.date(2026, 10, 16))
+        self.assertEqual(treffer["currency"].value, "EUR")
+        self.assertEqual(treffer["incoterm"].value, "CPT")
+
+    def test_62_incoterm_mit_ort(self) -> None:
+        code, ort, konfidenz = find_incoterm("Incoterms 2020: FCA Bielefeld")
+        self.assertEqual(code, "FCA")
+        self.assertEqual(ort, "Bielefeld")
+        self.assertGreater(konfidenz, 0.5)
+
+    def test_63_lieferantenname_aus_signatur(self) -> None:
+        name, konfidenz = vendor_name_from_signature(
+            "Mit freundlichen Gruessen\nThomas Wagner\nVertrieb\n"
+            "Muster Dichtungstechnik GmbH\n")
+        self.assertEqual(name, "Muster Dichtungstechnik GmbH")
+        self.assertGreater(konfidenz, 0.5)
+
+    def test_64_kein_firmenname_aus_einer_datumszeile(self) -> None:
+        name, _ = vendor_name_from_signature("gueltig ab 01.09.2026")
+        self.assertEqual(name, "", "'AB' darf keinen Firmennamen erzeugen")
+
+    def test_65_unsichere_treffer_werden_markiert(self) -> None:
+        treffer = extract_header_fields("Bielefeld, den 17.08.2026")
+        self.assertEqual(treffer["offer_date"].origin, FieldOrigin.UNCERTAIN)
+
+
+# ==========================================================================
+# 4. E-Mail und .msg
+# ==========================================================================
+
+class EmailTests(TempDirCase):
+    """E-Mails: Freitext, HTML-Tabelle, Anhang, Signaturschnitt."""
+
+    def _eml(self, name: str, body: str, html: str = "",
+             attachment: tuple[str, bytes] | None = None) -> str:
+        message = EmailMessage()
+        message["From"] = "T. Wagner (Muster GmbH) <vertrieb@muster-dichtung.de>"
+        message["To"] = "einkauf@technotrans.de"
+        message["Subject"] = "Preisanpassung zum 01.09.2026"
+        message["Date"] = "Mon, 17 Aug 2026 09:00:00 +0200"
+        message.set_content(body)
+        if html:
+            message.add_alternative(html, subtype="html")
+        if attachment:
+            filename, data = attachment
+            message.add_attachment(data, maintype="text", subtype="csv",
+                                   filename=filename)
+        return self.write(name, message.as_bytes())
+
+    def test_70_eml_freitext(self) -> None:
+        path = self._eml("preis.eml",
+                         "Sehr geehrte Damen und Herren,\n\n"
+                         "wir passen unsere Preise wie folgt an:\n"
+                         "  - Artikel 47110001, Dichtring NBR: 12,85 EUR je Stueck\n"
+                         "  - Artikel 47110002, O-Ring Viton: 8,90 EUR je Stueck\n\n"
+                         "Unsere Angebotsnummer lautet ANG-2026-04712.\n")
+        offer = OfferImportService(self.settings, InMemoryProfileStore()).import_file(path)
+        self.assertIsNotNone(offer.email)
+        self.assertEqual(offer.email.sender_domain, "muster-dichtung.de")
+        self.assertGreaterEqual(len(offer.positions), 2)
+        self.assertEqual(offer.offer_number, "ANG-2026-04712")
+
+    def test_71_eml_angebotsnummer_ist_kein_fuellwort(self) -> None:
+        path = self._eml("preis.eml",
+                         "Unsere Angebotsnummer lautet ANG-2026-04712.\n"
+                         "Artikel 47110001: 12,85 EUR je Stueck\n")
+        offer = OfferImportService(self.settings, InMemoryProfileStore()).import_file(path)
+        self.assertNotEqual(offer.offer_number, "lautet")
+        self.assertEqual(offer.offer_number, "ANG-2026-04712")
+
+    def test_72_html_tabelle_in_der_mail(self) -> None:
+        html = ("<html><body><p>Unsere Preise:</p><table>"
+                "<tr><th>Material</th><th>Bezeichnung</th><th>Menge</th>"
+                "<th>Preis</th></tr>"
+                "<tr><td>47110001</td><td>Dichtring NBR</td><td>500</td>"
+                "<td>12,85</td></tr>"
+                "<tr><td>47110002</td><td>O-Ring Viton</td><td>200</td>"
+                "<td>8,90</td></tr>"
+                "</table></body></html>")
+        path = self._eml("html.eml", "Bitte die Tabelle beachten.", html=html)
+        offer = OfferImportService(self.settings, InMemoryProfileStore()).import_file(path)
+        materialien = {p.material_number for p in offer.positions}
+        self.assertIn("47110001", materialien, offer.extraction_notes)
+
+    def test_73_html_wird_zu_text_und_tabellen(self) -> None:
+        text, tabellen = html_to_text(
+            "<p>Hallo</p><table><tr><td>A</td><td>B</td></tr></table>")
+        self.assertIn("Hallo", text)
+        self.assertEqual(tabellen[0][0], ["A", "B"])
+
+    def test_74_mail_mit_anhang(self) -> None:
+        csv = ("Material;Bezeichnung;Menge;Preis\n"
+               "47110001;Dichtring;500;12,85\n"
+               "47110002;O-Ring;200;8,90\n").encode("utf-8")
+        path = self._eml("anhang.eml", "Preise siehe Anhang.",
+                         attachment=("preise.csv", csv))
+        offer = OfferImportService(self.settings, InMemoryProfileStore()).import_file(path)
+        self.assertGreaterEqual(len(offer.positions), 2)
+        self.assertTrue(any(p.source_kind is SourceKind.EMAIL_ATTACHMENT
+                            for p in offer.positions))
+
+    def test_75_signatur_wird_abgeschnitten(self) -> None:
+        text, signatur = strip_signature(
+            "Wir passen die Preise an.\n"
+            "Artikel 47110001: 12,85 EUR\n"
+            "Die Lieferzeit betraegt 14 Tage.\n\n"
+            "Mit freundlichen Gruessen\n"
+            "Thomas Wagner\n"
+            "Muster Dichtungstechnik GmbH\n"
+            "Telefon 0521 555-120\n")
+        self.assertIn("12,85", text)
+        self.assertNotIn("Telefon", text)
+        self.assertIn("Wagner", signatur)
+
+    def test_76_signatur_bleibt_fuer_die_kopfdaten_nutzbar(self) -> None:
+        path = self._eml("sig.eml",
+                         "Artikel 47110001: 12,85 EUR je Stueck\n"
+                         "Die Lieferzeit betraegt 14 Tage.\n\n"
+                         "Mit freundlichen Gruessen\n"
+                         "Thomas Wagner\n"
+                         "Muster Dichtungstechnik GmbH\n")
+        offer = OfferImportService(self.settings, InMemoryProfileStore()).import_file(path)
+        self.assertTrue(offer.vendor_name, "Lieferant muss aus der Signatur kommen")
+
+    def test_77_leere_mail_liefert_keine_position(self) -> None:
+        path = self._eml("leer.eml", "Guten Tag,\n\nvielen Dank.\n")
+        offer = OfferImportService(self.settings, InMemoryProfileStore()).import_file(path)
+        self.assertEqual(len(offer.positions), 0)
+
+
+class MsgTests(TempDirCase):
+    """Outlook-.msg -- selbst erzeugte Minimaldatei und Schrottdatei."""
+
+    def test_80_minimale_msg_wird_gelesen(self) -> None:
+        data = _build_cfb([
+            _unicode_prop(0x0037, "Preisanpassung zum 01.09.2026"),
+            _unicode_prop(0x1000, "Artikel 47110001: 12,85 EUR je Stueck"),
+            _unicode_prop(0x0C1A, "Thomas Wagner"),
+        ])
+        path = self.write("angebot.msg", data)
+        msg = read_msg(path)
+        self.assertTrue(msg.ok, f"nichts gelesen: {msg.errors}")
+        self.assertEqual(msg.subject, "Preisanpassung zum 01.09.2026")
+        self.assertIn("12,85", msg.body)
+
+    def test_81_kaputte_msg_wirft_nicht(self) -> None:
+        path = self.write("kaputt.msg", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+                          + b"\x00" * 100)
+        try:
+            msg = read_msg(path)
+        except Exception as exc:  # noqa: BLE001 -- genau das darf nicht passieren
+            self.fail(f"read_msg ist abgestuerzt: {type(exc).__name__}: {exc}")
+        self.assertTrue(msg.errors, "eine kaputte Datei muss einen Hinweis liefern")
+
+    def test_82_msg_ueber_den_importdienst(self) -> None:
+        path = self.write("kaputt.msg", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+                          + b"\x00" * 100)
+        service = OfferImportService(self.settings, InMemoryProfileStore())
+        try:
+            offer = service.import_file(path)
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"Import einer kaputten .msg stuerzte ab: {exc}")
+        self.assertEqual(len(offer.positions), 0)
+
+
+# ==========================================================================
+# 5. Profile und Lernen
+# ==========================================================================
+
+class ProfilLernenTests(TempDirCase):
+    """Gelernt wird, WO ein Wert steht -- nie, WELCHER Wert es ist."""
+
+    def _import(self, inhalt: str, store: InMemoryProfileStore
+                ) -> tuple[OfferImportService, Offer]:
+        path = self.write("preise.csv", inhalt.encode("utf-8"))
+        service = OfferImportService(self.settings, store)
+        return service, service.import_file(path)
+
+    def test_90_profil_wird_ueber_die_domaene_gefunden(self) -> None:
+        document = make_document([["Material", "Preis"], ["4711002", "12,85"]])
         document.email = EmailContext(from_address="e.muster@muster-dichtung.de")
         profile = VendorProfile(profile_id="p1", vendor_key="123456",
                                 vendor_name="Muster GmbH",
                                 email_domains=["muster-dichtung.de"])
-        found, score = match_profile([profile], document, Offer())
-        self.assertIs(found, profile)
-        self.assertGreaterEqual(score, 0.45)
+        gefunden, score = match_profile([profile], document, Offer())
+        self.assertIs(gefunden, profile)
+        self.assertGreaterEqual(score, 0.55)
 
+    def test_91_fremdes_profil_wird_nicht_genommen(self) -> None:
+        document = make_document([["Material", "Preis"], ["4711002", "12,85"]])
+        document.email = EmailContext(from_address="e.muster@muster-dichtung.de")
         fremd = VendorProfile(profile_id="p2", vendor_key="999",
                               email_domains=["andere.de"])
-        found, _ = match_profile([fremd], document, Offer())
-        self.assertIsNone(found)
+        gefunden, _ = match_profile([fremd], document, Offer())
+        self.assertIsNone(gefunden)
 
-    def test_49_lernen_der_spaltenzuordnung(self) -> None:
-        document = self._document()
-        original = self._extract(document)
-        corrected = Offer()
-        corrected.positions = [copy.deepcopy(p) for p in original.positions]
-        corrected.positions[0].set_field("price", Decimal("15.00"), FieldOrigin.MANUAL)
-        corrected.positions[1].set_field("price", Decimal("4.00"), FieldOrigin.MANUAL)
-
-        profile = learn_from_corrections(original, corrected, document, None)
-        self.assertEqual(profile.column_map.get("listenpreis"), "price")
-        self.assertEqual(profile.correction_count, 1)
-
-        # Zweiter Import mit dem gelernten Profil
-        wieder = self._extract(self._document(), profile)
-        self.assertEqual(wieder.positions[0].price, Decimal("15.00"))
-
-    def test_50_gelernte_regel_ist_rueckbaubar(self) -> None:
-        document = self._document()
-        original = self._extract(document)
-        corrected = Offer()
-        corrected.positions = [copy.deepcopy(p) for p in original.positions]
-        corrected.positions[0].set_field("price", Decimal("15.00"), FieldOrigin.MANUAL)
-        profile = learn_from_corrections(original, corrected, document, None)
-
-        self.assertTrue(describe_learning(profile))
-        self.assertTrue(forget_rule(profile, "column_map:listenpreis=price"))
-        self.assertNotIn("listenpreis", profile.column_map)
-        profile.reset_learning()
-        self.assertEqual(profile.column_map, {})
-        self.assertEqual(profile.decimal_style, "auto")
-
-    def test_51_verworfene_zeile_wird_zur_skip_regel(self) -> None:
-        rows = self.ROWS + [["30", "9999", "Mindermengenzuschlag", "1", "25,00", "25,00"]]
-        document = make_document(rows, title="Preise")
-        original = self._extract(document)
-        self.assertEqual(len(original.positions), 3)
-        corrected = Offer()
-        corrected.positions = [copy.deepcopy(p) for p in original.positions[:2]]
-
-        profile = learn_from_corrections(original, corrected, document, None)
-        self.assertTrue(profile.skip_patterns)
-        # Die Regel darf keinen Betrag enthalten -- nur die Art der Zeile
-        self.assertTrue(any("Mindermengenzuschlag" in p for p in profile.skip_patterns))
-        self.assertFalse(any("25" in p for p in profile.skip_patterns))
-
-        nachher = self._extract(make_document(rows, title="Preise"), profile)
-        self.assertEqual(len(nachher.positions), 2)
-
-    def test_52_kopfregel_erst_nach_zwei_bestaetigungen(self) -> None:
-        text = ("Muster GmbH\n"
-                "Unsere Referenz  AN-2026-4711\n"
-                "Preisliste\n")
-        document = make_document(self.ROWS, title="Preise", text=text)
-        original = Offer()
-        corrected = Offer()
-        corrected.set_field("offer_number", "AN-2026-4711", FieldOrigin.MANUAL)
-
-        config = LearningConfig()
-        profile = learn_from_corrections(original, corrected, document, None, config)
-        self.assertNotIn("offer_number", profile.header_regexes)
-        self.assertTrue(profile.pending_rules)
-
-        profile = learn_from_corrections(original, corrected, document, profile, config)
-        self.assertIn("offer_number", profile.header_regexes)
-        self.assertNotIn("AN-2026-4711", profile.header_regexes["offer_number"],
-                         "Eine gelernte Regel darf niemals den Wert selbst enthalten")
-
-    def test_53_profilspeicher(self) -> None:
+    def test_92_dienst_lernt_und_speichert_das_profil(self) -> None:
         store = InMemoryProfileStore()
-        profile = new_profile(Offer(vendor_name="Muster GmbH"), self._document())
-        store.save_profile(profile)
-        self.assertEqual(len(store.load_profiles()), 1)
-        store.delete_profile(profile.profile_id)
-        self.assertEqual(store.load_profiles(), [])
-
-
-# ==========================================================================
-# 9 -- Gesamtdienst
-# ==========================================================================
-
-class ImportDienstTests(TempDirCase):
-    def test_54_import_von_eingefuegtem_text(self) -> None:
-        text = ("Angebot Nr. AN-2026-4711\n"
-                "Angebotsdatum: 15.08.2026\n"
-                "Waehrung: EUR\n"
-                "Artikel 4711002 / 100 Stk / 12,85 EUR\n")
-        offer = OfferImportService(self.settings).import_text(text)
-        self.assertEqual(offer.offer_number, "AN-2026-4711")
-        self.assertEqual(offer.currency, "EUR")
-        self.assertEqual(len(offer.positions), 1)
-        self.assertEqual(offer.positions[0].currency, "EUR")
-
-    def test_55_mehrere_dateien_ein_angebot(self) -> None:
-        eins = self.write("kopf.txt", ("Angebot Nr. AN-2026-4711\n"
-                                       "Angebotsdatum: 15.08.2026\n"
-                                       "Waehrung: EUR\n").encode("utf-8"))
-        zwei = self.write("preise.csv",
-                          ("Material;Bezeichnung;Menge;Preis\n"
-                           "4711002;Dichtring;100;12,85\n").encode("utf-8"))
-        offer = OfferImportService(self.settings).import_files([eins, zwei])
-        self.assertEqual(offer.offer_number, "AN-2026-4711")
-        self.assertEqual(len(offer.positions), 1)
-        self.assertEqual(len(offer.source_files), 2)
-
-    def test_56_nachbearbeitung_setzt_nur_voreinstellungen(self) -> None:
-        target = self.write("preise.csv",
-                            ("Material;Bezeichnung;Menge;ME;Preis\n"
-                             "4711002;Dichtring;100;Stck;12,85\n").encode("utf-8"))
-        offer = OfferImportService(self.settings).import_file(target)
-        position = offer.positions[0]
-        self.assertEqual(position.uom, "ST")                  # normalisiert
-        self.assertEqual(position.price_unit, self.settings.purchasing.price_unit)
-        self.assertEqual(position.origin("price_unit"), FieldOrigin.DEFAULT)
-        self.assertEqual(position.purchasing_org,
-                         self.settings.purchasing.purchasing_org)
-        self.assertTrue(position.position_number)             # Nummerierung ergaenzt
-
-    def test_57_ohne_positionen_gibt_es_einen_blockierenden_befund(self) -> None:
-        target = self.write("info.txt", b"Guten Tag, wir melden uns naechste Woche.")
-        offer = OfferImportService(self.settings).import_file(target)
-        self.assertEqual(offer.positions, [])
-        self.assertTrue(offer.issues.has_blocking)
-        self.assertTrue(any(i.code == "no_positions" for i in offer.issues))
-
-    def test_58_waehrung_wird_nicht_erfunden(self) -> None:
-        target = self.write("preise.csv",
-                            ("Material;Bezeichnung;Menge;Preis\n"
-                             "4711002;Dichtring;100;12,85\n").encode("utf-8"))
-        offer = OfferImportService(self.settings).import_file(target)
-        self.assertEqual(offer.currency, "")
-        self.assertEqual(offer.origin("currency"), FieldOrigin.MISSING)
-        self.assertTrue(any(i.code == "currency_missing" for i in offer.issues))
-
-    def test_59_unterstuetzte_formate(self) -> None:
-        service = OfferImportService(self.settings)
-        extensions = service.supported_extensions()
-        for expected in (".pdf", ".xlsx", ".csv", ".eml", ".msg", ".txt", ".html"):
-            self.assertIn(expected, extensions)
-        self.assertTrue(service.can_import("irgendwas.PDF"))
-        self.assertFalse(service.can_import("zeichnung.dwg"))
-
-    def test_60_dienst_lernt_und_speichert_das_profil(self) -> None:
-        target = self.write("preise.csv",
-                            ("Material;Bezeichnung;Menge;Listenpreis;Netto EUR\n"
-                             "4711002;Dichtring;100;15,00;12,85\n").encode("utf-8"))
-        store = InMemoryProfileStore()
-        service = OfferImportService(self.settings, store)
-        offer = service.import_file(target)
+        service, offer = self._import(
+            "Material;Bezeichnung;Menge;Listenpreis;Netto EUR\n"
+            "4711002;Dichtring;100;15,00;12,85\n", store)
         self.assertIsNotNone(service.last_document())
 
         corrected = copy.deepcopy(offer)
@@ -1117,19 +1046,134 @@ class ImportDienstTests(TempDirCase):
         profile = service.learn(offer, corrected)
         self.assertIsNotNone(profile)
         self.assertEqual(profile.column_map.get("listenpreis"), "price")
-        self.assertEqual(len(store.load_profiles()), 1)
+        self.assertEqual(len(store.load_profiles()), 1,
+                         "das uebergebene (leere) Profillager muss benutzt werden")
 
-    def test_61_protokoll_ist_nachvollziehbar(self) -> None:
-        target = self.write("preise.csv",
-                            ("Material;Bezeichnung;Menge;Preis\n"
-                             "4711002;Dichtring;100;12,85\n").encode("utf-8"))
-        offer = OfferImportService(self.settings).import_file(target)
-        joined = " ".join(offer.extraction_notes)
-        self.assertIn("Tabellenstruktur", joined)
-        self.assertIn("Import abgeschlossen", joined)
-        self.assertTrue(offer.positions[0].source_hint)
-        self.assertTrue(offer.positions[0].raw_text)
+    def test_93_leeres_profillager_wird_nicht_ersetzt(self) -> None:
+        store = InMemoryProfileStore()
+        service = OfferImportService(self.settings, store)
+        self.assertIs(service.profile_store, store)
+
+    def test_94_korrigierte_spaltenrolle_wird_gelernt(self) -> None:
+        """Der Anwender stellt richtig, welche Spalte unsere Nummer ist."""
+        store = InMemoryProfileStore()
+        service, offer = self._import(
+            "Pos;Artikelnummer;Bezeichnung;Menge;Preis\n"
+            "10;AB-4711;Dichtring;100;12,85\n", store)
+        corrected = copy.deepcopy(offer)
+        corrected.positions[0].set_field("vendor_material_number", "AB-4711",
+                                         FieldOrigin.MANUAL)
+        profile = service.learn(offer, corrected)
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.material_column_role.get("artikelnummer"),
+                         "vendor_material_number", describe_learning(profile))
+
+    def test_95_gelernte_rolle_wirkt_beim_naechsten_angebot(self) -> None:
+        profile = VendorProfile(profile_id="p1", vendor_key="123456")
+        profile.material_column_role["artikelnummer"] = "vendor_material_number"
+        rows = [["Pos", "Artikelnummer", "Bezeichnung", "Menge", "Preis"],
+                ["10", "47110001", "Dichtring", "500", "12,85"]]
+        position = first_position(rows, self.settings, profile)
+        self.assertEqual(position.vendor_material_number, "47110001")
+        self.assertEqual(position.material_number, "")
+
+    def test_96_gelernte_rolle_laesst_sich_verwerfen(self) -> None:
+        profile = VendorProfile(profile_id="p1", vendor_key="123456")
+        profile.column_map["artikelnummer"] = "vendor_material_number"
+        profile.material_column_role["artikelnummer"] = "vendor_material_number"
+        self.assertTrue(forget_rule(
+            profile, "column_map:artikelnummer=vendor_material_number"))
+        self.assertNotIn("artikelnummer", profile.material_column_role)
+        self.assertNotIn("artikelnummer", profile.column_map)
+
+    def test_97_reset_verwirft_alles_gelernte(self) -> None:
+        profile = VendorProfile(profile_id="p1")
+        profile.column_map["netto eur"] = "price"
+        profile.material_column_role["artikelnummer"] = "material_number"
+        profile.decimal_style = "de"
+        profile.reset_learning()
+        self.assertEqual(profile.column_map, {})
+        self.assertEqual(profile.material_column_role, {})
+        self.assertEqual(profile.decimal_style, "auto")
+
+    def test_98_gelerntes_ist_im_klartext_nachlesbar(self) -> None:
+        profile = VendorProfile(profile_id="p1")
+        profile.material_column_role["artikelnummer"] = "material_number"
+        zeilen = " ".join(describe_learning(profile))
+        self.assertIn("artikelnummer", zeilen)
+        self.assertIn("unsere Materialnummer", zeilen)
+
+    def test_99_gelernt_wird_nie_ein_wert(self) -> None:
+        """Ein Profil darf keinen Preis und keine Bezeichnung enthalten."""
+        store = InMemoryProfileStore()
+        service, offer = self._import(
+            "Material;Bezeichnung;Menge;Listenpreis;Netto EUR\n"
+            "4711002;Dichtring;100;15,00;12,85\n", store)
+        corrected = copy.deepcopy(offer)
+        corrected.positions[0].set_field("price", Decimal("15.00"), FieldOrigin.MANUAL)
+        profile = service.learn(offer, corrected)
+        blob = str(profile.to_dict())
+        for wert in ("15.00", "15,00", "12,85", "Dichtring"):
+            self.assertNotIn(wert, blob, f"'{wert}' darf nicht im Profil stehen")
 
 
-if __name__ == "__main__":  # pragma: no cover
+# ==========================================================================
+# 6. Robustheit
+# ==========================================================================
+
+class RobustheitTests(TempDirCase):
+    """Kaputte Eingaben duerfen nie eine Exception nach aussen geben."""
+
+    def _pruefe(self, name: str, daten: bytes) -> Offer:
+        path = self.write(name, daten)
+        service = OfferImportService(self.settings, InMemoryProfileStore())
+        try:
+            offer = service.import_file(path)
+        except Exception as exc:  # noqa: BLE001 -- genau das darf nicht passieren
+            self.fail(f"{name} fuehrte zum Absturz: {type(exc).__name__}: {exc}")
+        self.assertEqual(len(offer.positions), 0,
+                         f"{name} lieferte erfundene Positionen")
+        return offer
+
+    def test_A1_leere_excel(self) -> None:
+        self._pruefe("leer.xlsx", b"")
+
+    def test_A2_kaputtes_pdf(self) -> None:
+        self._pruefe("kaputt.pdf", b"%PDF-1.4\nJUNK JUNK JUNK")
+
+    def test_A3_csv_nur_kopfzeile(self) -> None:
+        self._pruefe("nur_kopf.csv", "Pos;Material;Preis\n".encode("utf-8"))
+
+    def test_A4_kaputte_mail(self) -> None:
+        self._pruefe("kaputt.eml", b"Das ist keine gueltige Mail\x00\xff")
+
+    def test_A5_leerer_text(self) -> None:
+        service = OfferImportService(self.settings, InMemoryProfileStore())
+        for text in ("", "   ", "Hallo Welt"):
+            with self.subTest(text=text):
+                offer = service.import_text(text, "Fuzz")
+                self.assertEqual(len(offer.positions), 0)
+
+    def test_A6_tabelle_ohne_verwertbare_struktur(self) -> None:
+        rows = [["A", "B", "C"], ["x", "y", "z"], ["1", "2", "3"]]
+        result = TableExtractor(self.settings).extract(make_document(rows))
+        self.assertEqual(len(result.positions), 0)
+        self.assertTrue(result.notes)
+
+    def test_A7_zeilen_ohne_preis_erzeugen_keine_position(self) -> None:
+        extractor = FreetextExtractor(self.settings)
+        result = extractor.extract_text("Artikel 47110001, Dichtring NBR 40x52x7")
+        self.assertEqual(len(result.positions), 0,
+                         "ohne Preis darf keine Position entstehen")
+
+    def test_A8_datum_ohne_jahr_wird_nicht_geraten(self) -> None:
+        extractor = FreetextExtractor(self.settings)
+        result = extractor.extract_text(
+            "Artikel 47110001: 12,85 EUR je Stueck ab 01.09.")
+        for position in result.positions:
+            self.assertIsNone(position.valid_from,
+                              "ein fehlendes Jahr darf nicht ergaenzt werden")
+
+
+if __name__ == "__main__":
     unittest.main(verbosity=2)

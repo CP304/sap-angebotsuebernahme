@@ -33,6 +33,7 @@ from ...utils.parsing import (
     parse_int,
 )
 from ..readers.base import RawDocument
+from .material_roles import find_labelled_material_matches
 from .table_extractor import parse_number
 
 logger = logging.getLogger(__name__)
@@ -220,12 +221,28 @@ class FreetextExtractor:
 
         consumed: list[tuple[int, int]] = [price_span]
 
-        material, material_confident, material_span = self._find_material(line, price_span)
-        if material:
-            position.set_field("material_number", normalize_material_number(material),
-                               FieldOrigin.EXTRACTED if material_confident
-                               else FieldOrigin.UNCERTAIN)
-            consumed.append(material_span)
+        # 1. Eindeutig beschriftete Nummern ("Ihre Materialnummer 47110001",
+        #    "unsere Artikelnummer DR-40527").  Hier sagt der Text selbst, aus
+        #    wessen Sicht die Nummer gemeint ist -- das schlaegt jede Heuristik.
+        labelled = find_labelled_material_matches(line)
+        for field_name, (value, span) in labelled.items():
+            if _overlaps(span, price_span):
+                continue
+            position.set_field(field_name, normalize_material_number(value),
+                               FieldOrigin.EXTRACTED)
+            consumed.append(span)
+
+        # 2. Neutrale Beschriftung ("Artikel 4711") bzw. blosses Nummernmuster.
+        #    Nur, wenn oben noch keine eigene Nummer gefunden wurde.
+        if not position.material_number:
+            material, material_confident, material_span = self._find_material(
+                line, price_span, skip=consumed)
+            if material:
+                position.set_field("material_number",
+                                   normalize_material_number(material),
+                                   FieldOrigin.EXTRACTED if material_confident
+                                   else FieldOrigin.UNCERTAIN)
+                consumed.append(material_span)
 
         quantity, uom, quantity_span = self._find_quantity(line, consumed)
         if quantity is not None:
@@ -258,7 +275,8 @@ class FreetextExtractor:
         if description:
             position.set_field("description", description, FieldOrigin.UNCERTAIN)
 
-        if not position.material_number and not position.description:
+        if (not position.material_number and not position.vendor_material_number
+                and not position.description):
             return None
         return position
 
@@ -287,13 +305,15 @@ class FreetextExtractor:
             return None, "", (0, 0)
         return best[0], best[1], best[2]
 
-    def _find_material(self, line: str,
-                       price_span: tuple[int, int]) -> tuple[str, bool, tuple[int, int]]:
+    def _find_material(self, line: str, price_span: tuple[int, int],
+                       skip: list[tuple[int, int]] = ()
+                       ) -> tuple[str, bool, tuple[int, int]]:
+        blocked = [price_span, *skip]
         labelled = _LABELLED_MATERIAL.search(line)
-        if labelled and not _overlaps(labelled.span(1), price_span):
+        if labelled and not any(_overlaps(labelled.span(1), s) for s in blocked):
             return labelled.group(1).strip(" .,;"), True, labelled.span()
         for match in self.material_re.finditer(line):
-            if _overlaps(match.span(), price_span):
+            if any(_overlaps(match.span(), s) for s in blocked):
                 continue
             candidate = match.group(0)
             if parse_date(candidate) is not None:
@@ -404,7 +424,31 @@ class FreetextExtractor:
         if currency:
             position.set_field("currency", currency, FieldOrigin.UNCERTAIN)
 
-        material = pick("artikel", "material", "mat", "teile", "sachnummer", "item", "part")
+        # Beschriftungen, die ausdruecklich sagen, wessen Nummer gemeint ist,
+        # haben Vorrang vor den neutralen ("Artikel: ...").
+        own_labelled = pick("ihre art", "ihr art", "ihre material", "ihre mat",
+                            "ihre teile", "ihre sach", "ihre bestell",
+                            "kundenartikel", "kunden-artikel", "kundenmaterial",
+                            "kunden-material", "kundenteile", "kd-art", "kd art",
+                            "customer part", "customer material", "customer item",
+                            "customer article", "your part", "your material",
+                            "your item", "your ref")
+        vendor_labelled = pick("unsere art", "unser art", "unsere material",
+                               "unsere mat", "unsere sach", "unsere bestell",
+                               "lieferantenartikel", "lieferantenmaterial",
+                               "hersteller", "our part", "our material", "our item",
+                               "supplier part", "supplier material", "vendor part")
+        if own_labelled:
+            position.set_field("material_number",
+                               normalize_material_number(own_labelled),
+                               FieldOrigin.UNCERTAIN)
+        if vendor_labelled:
+            position.set_field("vendor_material_number",
+                               normalize_material_number(vendor_labelled),
+                               FieldOrigin.UNCERTAIN)
+
+        material = "" if own_labelled else pick("artikel", "material", "mat",
+                                                "teile", "sachnummer", "item", "part")
         if material:
             position.set_field("material_number", normalize_material_number(material),
                                FieldOrigin.UNCERTAIN)
@@ -434,7 +478,8 @@ class FreetextExtractor:
             if valid_from:
                 position.set_field("valid_from", valid_from, FieldOrigin.UNCERTAIN)
 
-        if not position.material_number and not position.description:
+        if (not position.material_number and not position.vendor_material_number
+                and not position.description):
             return None
         return position
 

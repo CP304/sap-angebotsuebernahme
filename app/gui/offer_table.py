@@ -74,7 +74,7 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("price", "Neuer Preis", 92, True, "decimal",
                "Preis aus dem Angebot",
                align=int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)),
-    ColumnSpec("change_percent", "Aenderung %", 88, False, "text",
+    ColumnSpec("change_percent", "Aenderung %", 104, False, "text",
                "Preisaenderung, bereinigt um die Preiseinheit",
                align=int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)),
     ColumnSpec("price_unit", "PE", 46, True, "int", "Preiseinheit",
@@ -89,10 +89,32 @@ COLUMNS: tuple[ColumnSpec, ...] = (
                "Mengenkontrakt schreiben (ME31K)"),
     ColumnSpec("do_purchase_order", "Bestellung", 96, True, "action",
                "Bestellung als Abruf anlegen (ME21N)"),
+    ColumnSpec("actions", "Aktionen", 116, False, "actions",
+               "Geplante SAP-Aktionen: IS = Infosatz, OB = Orderbuch, "
+               "MK = Mengenkontrakt, BE = Bestellung"),
     ColumnSpec("status", "Status", 170, False, "status"),
 )
 
 COLUMN_INDEX = {spec.key: index for index, spec in enumerate(COLUMNS)}
+
+#: Standardansicht -- bewusst knapp.  Alles Weitere steht in der Detailansicht
+#: und laesst sich ueber "Ansicht -> Alle Spalten" einblenden.
+COMPACT_COLUMNS = (
+    "selected", "position_number", "material_number", "description",
+    "vendor_display", "quantity", "uom", "old_price", "price", "change_percent",
+    "actions", "status",
+)
+
+#: Zusatzspalten der ausfuehrlichen Ansicht
+DETAILED_ONLY = tuple(spec.key for spec in COLUMNS if spec.key not in COMPACT_COLUMNS)
+
+#: Kuerzel der vier SAP-Aktionen fuer die Sammelspalte
+ACTION_BADGES = (
+    ("do_info_record", "IS"),
+    ("do_source_list", "OB"),
+    ("do_contract", "MK"),
+    ("do_purchase_order", "BE"),
+)
 
 #: Rolle, ueber die die Detailansicht die Position bekommt
 POSITION_ROLE = int(Qt.ItemDataRole.UserRole) + 1
@@ -267,6 +289,11 @@ class OfferTableModel(QAbstractTableModel):
 
         if spec.kind in ("check",):
             return None
+        if spec.kind == "actions":
+            # Sammelspalte: nur die tatsaechlich geplanten Aktionen anzeigen
+            aktiv = [kuerzel for feld, kuerzel in ACTION_BADGES
+                     if getattr(position, feld, False)]
+            return "  ".join(aktiv) if aktiv else "–"
         if spec.kind == "action":
             return self._action_text(position, key)
         if key == "status":
@@ -391,6 +418,18 @@ class OfferTableModel(QAbstractTableModel):
         if spec.key in ("do_info_record", "do_source_list", "do_contract",
                         "do_purchase_order"):
             parts.append(spec.tooltip)
+        if spec.key == "actions":
+            geplant = [
+                ("Infosatz", position.info_record_action.label
+                 if position.do_info_record else ""),
+                ("Orderbuch", position.source_list_action.label
+                 if position.do_source_list else ""),
+                ("Mengenkontrakt", "anlegen" if position.do_contract else ""),
+                ("Bestellung", "Abruf anlegen" if position.do_purchase_order else ""),
+            ]
+            zeilen = [f"{name}: {text}" for name, text in geplant if text]
+            parts.append("\n".join(zeilen) if zeilen
+                         else "Keine SAP-Aktion fuer diese Position vorgesehen")
         if spec.key == "description" and position.source_hint:
             parts.append(f"Quelle: {position.source_hint}")
         if spec.key == "old_price":
@@ -572,11 +611,12 @@ class OfferFilterProxy(QSortFilterProxyModel):
         self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
 
     def _refresh(self) -> None:
-        """Filter neu auswerten (Qt 6.9 hat invalidateFilter abgekuendigt)."""
-        if hasattr(self, "invalidateRowsFilter"):
-            self.invalidateRowsFilter()
-        else:  # pragma: no cover - aeltere Qt-Versionen
-            self.invalidateFilter()
+        """Filter neu auswerten.
+
+        ``invalidate()`` statt ``invalidateFilter()``/``invalidateRowsFilter()``:
+        beide sind in neueren Qt-Versionen abgekuendigt.
+        """
+        self.invalidate()
 
     def set_search(self, text: str) -> None:
         self._search = text.strip().lower()
@@ -666,6 +706,7 @@ class OfferTableView(QTableView):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._detailed = False
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -687,6 +728,23 @@ class OfferTableView(QTableView):
     def apply_column_widths(self) -> None:
         for index, spec in enumerate(COLUMNS):
             self.setColumnWidth(index, spec.width)
+        self.set_detailed_columns(self._detailed)
+
+    def set_detailed_columns(self, detailed: bool) -> None:
+        """Zwischen knapper Standardansicht und allen Spalten umschalten.
+
+        Die Standardansicht zeigt das, was der Einkaeufer zum Entscheiden
+        braucht.  Alles Weitere steht in der Detailansicht -- und laesst sich
+        bei Bedarf hier einblenden.
+        """
+        self._detailed = detailed
+        for index, spec in enumerate(COLUMNS):
+            sichtbar = detailed or spec.key in COMPACT_COLUMNS
+            self.setColumnHidden(index, not sichtbar)
+
+    @property
+    def detailed_columns(self) -> bool:
+        return self._detailed
 
     def current_position(self) -> OfferPosition | None:
         index = self.currentIndex()

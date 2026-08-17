@@ -10,6 +10,19 @@ from .header_rules import (
     apply_header_matches,
     extract_header_fields,
     find_incoterm,
+    label_value_pairs,
+    label_value_text,
+)
+from .material_roles import (
+    CUSTOMER_MARKERS,
+    SUPPLIER_MARKERS,
+    compile_own_pattern,
+    find_labelled_material_matches,
+    find_labelled_material_numbers,
+    header_role,
+    matches_own_pattern,
+    own_ratio,
+    resolve_position_roles,
 )
 from .learning import LearningConfig, LearningReport, describe_learning, forget_rule, \
     learn_from_corrections
@@ -34,6 +47,17 @@ from .table_extractor import (
 )
 
 __all__ = [
+    "CUSTOMER_MARKERS",
+    "SUPPLIER_MARKERS",
+    "compile_own_pattern",
+    "find_labelled_material_matches",
+    "find_labelled_material_numbers",
+    "header_role",
+    "label_value_pairs",
+    "label_value_text",
+    "matches_own_pattern",
+    "own_ratio",
+    "resolve_position_roles",
     "ColumnAssignment",
     "ExtractionResult",
     "FreetextExtractor",

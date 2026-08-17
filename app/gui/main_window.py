@@ -25,14 +25,16 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSplitter,
-    QTabWidget,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
+    QWidgetAction,
     QWidget,
 )
 
@@ -53,6 +55,7 @@ from .dialogs import (
     ask_yes_no,
     show_error,
 )
+from .admin_window import AdminWindow
 from .history_view import HistoryView
 from .mapping_view import MappingView
 from .offer_table import POSITION_ROLE, OfferFilterProxy, OfferTableModel, OfferTableView
@@ -103,38 +106,115 @@ class MainWindow(QMainWindow):
     # Aufbau
     # ==================================================================
     def _build(self) -> None:
-        self.tabs = QTabWidget()
-        self.setCentralWidget(self.tabs)
+        self.setCentralWidget(self._build_offer_page())
+        self._build_admin_pages()
+        self._build_menu()
+        self._build_toolbar()
+        self._fill_menu()
+        self._build_statusbar()
+        self._build_shortcuts()
 
-        self.tabs.addTab(self._build_offer_page(), "Angebot")
-
+    def _build_admin_pages(self) -> None:
+        """Verwaltungsseiten anlegen -- sie leben in einem eigenen Fenster."""
         self.history_view = HistoryView(self.repository)
-        self.tabs.addTab(self.history_view, "Historie")
-
         self.mapping_view = MappingView(self.repository)
-        self.tabs.addTab(self.mapping_view, "Zuordnungen")
-
         self.selector_view = SelectorView(self.gateway.selectors, self.settings)
         self.selector_view.changed.connect(self._update_mode_badges)
-        self.tabs.addTab(self.selector_view, "SAP-Feld-IDs")
-
         self.settings_view = SettingsView(self.settings)
         self.settings_view.modeChanged.connect(self._mode_changed)
         self.settings_view.settingsSaved.connect(self._mode_changed)
         self.settings_view.resetMockRequested.connect(self._reset_mock)
-        self.tabs.addTab(self.settings_view, "Einstellungen")
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
-        self.tabs.addTab(self.log_view, "Protokoll")
 
-        self._build_toolbar()
-        self._build_statusbar()
-        self._build_shortcuts()
+        self._admin_pages = [
+            ("Historie", self.history_view),
+            ("Zuordnungen", self.mapping_view),
+            ("SAP-Feld-IDs", self.selector_view),
+            ("Einstellungen", self.settings_view),
+            ("Protokoll", self.log_view),
+        ]
+        self._admin_window: AdminWindow | None = None
+
+    def open_admin(self, title: str) -> None:
+        """Verwaltungsfenster oeffnen (wird erst bei Bedarf erzeugt)."""
+        if self._admin_window is None:
+            self._admin_window = AdminWindow(self._admin_pages, self)
+        self._admin_window.show_page(title)
+
+    def _build_menu(self) -> None:
+        """Menueleiste anlegen.  Befuellt wird sie in ``_fill_menu``, sobald die
+        Aktionen existieren -- so steht jede Aktion nur einmal im Code."""
+        menu = self.menuBar()
+        self._menu_datei = menu.addMenu("&Datei")
+        self._menu_sap = menu.addMenu("&SAP")
+        self._menu_ansicht = menu.addMenu("&Ansicht")
+        self._menu_verwaltung = menu.addMenu("&Verwaltung")
+        self._menu_hilfe = menu.addMenu("&Hilfe")
+
+    def _fill_menu(self) -> None:
+        """Menue befuellen, nachdem die Aktionen existieren."""
+        datei = self._menu_datei
+        datei.addAction(self.action_open)
+        datei.addAction(self.action_paste)
+        datei.addAction(self.action_table)
+        datei.addAction(self.action_teach)
+        datei.addSeparator()
+        beenden = QAction("Beenden", self)
+        beenden.setShortcut(QKeySequence.StandardKey.Quit)
+        beenden.triggered.connect(self.close)
+        datei.addAction(beenden)
+
+        sap = self._menu_sap
+        sap.addAction(self.action_connect)
+        sap.addAction(self.action_session)
+        sap.addSeparator()
+        sap.addAction(self.action_load)
+        sap.addAction(self.action_process)
+        sap.addAction(self.action_cancel)
+
+        ansicht = self._menu_ansicht
+        self.action_detailed_columns = QAction("Alle Spalten anzeigen", self)
+        self.action_detailed_columns.setCheckable(True)
+        self.action_detailed_columns.setShortcut(QKeySequence("Strg+Umschalt+S"))
+        self.action_detailed_columns.toggled.connect(self._toggle_detailed_columns)
+        ansicht.addAction(self.action_detailed_columns)
+
+        for titel, _widget in self._admin_pages:
+            aktion = QAction(f"{titel} ...", self)
+            aktion.triggered.connect(lambda _=False, t=titel: self.open_admin(t))
+            self._menu_verwaltung.addAction(aktion)
+
+        hilfe = self._menu_hilfe
+        kurz = QAction("Tastenkuerzel", self)
+        kurz.triggered.connect(self._show_shortcuts)
+        hilfe.addAction(kurz)
+
+    def _show_shortcuts(self) -> None:
+        QMessageBox.information(
+            self, "Tastenkuerzel",
+            "Strg+O\tAngebot oeffnen\n"
+            "F5\tSAP-Daten laden\n"
+            "F9\tUebernehmen\n"
+            "Leertaste\tPosition an-/abwaehlen\n"
+            "Eingabe\tDetails der Position\n"
+            "Strg+C / Strg+V\tKopieren / Einfuegen\n"
+            "Strg+Z / Strg+Y\tRueckgaengig / Wiederherstellen\n"
+            "Strg+Umschalt+S\tAlle Spalten anzeigen")
+
+    def _toggle_detailed_columns(self, checked: bool) -> None:
+        self.table.set_detailed_columns(checked)
 
     def _build_toolbar(self) -> None:
-        bar = QToolBar("Hauptfunktionen")
+        """Werkzeugleiste als Ablauf in drei Schritten.
+
+        Der Alltag besteht aus genau drei Handgriffen: Angebot laden, SAP-Daten
+        holen, uebernehmen.  Diese drei stehen gross da; alles Weitere haengt
+        als Untermenue an dem Schritt, zu dem es gehoert, oder liegt im Menue.
+        """
+        bar = QToolBar("Ablauf")
         bar.setMovable(False)
         bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.addToolBar(bar)
@@ -143,59 +223,67 @@ class MainWindow(QMainWindow):
         self.action_open.setShortcut(QKeySequence.StandardKey.Open)
         self.action_open.setToolTip("PDF, Excel, E-Mail (.msg/.eml) oder CSV oeffnen (Strg+O)")
         self.action_open.triggered.connect(self.open_offer_dialog)
-        bar.addAction(self.action_open)
 
-        self.action_paste = QAction("Text einfuegen", self)
+        # Nebenwege zum Laden -- haengen als Untermenue am ersten Schritt
+        self.action_paste = QAction("Text einfuegen ...", self)
         self.action_paste.setToolTip("Angebotstext aus einer E-Mail einfuegen")
         self.action_paste.triggered.connect(self.paste_offer_text)
-        bar.addAction(self.action_paste)
 
-        self.action_table = QAction("Tabelle einfuegen", self)
+        self.action_table = QAction("Tabelle einfuegen ...", self)
         self.action_table.setToolTip(
-            "Tabelle aus Excel einfuegen oder laden und die Spalten selbst zuordnen "
-            "– der schnellste Weg, wenn die Erkennung nicht greift")
+            "Tabelle aus Excel einfuegen oder laden und die Spalten selbst zuordnen")
         self.action_table.triggered.connect(self.import_table_manually)
-        bar.addAction(self.action_table)
 
         self.action_teach = QAction("Erkennung anlernen ...", self)
         self.action_teach.setToolTip(
             "Im PDF grafisch markieren, wo Positionen und Spalten stehen")
         self.action_teach.triggered.connect(self.teach_recognition)
-        bar.addAction(self.action_teach)
-
-        bar.addSeparator()
 
         self.action_connect = QAction("SAP verbinden", self)
         self.action_connect.triggered.connect(self.connect_sap)
-        bar.addAction(self.action_connect)
 
-        self.action_session = QAction("Session waehlen", self)
+        self.action_session = QAction("Session waehlen ...", self)
         self.action_session.triggered.connect(self.choose_session)
-        bar.addAction(self.action_session)
 
         self.action_load = QAction("SAP-Daten laden", self)
         self.action_load.setShortcut(QKeySequence("F5"))
         self.action_load.setToolTip("Ist-Zustand aus SAP lesen (F5) – es wird nichts geaendert")
         self.action_load.triggered.connect(self.load_sap_data)
-        bar.addAction(self.action_load)
 
-        bar.addSeparator()
-
-        self.action_chain = QAction("Komplettvorgang ...", self)
+        self.action_chain = QAction("Was soll passieren? ...", self)
         self.action_chain.setToolTip(
-            "Infosatz, Mengenkontrakt, Orderbuch und Bestellung in einem Zug festlegen")
+            "Infosatz, Mengenkontrakt, Orderbuch und Bestellung festlegen")
         self.action_chain.triggered.connect(self.configure_chain)
-        bar.addAction(self.action_chain)
 
         self.action_process = QAction("Uebernehmen", self)
         self.action_process.setShortcut(QKeySequence("F9"))
         self.action_process.setToolTip("Ausgewaehlte Positionen in SAP verarbeiten (F9)")
         self.action_process.triggered.connect(self.process_offer)
-        bar.addAction(self.action_process)
 
         self.action_cancel = QAction("Abbrechen", self)
         self.action_cancel.triggered.connect(self.cancel_worker)
         self.action_cancel.setEnabled(False)
+
+        # -- Schritt 1 ---------------------------------------------------
+        self.step1_button = self._step_button(
+            "1   Angebot laden", self.action_open,
+            [self.action_paste, self.action_table, self.action_teach])
+        bar.addWidget(self.step1_button)
+        bar.addWidget(self._arrow())
+
+        # -- Schritt 2 ---------------------------------------------------
+        self.step2_button = self._step_button(
+            "2   SAP-Daten laden", self.action_load,
+            [self.action_connect, self.action_session])
+        bar.addWidget(self.step2_button)
+        bar.addWidget(self._arrow())
+
+        # -- Schritt 3 ---------------------------------------------------
+        self.step3_button = self._step_button(
+            "3   Uebernehmen", self.action_process, [self.action_chain],
+            primary=True)
+        bar.addWidget(self.step3_button)
+
         bar.addAction(self.action_cancel)
 
         spacer = QWidget()
@@ -203,21 +291,60 @@ class MainWindow(QMainWindow):
                              spacer.sizePolicy().verticalPolicy().Preferred)
         bar.addWidget(spacer)
 
+        # Betriebsart und Verbindung: zwei Plaketten, kein Bedienelement
+        self.mode_badge = QLabel("")
+        self.mode_badge.setMinimumWidth(170)
+        self.mode_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mode_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mode_badge.setToolTip("Betriebsart aendern: Verwaltung → Einstellungen")
+        self.mode_badge.mousePressEvent = (            # noqa: SLF001 - bewusst
+            lambda _event: self.open_admin("Einstellungen"))
+        bar.addWidget(self.mode_badge)
+
+        self.connection_badge = QLabel("")
+        self.connection_badge.setMinimumWidth(200)
+        self.connection_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        bar.addWidget(self.connection_badge)
+
+        # Dry Run bleibt erreichbar, aber unauffaellig
         self.dry_run_box = QCheckBox("Dry Run")
         self.dry_run_box.setToolTip("SAP nur lesen, nichts schreiben")
         self.dry_run_box.setChecked(self.settings.dry_run)
         self.dry_run_box.toggled.connect(self._dry_run_toggled)
         bar.addWidget(self.dry_run_box)
 
-        self.mode_badge = QLabel("")
-        self.mode_badge.setMinimumWidth(190)
-        self.mode_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        bar.addWidget(self.mode_badge)
+    def _step_button(self, text: str, main_action: QAction,
+                     extras: list[QAction], primary: bool = False) -> QToolButton:
+        """Ein Ablaufschritt: grosse Schaltflaeche mit Zusatzmenue."""
+        button = QToolButton()
+        button.setText(text)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        button.setDefaultAction(main_action)
+        button.setMinimumHeight(34)
+        button.setMinimumWidth(170)
+        if primary:
+            button.setObjectName("Primary")
+            button.setStyleSheet(
+                f"QToolButton {{ background: {Colors.ACCENT}; color: white; "
+                f"font-weight: 600; border-radius: 4px; padding: 6px 14px; }}"
+                f"QToolButton:disabled {{ background: {Colors.GREY}; color: #eeeeee; }}")
+        if extras:
+            menu = QMenu(button)
+            for aktion in extras:
+                menu.addAction(aktion)
+            button.setMenu(menu)
+            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        # Beschriftung darf nicht von der Aktion ueberschrieben werden
+        button.setText(text)
+        main_action.changed.connect(lambda b=button, t=text: b.setText(t))
+        return button
 
-        self.connection_badge = QLabel("")
-        self.connection_badge.setMinimumWidth(210)
-        self.connection_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        bar.addWidget(self.connection_badge)
+    @staticmethod
+    def _arrow() -> QLabel:
+        pfeil = QLabel("→")
+        pfeil.setStyleSheet(f"color: {Colors.GREY}; font-size: 15pt;")
+        pfeil.setContentsMargins(6, 0, 6, 0)
+        return pfeil
 
     def _build_offer_page(self) -> QWidget:
         page = QWidget()
@@ -263,20 +390,58 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_header_card(self) -> QFrame:
+        """Angebotskopf in einer Zeile.
+
+        Bewusst knapp: Der Kopf ist Kontext, nicht Arbeitsflaeche.  Wer etwas
+        aendern muss, klappt ihn auf -- das ist der seltene Fall.
+        """
         card = QFrame()
         card.setObjectName("Card")
-        grid = QGridLayout(card)
-        grid.setContentsMargins(12, 10, 12, 10)
-        grid.setHorizontalSpacing(18)
+        aussen = QVBoxLayout(card)
+        aussen.setContentsMargins(12, 8, 12, 8)
+        aussen.setSpacing(6)
+
+        zeile = QHBoxLayout()
+        zeile.setSpacing(14)
+
+        self.offer_title = QLabel("Kein Angebot geladen")
+        self.offer_title.setObjectName("Heading")
+        zeile.addWidget(self.offer_title)
+
+        self.offer_meta = QLabel("")
+        self.offer_meta.setObjectName("SubHeading")
+        zeile.addWidget(self.offer_meta)
+        zeile.addStretch(1)
+
+        self.vendor_number_label = QLabel("kein SAP-Lieferant")
+        zeile.addWidget(self.vendor_number_label)
+
+        assign_button = QPushButton("Lieferant zuordnen ...")
+        assign_button.clicked.connect(lambda: self.assign_vendor(None))
+        zeile.addWidget(assign_button)
+
+        self.header_toggle = QPushButton("Kopfdaten")
+        self.header_toggle.setCheckable(True)
+        self.header_toggle.setToolTip("Angebotskopf anzeigen und bearbeiten")
+        self.header_toggle.toggled.connect(self._toggle_header)
+        zeile.addWidget(self.header_toggle)
+        aussen.addLayout(zeile)
+
+        # -- ausklappbarer Bereich mit den Kopffeldern -------------------
+        self.header_panel = QWidget()
+        grid = QGridLayout(self.header_panel)
+        grid.setContentsMargins(0, 4, 0, 0)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(4)
 
         self.header_fields: dict[str, QLineEdit] = {}
         definitions = (
             ("vendor_name", "Lieferant", 0, 0),
             ("offer_number", "Angebotsnummer", 0, 2),
             ("offer_date", "Angebotsdatum", 0, 4),
-            ("currency", "Waehrung", 1, 4),
             ("payment_terms", "Zahlungsbedingungen", 1, 0),
             ("incoterm", "Incoterm", 1, 2),
+            ("currency", "Waehrung", 1, 4),
         )
         for key, label, row, column in definitions:
             caption = QLabel(label + ":")
@@ -286,52 +451,57 @@ class MainWindow(QMainWindow):
             self.header_fields[key] = edit
             grid.addWidget(caption, row, column)
             grid.addWidget(edit, row, column + 1)
-
-        self.vendor_number_label = QLabel("– kein SAP-Lieferant zugeordnet –")
-        self.vendor_number_label.setStyleSheet(f"color: {Colors.RED}; font-weight: 600;")
-        grid.addWidget(self.vendor_number_label, 2, 0, 1, 3)
-
-        assign_button = QPushButton("SAP-Lieferant zuordnen ...")
-        assign_button.clicked.connect(lambda: self.assign_vendor(None))
-        grid.addWidget(assign_button, 2, 3)
-
-        self.source_label = QLabel("Kein Angebot geladen")
-        self.source_label.setObjectName("SubHeading")
-        grid.addWidget(self.source_label, 2, 4, 1, 2)
-
-        self.extraction_label = QLabel("")
-        self.extraction_label.setObjectName("SubHeading")
-        self.extraction_label.setWordWrap(True)
-        grid.addWidget(self.extraction_label, 3, 0, 1, 6)
-
         grid.setColumnStretch(1, 3)
         grid.setColumnStretch(3, 2)
         grid.setColumnStretch(5, 2)
+
+        self.header_panel.setVisible(False)
+        aussen.addWidget(self.header_panel)
+
+        # Erkennungshinweise: eine Zeile, Rest im Sprechblasentext
+        self.extraction_label = QLabel("")
+        self.extraction_label.setObjectName("SubHeading")
+        self.extraction_label.setVisible(False)
+        aussen.addWidget(self.extraction_label)
         return card
 
+    def _toggle_header(self, checked: bool) -> None:
+        self.header_panel.setVisible(checked)
+
     def _build_selection_bar(self) -> QWidget:
+        """Suche links, Auswahl und Filter als je ein Menue rechts."""
         bar = QWidget()
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
-        for text, tip, handler in (
-                ("Alle", "Alle Positionen auswaehlen", lambda: self._select_all(True)),
-                ("Keine", "Auswahl aufheben", lambda: self._select_all(False)),
-                ("Nur geaenderte", "Nur Positionen mit SAP-Aenderung auswaehlen",
-                 self._select_changed),
-                ("Nur fehlerfreie", "Nur Positionen ohne blockierende Fehler auswaehlen",
-                 self._select_clean)):
-            button = QPushButton(text)
-            button.setToolTip(tip)
-            button.clicked.connect(handler)
-            layout.addWidget(button)
-
-        layout.addSpacing(16)
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Suchen (Material, Beschreibung, Lieferant) ...")
+        self.search_edit.setPlaceholderText("Suchen ...")
         self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setMaximumWidth(320)
         self.search_edit.textChanged.connect(self.proxy.set_search)
-        layout.addWidget(self.search_edit, 1)
+        layout.addWidget(self.search_edit)
+
+        # -- Auswahl -----------------------------------------------------
+        auswahl_button = QToolButton()
+        auswahl_button.setText("Auswahl")
+        auswahl_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        auswahl_menu = QMenu(auswahl_button)
+        auswahl_menu.addAction("Alle auswaehlen", lambda: self._select_all(True))
+        auswahl_menu.addAction("Auswahl aufheben", lambda: self._select_all(False))
+        auswahl_menu.addSeparator()
+        auswahl_menu.addAction("Nur geaenderte", self._select_changed)
+        auswahl_menu.addAction("Nur fehlerfreie", self._select_clean)
+        auswahl_menu.addSeparator()
+        auswahl_menu.addAction("Position ergaenzen", self._add_position)
+        auswahl_button.setMenu(auswahl_menu)
+        layout.addWidget(auswahl_button)
+
+        # -- Filter ------------------------------------------------------
+        self.filter_button = QToolButton()
+        self.filter_button.setText("Filter")
+        self.filter_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        filter_menu = QMenu(self.filter_button)
 
         self.status_filter = QComboBox()
         self.status_filter.addItem("Alle Status", None)
@@ -339,21 +509,46 @@ class MainWindow(QMainWindow):
                        PositionStatus.DONE, PositionStatus.SKIPPED):
             self.status_filter.addItem(status.label, status)
         self.status_filter.currentIndexChanged.connect(self._status_filter_changed)
-        layout.addWidget(self.status_filter)
+        status_aktion = QWidgetAction(filter_menu)
+        status_aktion.setDefaultWidget(self.status_filter)
+        filter_menu.addAction(status_aktion)
 
-        self.only_changed_box = QCheckBox("nur mit Aenderung")
-        self.only_changed_box.toggled.connect(self.proxy.set_only_changed)
-        layout.addWidget(self.only_changed_box)
+        self.only_changed_action = QAction("Nur mit Aenderung", self)
+        self.only_changed_action.setCheckable(True)
+        self.only_changed_action.toggled.connect(self.proxy.set_only_changed)
+        self.only_changed_action.toggled.connect(self._update_filter_label)
+        filter_menu.addAction(self.only_changed_action)
 
-        self.only_selected_box = QCheckBox("nur ausgewaehlte")
-        self.only_selected_box.toggled.connect(self.proxy.set_only_selected)
-        layout.addWidget(self.only_selected_box)
+        self.only_selected_action = QAction("Nur ausgewaehlte", self)
+        self.only_selected_action.setCheckable(True)
+        self.only_selected_action.toggled.connect(self.proxy.set_only_selected)
+        self.only_selected_action.toggled.connect(self._update_filter_label)
+        filter_menu.addAction(self.only_selected_action)
 
-        layout.addSpacing(12)
-        add_button = QPushButton("Position ergaenzen")
-        add_button.clicked.connect(self._add_position)
-        layout.addWidget(add_button)
+        filter_menu.addSeparator()
+        filter_menu.addAction("Filter zuruecksetzen", self._reset_filters)
+        self.filter_button.setMenu(filter_menu)
+        layout.addWidget(self.filter_button)
+
+        layout.addStretch(1)
+        self.counter_inline = QLabel("")
+        self.counter_inline.setObjectName("SubHeading")
+        layout.addWidget(self.counter_inline)
         return bar
+
+    def _update_filter_label(self) -> None:
+        aktiv = sum(1 for aktion in (self.only_changed_action, self.only_selected_action)
+                    if aktion.isChecked())
+        if self.status_filter.currentData() is not None:
+            aktiv += 1
+        self.filter_button.setText(f"Filter ({aktiv})" if aktiv else "Filter")
+
+    def _reset_filters(self) -> None:
+        self.only_changed_action.setChecked(False)
+        self.only_selected_action.setChecked(False)
+        self.status_filter.setCurrentIndex(0)
+        self.search_edit.clear()
+        self._update_filter_label()
 
     def _build_statusbar(self) -> None:
         status = self.statusBar()
@@ -449,13 +644,11 @@ class MainWindow(QMainWindow):
         self._fill_header()
         self._update_counters()
         self._update_actions()
-        self.tabs.setCurrentIndex(0)
 
         for path in offer.source_files:
             self.settings.add_recent_file(path)
 
-        notes = "   •   ".join(offer.extraction_notes[:4])
-        self.extraction_label.setText(notes)
+        self._fill_extraction_notes(offer)
         logger.info("Angebot geladen: %s (%d Positionen)", offer.source_label,
                     len(offer.positions))
 
@@ -1111,6 +1304,7 @@ class MainWindow(QMainWindow):
     def _status_filter_changed(self) -> None:
         status = self.status_filter.currentData()
         self.proxy.set_status_filter({status} if status else set())
+        self._update_filter_label()
 
     # -- Undo -----------------------------------------------------------
     def _snapshot(self, label: str) -> None:
@@ -1171,8 +1365,11 @@ class MainWindow(QMainWindow):
         if offer is None:
             for edit in self.header_fields.values():
                 edit.clear()
-            self.source_label.setText("Kein Angebot geladen")
-            self.vendor_number_label.setText("– kein SAP-Lieferant zugeordnet –")
+            self.offer_title.setText("Kein Angebot geladen")
+            self.offer_meta.setText("")
+            self.vendor_number_label.setText("kein SAP-Lieferant")
+            self.vendor_number_label.setStyleSheet(f"color: {Colors.GREY};")
+            self.extraction_label.setVisible(False)
             return
         values = {
             "vendor_name": offer.vendor_name,
@@ -1196,16 +1393,51 @@ class MainWindow(QMainWindow):
                 edit.setToolTip(origin.label if origin else "")
 
         if offer.vendor_number:
-            self.vendor_number_label.setText(f"SAP-Lieferant: {offer.vendor_number}")
-            self.vendor_number_label.setStyleSheet(f"color: {Colors.GREEN}; font-weight: 600;")
+            self.vendor_number_label.setText(offer.vendor_number)
+            self.vendor_number_label.setStyleSheet(
+                f"color: {Colors.GREEN}; font-weight: 600;")
+            self.vendor_number_label.setToolTip("Zugeordneter SAP-Lieferant")
         else:
-            self.vendor_number_label.setText("– kein SAP-Lieferant zugeordnet –")
+            self.vendor_number_label.setText("kein SAP-Lieferant")
             self.vendor_number_label.setStyleSheet(f"color: {Colors.RED}; font-weight: 600;")
+            self.vendor_number_label.setToolTip(
+                "Ohne SAP-Lieferant kann nichts gepflegt werden")
 
-        source = offer.source_label
+        # Titel: Lieferant.  Nebenzeile: die wenigen wirklich wichtigen Angaben.
+        self.offer_title.setText(offer.vendor_name or "Angebot ohne Lieferantennamen")
+        angaben = [teil for teil in (
+            offer.offer_number,
+            format_date(offer.offer_date),
+            offer.currency,
+        ) if teil]
+        self.offer_meta.setText("   •   ".join(angaben))
+
+        quelle = offer.source_label
         if offer.email:
-            source += f"   •   von {offer.email.from_address or offer.email.from_name}"
-        self.source_label.setText(source)
+            quelle += f" · von {offer.email.from_address or offer.email.from_name}"
+        self.offer_meta.setToolTip(quelle)
+        self._fill_extraction_notes(offer)
+
+    def _fill_extraction_notes(self, offer: Offer) -> None:
+        """Erkennungshinweise auf eine Zeile eindampfen.
+
+        Die ausfuehrliche Begruendung steht in der Sprechblase -- sichtbar nur,
+        wenn jemand sie sucht.
+        """
+        notizen = list(offer.extraction_notes)
+        unsicher = sum(1 for position in offer.positions if position.uncertain_fields)
+        if not notizen and not unsicher:
+            self.extraction_label.setVisible(False)
+            return
+
+        text = f"Erkennung: {len(offer.positions)} Position(en)"
+        if unsicher:
+            text += f"   •   {unsicher} mit unsicheren Werten"
+        if notizen:
+            text += f"   •   {len(notizen)} Hinweis(e)"
+        self.extraction_label.setText(text)
+        self.extraction_label.setToolTip("\n".join(notizen) if notizen else "")
+        self.extraction_label.setVisible(True)
 
     def _revalidate(self) -> None:
         if self.offer is None:
@@ -1225,6 +1457,10 @@ class MainWindow(QMainWindow):
             self._update_actions()
             return
         counts = self.table_model.counts()
+        self.counter_inline.setText(
+            f"{counts['ausgewaehlt']} von {counts['gesamt']} ausgewaehlt"
+            + (f"   •   {counts['fehler']} Fehler" if counts["fehler"] else "")
+            + (f"   •   {counts['pruefen']} zu pruefen" if counts["pruefen"] else ""))
         self.counter_label.setText(
             f"{counts['gesamt']} Positionen   •   {counts['ausgewaehlt']} ausgewaehlt   •   "
             f"{counts['geaendert']} mit Aenderung   •   {counts['pruefen']} zu pruefen   •   "
@@ -1246,24 +1482,44 @@ class MainWindow(QMainWindow):
         self.action_teach.setEnabled(not running and self._teachable_pdf() is not None)
 
     def _update_mode_badges(self) -> None:
+        """Eine Plakette fuer die Betriebsart, eine fuer die Verbindung.
+
+        Beide sagten vorher fast dasselbe.  Jetzt gilt: die Betriebsart sagt,
+        *was* passiert; die Verbindungsplakette *womit* -- und sie erscheint
+        nur, wenn es ueberhaupt eine echte Verbindung geben kann.
+        """
+        status = self.gateway.status()
+
         if self.settings.use_mock_sap:
-            self.mode_badge.setText("Testsystem (Mock-SAP)")
+            self.mode_badge.setText("Testsystem")
             self.mode_badge.setStyleSheet(badge_style(Colors.BLUE, Colors.BLUE_BG))
-        elif self.settings.dry_run:
+            self.mode_badge.setToolTip(
+                "Es wird kein echtes SAP angesprochen. "
+                "Umschalten unter Verwaltung → Einstellungen.")
+            self.connection_badge.setVisible(False)
+            self.dry_run_box.setVisible(False)
+            self.dry_run_box.setChecked(self.settings.dry_run)
+            return
+
+        if self.settings.dry_run:
             self.mode_badge.setText("Dry Run – nur lesen")
             self.mode_badge.setStyleSheet(badge_style(Colors.AMBER, Colors.AMBER_BG))
         else:
             self.mode_badge.setText("ECHTBETRIEB – schreibend")
             self.mode_badge.setStyleSheet(badge_style(Colors.RED, Colors.RED_BG))
+        self.mode_badge.setToolTip("Betriebsart aendern: Verwaltung → Einstellungen")
 
-        status = self.gateway.status()
         colours = {"gruen": (Colors.GREEN, Colors.GREEN_BG),
                    "gelb": (Colors.AMBER, Colors.AMBER_BG),
                    "rot": (Colors.RED, Colors.RED_BG),
                    "blau": (Colors.BLUE, Colors.BLUE_BG),
                    "grau": (Colors.GREY, Colors.GREY_BG)}
         colour, background = colours.get(status.color, (Colors.GREY, Colors.GREY_BG))
-        self.connection_badge.setText(status.short())
+        self.connection_badge.setText(
+            f"{status.system or 'SAP'} / {status.user}" if status.connected
+            else "nicht verbunden")
+        self.connection_badge.setVisible(True)
+        self.dry_run_box.setVisible(True)
         self.connection_badge.setStyleSheet(badge_style(colour, background))
         self.connection_badge.setToolTip(status.detail)
         self.dry_run_box.setChecked(self.settings.dry_run)

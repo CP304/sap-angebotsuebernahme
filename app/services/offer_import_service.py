@@ -33,8 +33,9 @@ from ..models.offer_position import OfferPosition
 from ..utils.parsing import normalize_uom
 from .extraction.freetext_extractor import FreetextExtractor
 from .extraction.header_rules import apply_header_matches, extract_header_fields, \
-    missing_header_note
+    label_value_text, missing_header_note
 from .extraction.learning import learn_from_corrections
+from .extraction.material_roles import compile_own_pattern, resolve_position_roles
 from .extraction.profiles import (
     InMemoryProfileStore,
     VendorProfile,
@@ -64,7 +65,11 @@ class OfferImportService:
     def __init__(self, settings: Settings,
                  profile_store: VendorProfileStore | None = None) -> None:
         self.settings = settings
-        self.profile_store: VendorProfileStore = profile_store or InMemoryProfileStore()
+        # Bewusst gegen ``None`` geprueft: ein *leerer* Profilspeicher ist
+        # falsy, wuerde bei ``or`` also stillschweigend durch einen neuen
+        # ersetzt -- und alles Gelernte landete im Nichts.
+        self.profile_store: VendorProfileStore = (
+            profile_store if profile_store is not None else InMemoryProfileStore())
         self.registry = ReaderRegistry(settings.extraction)
         self._last_document: RawDocument | None = None
         self._last_profile: VendorProfile | None = None
@@ -178,7 +183,13 @@ class OfferImportService:
         # Die abgeschnittene Signatur enthaelt oft Firma und Ansprechpartner --
         # fuer die *Kopfdaten* ist sie wertvoll, fuer Positionen bleibt sie aussen vor.
         signature = document.meta.get("stripped_signature", "")
-        header_text = f"{text}\n\n{signature}" if signature else text
+        # In Tabellenblaettern steht der Kopf als Beschriftung/Wert in
+        # *benachbarten Zellen* ("Angebot Nr.:" in A4, der Wert in B4).  Im
+        # zusammengefuegten Text stuende dazwischen ein Trennzeichen, an dem
+        # jede Kopfregel scheitert -- deshalb werden die Paare eigens
+        # aufgeloest und als saubere Zeilen mit angeboten.
+        pairs = label_value_text(document.tables)
+        header_text = "\n\n".join(part for part in (text, pairs, signature) if part)
 
         # 1. Profil suchen -- gelerntes Wissen hat Vorrang vor Standardregeln
         profile = self._find_profile(document, offer)
@@ -217,6 +228,10 @@ class OfferImportService:
                                f"{len(result.positions)} Position(en) aus Fliesstext "
                                "abgeleitet (bitte pruefen).")
 
+        # 4b. Artikelnummern-Rollen pruefen: steht unsere Nummer wirklich in
+        #     "Material"?  Vertauschtes wird getauscht -- mit Notiz, nie still.
+        self._check_material_roles(offer, positions)
+
         for position in positions:
             self._attach_position(offer, position, document, prefix)
 
@@ -244,6 +259,31 @@ class OfferImportService:
         else:
             position.source_kind = document.source_kind
         offer.positions.append(position)
+
+    # ------------------------------------------------------------------
+    def _check_material_roles(self, offer: Offer,
+                              positions: list[OfferPosition]) -> None:
+        """Vertauschte bzw. falsch beschriftete Artikelnummern richtigstellen.
+
+        Die Spaltenzuordnung erledigt der :class:`TableExtractor`; hier geht es
+        um die einzelne Position -- also auch um alles, was aus Freitext kommt.
+        Jede Aenderung wird als ``UNCERTAIN`` markiert und protokolliert.
+        """
+        extraction = self.settings.extraction
+        if not extraction.own_material_pattern_active or not extraction.swap_detection:
+            return
+        own_re = compile_own_pattern(extraction.own_material_pattern)
+        changed = 0
+        for position in positions:
+            note = resolve_position_roles(position, own_re, extraction.swap_detection)
+            if note:
+                offer.add_note(note)
+                changed += 1
+        if changed:
+            offer.add_note(
+                f"{changed} Position(en): die beiden Artikelnummern wurden anhand "
+                f"des eigenen Nummernkreises ({extraction.own_material_pattern}) "
+                "neu zugeordnet -- bitte die gelb markierten Felder pruefen.")
 
     # ------------------------------------------------------------------
     def _find_profile(self, document: RawDocument, offer: Offer) -> VendorProfile | None:

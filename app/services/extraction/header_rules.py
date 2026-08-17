@@ -17,6 +17,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 from typing import Any, Iterable
 
 from ...models.enums import FieldOrigin
@@ -39,6 +40,8 @@ __all__ = [
     "extract_header_fields",
     "apply_header_matches",
     "find_incoterm",
+    "label_value_pairs",
+    "label_value_text",
     "vendor_name_from_signature",
     "vendor_name_from_domain",
 ]
@@ -56,16 +59,35 @@ INCOTERMS: tuple[str, ...] = (
 # Bausteine fuer die Regeln
 # --------------------------------------------------------------------------
 
+#: Fuellwoerter zwischen Beschriftung und Wert.
+#:
+#: "Unsere Angebotsnummer *lautet* ANG-2026-04712" hat frueher zuverlaessig
+#: den Wert ``lautet`` geliefert -- ein stiller Falschtreffer, und damit das
+#: Schlimmste, was dieses Werkzeug tun kann.  Solche Woerter werden deshalb
+#: ueberlesen (hier) und zusaetzlich nie als Wert akzeptiert (siehe
+#: :func:`_is_plausible`).
+_FILLER_WORDS: tuple[str, ...] = (
+    "lautet", "lauten", "lautete", "ist", "sind", "war", "waren", "betraegt",
+    "beträgt", "betragen", "folgt", "folgende", "folgender", "folgendes",
+    "folgenden", "nummer", "nr", "no", "num", "is", "are", "was", "were",
+    "reads", "wie", "hier", "dazu", "bitte", "siehe",
+)
+
+#: Fuellwoerter als optionaler, wiederholbarer Vorspann vor dem eigentlichen
+#: Wert.  Der Abschluss ``\s+`` ist Absicht: so wird aus "NO-1234" nicht das
+#: Fuellwort "NO" plus Wert "1234".
+_FILLER = (r"(?:\b(?:" + "|".join(_FILLER_WORDS) + r")\b\.?\s*[:.\-]?\s+)*")
+
 #: Datumsangabe in allen ueblichen Schreibweisen
-_DATE = (r"(\d{1,2}[.\-/]\s?\d{1,2}[.\-/]\s?\d{2,4}"
+_DATE = (_FILLER + r"(\d{1,2}[.\-/]\s?\d{1,2}[.\-/]\s?\d{2,4}"
          r"|\d{4}-\d{1,2}-\d{1,2}"
          r"|\d{1,2}\.?\s*[A-Za-zÄÖÜäöüß]{3,10}\.?\s+\d{4})")
 
 #: Beleg-/Kundennummer: Buchstaben, Ziffern, Trenner -- aber kein Satzende
-_DOCNO = r"([A-Za-z0-9][A-Za-z0-9._\-/]{2,29})"
+_DOCNO = _FILLER + r"([A-Za-z0-9][A-Za-z0-9._\-/]{2,29})"
 
 #: Rest der Zeile (fuer Zahlungsbedingungen, Ansprechpartner, ...)
-_LINE = r"([^\n\r]{2,120})"
+_LINE = _FILLER + r"([^\n\r]{2,120})"
 
 #: Zeilenanfang bzw. Zellengrenze -- verhindert Treffer mitten im Wort
 _START = r"(?:^|[\n\r\t|;])\s*"
@@ -115,6 +137,20 @@ class HeaderMatch:
         return (f"{self.field}: '{normalize_whitespace(self.raw)[:60]}' "
                 f"({self.rule or 'Regel'}, Konfidenz {self.confidence:.2f}, "
                 f"Quelle {self.source})")
+
+
+#: So viele Fundstellen je Regel werden hoechstens betrachtet.  Genug, um
+#: einen verworfenen Falschtreffer zu ueberspringen, und wenig genug, um bei
+#: 100-seitigen Preislisten nicht zu bremsen.
+_MAX_RULE_MATCHES = 5
+
+
+def _limited(iterator: Iterable[re.Match[str]]) -> Iterable[re.Match[str]]:
+    """Die ersten :data:`_MAX_RULE_MATCHES` Treffer eines Musters."""
+    for index, match in enumerate(iterator):
+        if index >= _MAX_RULE_MATCHES:
+            return
+        yield match
 
 
 _PATTERN_CACHE: dict[tuple[str, int], re.Pattern[str]] = {}
@@ -290,6 +326,43 @@ HEADER_RULES: tuple[HeaderRule, ...] = (
 
 _TRAILING = " \t.,;:-–—|)"
 
+#: Fuellwoerter als Menge -- fuer die Plausibilitaetspruefung
+_FILLER_SET = {w.casefold() for w in _FILLER_WORDS} | {
+    "der", "die", "das", "den", "dem", "des", "und", "oder", "vom", "von",
+    "fuer", "für", "unter", "sowie", "the", "and", "for", "with", "our",
+    "your", "unser", "unsere", "ihre", "ihr",
+}
+
+#: Felder, deren Wert ein *Beleg-/Nummernschluessel* ist
+_CODE_FIELDS = ("offer_number", "vendor_number", "customer_number")
+
+
+def _is_plausible(field_name: str, value: Any) -> bool:
+    """Sieht dieser Fund ueberhaupt nach einem Wert aus?
+
+    Gemeinsame Bremse fuer *alle* Kopfregeln.  Der Grundsatz des Projekts
+    lautet "lieber leer als falsch": ein Treffer, der nur ein Fuellwort oder
+    ein Bruchstueck ist, wird verworfen, und das Feld bleibt leer.
+
+    Fuer Nummernfelder gilt zusaetzlich: ein Beleg hat mindestens eine Ziffer
+    oder ist mindestens vier Zeichen lang und enthaelt einen Bindestrich
+    (``AB-CDEF``).  Reine Woerter sind keine Belegnummern.
+    """
+    if isinstance(value, (date, int, float, Decimal)):
+        return True                       # bereits geparst -> per Definition gueltig
+    text = normalize_whitespace(value)
+    if not text:
+        return False
+    if text.strip(_TRAILING).casefold() in _FILLER_SET:
+        return False
+    if field_name in _CODE_FIELDS:
+        if any(ch.isdigit() for ch in text):
+            return True
+        return len(text) >= 4 and "-" in text
+    if len(text) < 2:
+        return False
+    return bool(re.search(r"[A-Za-z0-9ÄÖÜäöüß]", text))
+
 
 def _post_text(raw: str) -> str:
     return normalize_whitespace(raw).strip(_TRAILING)
@@ -419,6 +492,121 @@ def vendor_name_from_domain(email: EmailContext | None) -> tuple[str, float]:
 
 
 # --------------------------------------------------------------------------
+# Kopfdaten aus Tabellenblaettern: Beschriftung links, Wert rechts daneben
+# --------------------------------------------------------------------------
+
+#: Beschriftungen, die auch ohne Doppelpunkt als solche gelten
+_KNOWN_LABELS: tuple[str, ...] = (
+    "angebot", "angebot nr", "angebotsnr", "angebotsnummer", "angebotsdatum",
+    "datum", "belegdatum", "gueltig bis", "gültig bis", "gueltig ab", "gültig ab",
+    "waehrung", "währung", "zahlungsbedingungen", "zahlungsziel", "zahlung",
+    "incoterm", "incoterms", "lieferbedingung", "lieferbedingungen",
+    "ansprechpartner", "sachbearbeiter", "kundennummer", "kunden-nr",
+    "lieferantennummer", "lieferant", "offer no", "offer number", "offer date",
+    "quotation no", "quotation number", "quotation date", "valid until",
+    "valid from", "currency", "payment terms", "terms of payment", "contact",
+    "customer no", "vendor no", "supplier no", "delivery terms",
+)
+
+#: Beschriftung sieht so aus: kurz, endet auf ":" oder steht in der Liste
+_LABEL_MAX_LENGTH = 40
+#: Ein Wert laenger als das ist Fliesstext, keine Kopfangabe
+_VALUE_MAX_LENGTH = 160
+
+
+def _is_label_cell(text: str) -> bool:
+    """Ist diese Zelle eine Beschriftung ("Angebot Nr.:")?"""
+    value = normalize_whitespace(text)
+    if not value or len(value) > _LABEL_MAX_LENGTH:
+        return False
+    if value.endswith(":"):
+        return True
+    key = value.rstrip(" .:-").lower()
+    key = key.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
+    normalized = re.sub(r"[^a-z0-9 ]+", " ", key)
+    normalized = normalize_whitespace(normalized)
+    return normalized in {re.sub(r"[^a-z0-9 ]+", " ", label) for label in _KNOWN_LABELS}
+
+
+def _is_value_cell(text: str) -> bool:
+    """Taugt diese Zelle als Wert zu einer Beschriftung?"""
+    value = normalize_whitespace(text)
+    if not value or len(value) > _VALUE_MAX_LENGTH:
+        return False
+    return not value.endswith(":")
+
+
+def label_value_pairs(rows: list[list[str]]) -> list[tuple[str, str]]:
+    """Beschriftung/Wert-Paare aus benachbarten Zellen lesen.
+
+    In Excel-Angeboten steht der Kopf fast nie als Fliesstext, sondern in
+    getrennten Zellen::
+
+        A4: "Angebot Nr.:"      B4: "ANG-2026-04711"
+        A5: "Angebotsdatum:"    B5: "17.08.2026"
+
+    Beim Zusammenfuegen zu Text wird daraus ``Angebot Nr.: | ANG-2026-04711``
+    -- und daran scheitert jede Kopfregel, weil zwischen Beschriftung und Wert
+    ein Trennzeichen steht.  Diese Funktion loest die Paare sauber auf: der
+    Wert steht in der Zelle **rechts daneben**, ersatzweise in der Zelle
+    **darunter**.
+
+    Es wird nichts geraten: ohne Beschriftung entsteht kein Paar, und eine
+    Beschriftung ohne Wert wird verworfen.
+    """
+    pairs: list[tuple[str, str]] = []
+    for row_index, row in enumerate(rows):
+        filled = sum(1 for cell in row if normalize_whitespace(cell))
+        # Eine Zeile mit vielen gefuellten Zellen ist die Spaltenkopfzeile der
+        # Positionstabelle, keine Kopfdatenzeile.  Dort gelten nur Zellen mit
+        # Doppelpunkt als Beschriftung -- "Gueltig ab" ist dann eine Spalte.
+        header_row = filled >= 5 or row_index >= 20
+        for column_index, cell in enumerate(row):
+            label = normalize_whitespace(cell)
+            if not _is_label_cell(label):
+                continue
+            if header_row and not label.endswith(":"):
+                continue
+            value = ""
+            # 1. Wahl: die naechste gefuellte Zelle rechts daneben
+            for next_index in range(column_index + 1, len(row)):
+                candidate = normalize_whitespace(row[next_index])
+                if not candidate:
+                    continue
+                if _is_value_cell(candidate):
+                    value = candidate
+                break
+            # 2. Wahl: die Zelle direkt darunter
+            if not value and row_index + 1 < len(rows):
+                below = rows[row_index + 1]
+                if column_index < len(below):
+                    candidate = normalize_whitespace(below[column_index])
+                    if _is_value_cell(candidate) and not _is_label_cell(candidate):
+                        value = candidate
+            if value:
+                pairs.append((label.rstrip(" :"), value))
+    return pairs
+
+
+def label_value_text(tables: Iterable[Any]) -> str:
+    """Alle Beschriftung/Wert-Paare eines Dokuments als saubere Textzeilen.
+
+    Ergebnis (je Zeile ``Beschriftung: Wert``) wird den normalen Kopfregeln
+    zusaetzlich zum Dokumenttext vorgelegt.
+    """
+    lines: list[str] = []
+    for table in tables or ():
+        rows = getattr(table, "rows", None)
+        if not rows:
+            continue
+        for label, value in label_value_pairs(rows):
+            line = f"{label}: {value}"
+            if line not in lines:
+                lines.append(line)
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
 # Hauptfunktion
 # --------------------------------------------------------------------------
 
@@ -445,15 +633,20 @@ def extract_header_fields(text: str, email: EmailContext | None = None,
             logger.error("Ungueltige Kopfregel fuer %s: %s", rule.field, exc)
             continue
         try:
-            found = pattern.search(haystack)
+            occurrences = list(_limited(pattern.finditer(haystack)))
         except Exception as exc:  # noqa: BLE001
             logger.warning("Kopfregel '%s' fehlgeschlagen: %s", rule.description, exc)
             continue
-        if not found:
-            continue
 
-        for candidate in _matches_from_rule(rule, found, source):
-            _keep_best(matches, ranks, candidate, rule.priority, found.start())
+        # Verwirft die Plausibilitaetspruefung den ersten Fund, darf dieselbe
+        # Regel es weiter hinten im Text noch einmal versuchen.
+        for found in occurrences:
+            candidates = _matches_from_rule(rule, found, source)
+            if not candidates:
+                continue
+            for candidate in candidates:
+                _keep_best(matches, ranks, candidate, rule.priority, found.start())
+            break
 
     # E-Mail als zusaetzliche Quelle fuer den Lieferantennamen
     if email is not None:
@@ -486,7 +679,7 @@ def _matches_from_rule(rule: HeaderRule, found: re.Match[str],
             return []
         out.append(HeaderMatch("incoterm", code, found.group(0), rule.confidence,
                                rule.description, source))
-        if location:
+        if location and _is_plausible("incoterm_location", location):
             out.append(HeaderMatch("incoterm_location", location, found.group(0),
                                    rule.confidence * 0.95, rule.description, source))
         return out
@@ -512,6 +705,13 @@ def _matches_from_rule(rule: HeaderRule, found: re.Match[str],
         value = _post_text(raw)
 
     if value in (None, "", []):
+        return []
+    if not _is_plausible(rule.field, value):
+        # Lieber leer als falsch: ein Fuellwort ("lautet") oder ein Bruchstueck
+        # ohne Ziffer ist keine Belegnummer.  Die Regel liefert dann nichts,
+        # und eine spaetere Regel darf es erneut versuchen.
+        logger.debug("Kopfregel '%s' verworfen -- unplausibler Wert %r",
+                     rule.description, value)
         return []
     return [HeaderMatch(rule.field, value, raw, rule.confidence, rule.description, source)]
 

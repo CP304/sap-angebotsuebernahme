@@ -136,15 +136,87 @@ class ExtractionSettings:
     """Steuerung der regelbasierten Angebotserkennung."""
 
     #: Erkennungsspalten in Excel-Dateien (Kleinschreibung, Teiltreffer)
+    #:
+    #: Besonders heikel sind die beiden Artikelnummern-Felder.  In einem
+    #: Lieferantenangebot stehen naemlich *zwei* Nummern nebeneinander:
+    #:
+    #:   ``material_number``         unsere eigene SAP-Materialnummer.  Der
+    #:                               Lieferant nennt sie aus *seiner* Sicht
+    #:                               "Kundenartikelnummer", "Ihre Art.-Nr.",
+    #:                               "Customer part no." usw.
+    #:   ``vendor_material_number``  die Nummer des Lieferanten.  Aus seiner
+    #:                               Sicht schlicht "Artikelnummer", "Unsere
+    #:                               Art.-Nr.", "Supplier part no." usw.
+    #:
+    #: Die Beschriftung allein reicht nicht aus ("Artikelnummer" kann beides
+    #: sein) -- deshalb entscheidet zusaetzlich der Inhalt der Spalte, siehe
+    #: ``own_material_pattern`` weiter unten.
     column_aliases: dict[str, list[str]] = field(default_factory=lambda: {
         "position_number": ["pos", "pos.", "position", "positionsnummer", "item", "lfd", "nr", "nr."],
-        "material_number": ["material", "materialnummer", "matnr", "sap-material",
-                            "sap material", "artikelnummer kunde", "kundenartikelnummer",
-                            "ihre artikelnr", "ihre artikelnummer", "teilenummer"],
-        "vendor_material_number": ["lieferantenmaterial", "lief.-material", "artikelnummer",
-                                   "artikel-nr", "artikelnr", "art.-nr", "sachnummer",
-                                   "bestellnummer", "hersteller-nr", "unsere artikelnummer",
-                                   "vendor part", "part number", "part no"],
+        # -- UNSERE Materialnummer (so, wie der Lieferant sie nennt) --------
+        "material_number": [
+            # neutrale/eindeutige Beschriftungen
+            "material", "materialnummer", "material-nr", "material nr", "materialnr",
+            "matnr", "mat-nr", "mat.-nr", "sap-material", "sap material",
+            "sap-materialnummer", "sap-nummer", "sap nr", "teilenummer",
+            # "Ihre ..." -- aus Sicht des Lieferanten sind wir der Kunde
+            "ihre artikelnummer", "ihre artikelnr", "ihre artikel-nr", "ihre art.-nr",
+            "ihre art-nr", "ihre art nr", "ihre artnr", "ihre artikel nr",
+            "ihre materialnummer", "ihre material-nr", "ihre mat.-nr", "ihre mat-nr",
+            "ihre teilenummer", "ihre sachnummer", "ihre bestellnummer",
+            "ihre bestell-nr", "ihre bestellnr", "ihre nummer", "ihre referenz",
+            "ihr zeichen", "ihre zeichnungsnummer",
+            # "Kunden..." -- ebenfalls wir
+            "kundenartikelnummer", "kundenartikelnr", "kunden-artikelnummer",
+            "kunden-artikel-nr", "kundenartikel-nr", "kundenartikel nr",
+            "artikelnummer kunde", "artikel-nr kunde", "artikelnummer des kunden",
+            "kd-art-nr", "kd-artnr", "kd art nr", "kdartnr", "kd-artikelnummer",
+            "kd-nr", "kundenmaterial", "kundenmaterialnummer", "kunden-material-nr",
+            "kundenmaterial-nr", "kundenteilenummer", "kunden-teile-nr",
+            "kundensachnummer", "bestellnummer kunde", "bestell-nr kunde",
+            "bestellnummer des kunden", "kundenbestellnummer", "kundenreferenz",
+            # englisch
+            "customer part no", "customer part number", "customer part",
+            "customer part #", "customer article no", "customer article number",
+            "customer material", "customer material no", "customer material number",
+            "customer item no", "customer item number", "customer ref",
+            "customer reference", "customer p/n", "cust part no", "cust. part no",
+            "your part number", "your part no", "your part #", "your article no",
+            "your material", "your material no", "your item no", "your ref",
+            "your reference", "your order no", "your p/n",
+        ],
+        # -- Nummer DES LIEFERANTEN -----------------------------------------
+        "vendor_material_number": [
+            # neutrale Beschriftungen (koennen laut Inhalt auch unsere sein!)
+            "artikelnummer", "artikel-nr", "artikelnr", "artikel nr", "art.-nr",
+            "art-nr", "art nr", "artnr", "artikel", "sachnummer", "sach-nr",
+            "sachnr", "typ", "type", "typnummer", "typ-nr", "modell", "modell-nr",
+            "bestellnummer", "bestell-nr", "bestellnr", "katalognummer",
+            "katalog-nr", "identnummer", "ident-nr", "produktnummer", "produkt-nr",
+            "erzeugnisnummer", "zeichnungsnummer",
+            # ausdruecklich die des Lieferanten
+            "lieferantenmaterial", "lief.-material", "lief-material",
+            "lieferantenartikelnummer", "lieferanten-artikelnummer",
+            "lieferanten-art-nr", "lieferantennummer artikel", "artikelnummer lieferant",
+            "artikel-nr lieferant", "unsere artikelnummer", "unsere artikelnr",
+            "unsere artikel-nr", "unsere art.-nr", "unsere art-nr", "unsere art nr",
+            "unsere artnr", "unsere materialnummer", "unsere material-nr",
+            "unsere sachnummer", "unsere nummer", "unsere bestellnummer",
+            "hersteller-nr", "herstellernummer", "hersteller artikelnummer",
+            "hersteller-artikelnummer", "hersteller-teilenummer",
+            # englisch
+            "supplier part no", "supplier part number", "supplier part",
+            "supplier material", "supplier material no", "supplier item no",
+            "supplier article no", "supplier ref", "vendor part", "vendor part no",
+            "vendor part number", "vendor material", "vendor item no",
+            "our part number", "our part no", "our part", "our article no",
+            "our item no", "our material", "our reference", "our ref",
+            "part number", "part no", "part #", "part-no", "partno", "p/n",
+            "item no", "item number", "item #", "item code", "article no",
+            "article number", "manufacturer part no", "manufacturer part number",
+            "mpn", "sku", "model", "model no", "catalogue no", "catalog no",
+            "product code", "product no", "product number", "ref no",
+        ],
         "description": ["bezeichnung", "beschreibung", "benennung", "text", "artikelbezeichnung",
                         "kurztext", "description", "material description"],
         "quantity": ["menge", "anzahl", "stueckzahl", "stückzahl", "qty", "quantity", "bedarf"],
@@ -161,6 +233,40 @@ class ExtractionSettings:
         "remarks": ["bemerkung", "bemerkungen", "hinweis", "anmerkung", "remark", "notes",
                     "kommentar"],
     })
+    # ------------------------------------------------------------------
+    # Erkennung der EIGENEN Materialnummer ueber den Spalteninhalt
+    # ------------------------------------------------------------------
+    #: Regulaerer Ausdruck, auf den eine *eigene* SAP-Materialnummer passt.
+    #:
+    #: WICHTIG -- DIESER WERT MUSS AN DEN EIGENEN NUMMERNKREIS ANGEPASST
+    #: WERDEN.  Der Auslieferungszustand ``^\d{6,18}$`` trifft rein numerische
+    #: Nummern mit 6 bis 18 Stellen; das deckt den haeufigsten Fall ab, weil
+    #: SAP-Materialnummern im Standard achtstellig numerisch sind (z. B.
+    #: ``47110001``).  Es sind aber ebenso gut alphanumerische Nummernkreise
+    #: ueblich.  Beispiele fuer eigene Muster:
+    #:
+    #:   ``^\d{8}$``               genau 8 Ziffern (klassischer SAP-Standard)
+    #:   ``^[0-9]{6,8}$``          6 bis 8 Ziffern
+    #:   ``^M-\d{5}$``             Praefix "M-" plus 5 Ziffern
+    #:   ``^(?:\d{8}|[A-Z]{2}\d{6})$``  gemischter Nummernkreis
+    #:
+    #: Das Muster wird ausschliesslich fuer die *Zuordnung* verwendet -- also
+    #: fuer die Frage "welche Spalte ist unsere Nummer?".  Es filtert niemals
+    #: Werte weg und erfindet nichts: passt nichts, bleibt alles so, wie es im
+    #: Angebot steht, und wird als unsicher gekennzeichnet.
+    own_material_pattern: str = r"^\d{6,18}$"
+    #: Inhaltsbasierte Erkennung ueberhaupt verwenden.  Auf ``False`` zaehlt
+    #: allein die Spaltenueberschrift (Verhalten wie ohne Nummernkreiswissen).
+    own_material_pattern_active: bool = True
+    #: Vertauschte Artikelnummern erkennen und -- deutlich sichtbar -- tauschen.
+    #: Steht in "Material" eine Nummer, die nicht auf ``own_material_pattern``
+    #: passt, und in "Lieferantenmaterial" eine, die passt, wurden die beiden
+    #: Spalten offensichtlich verwechselt.  Getauscht wird nur mit Notiz und
+    #: mit ``FieldOrigin.UNCERTAIN`` -- niemals stillschweigend.
+    swap_detection: bool = True
+    #: Ab welchem Anteil passender Werte gilt eine Spalte als "unsere Nummer"
+    own_material_min_ratio: float = 0.7
+
     #: Zeilen mit weniger als so vielen erkannten Feldern werden verworfen
     min_fields_per_position: int = 2
     #: Freitextzeilen in E-Mails/PDFs auswerten (Positionstabelle nicht erkannt)

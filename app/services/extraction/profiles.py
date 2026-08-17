@@ -65,6 +65,14 @@ class VendorProfile:
     match_fingerprints: list[str] = field(default_factory=list)
     #: Spaltenueberschrift (normalisiert) -> Positionsfeld
     column_map: dict[str, str] = field(default_factory=dict)
+    #: Spaltenueberschrift (normalisiert) -> ``material_number`` bzw.
+    #: ``vendor_material_number``.
+    #:
+    #: Die wichtigste gelernte Information ueberhaupt: bei welchem Lieferanten
+    #: steht in "Artikelnummer" *unsere* Nummer und bei welchem *seine*.  Hat
+    #: der Anwender das einmal korrigiert, gilt es beim naechsten Angebot
+    #: dieses Lieferanten automatisch -- und schlaegt jede Inhaltsheuristik.
+    material_column_role: dict[str, str] = field(default_factory=dict)
     #: Kopffeld -> Regex mit einer Fanggruppe
     header_regexes: dict[str, str] = field(default_factory=dict)
     #: Regex-Muster fuer Zeilen, die keine Position sind
@@ -114,6 +122,7 @@ class VendorProfile:
     def reset_learning(self) -> None:
         """Alles Gelernte verwerfen -- das Profil bleibt bestehen."""
         self.column_map.clear()
+        self.material_column_role.clear()
         self.header_regexes.clear()
         self.skip_patterns.clear()
         self.pending_rules.clear()
@@ -329,7 +338,8 @@ def match_profile(profiles: Iterable[VendorProfile], document: RawDocument,
     """Bestes Profil zu einem Dokument finden.
 
     Score-Anteile:
-      * 0.45 Absenderdomaene bzw. Lieferantenschluessel
+      * 0.55 Absenderdomaene (eine bekannte Domaene *ist* der Lieferant)
+      * 0.45 Lieferantenschluessel (Nummer bzw. Name)
       * 0.30 exakter Layout-Fingerabdruck
       * 0.25 Uebereinstimmung der Spaltenueberschriften
     """
@@ -343,7 +353,9 @@ def match_profile(profiles: Iterable[VendorProfile], document: RawDocument,
     for profile in profiles:
         score = 0.0
         if domain and domain in profile.email_domains:
-            score += 0.45
+            # Die Absenderdomaene ist der belastbarste Hinweis, den es gibt --
+            # sie allein genuegt, damit ein Profil greift.
+            score += 0.55
         elif key and profile.vendor_key and key == profile.vendor_key:
             score += 0.45
         elif key and profile.vendor_key and similarity(key, profile.vendor_key) >= 0.9:

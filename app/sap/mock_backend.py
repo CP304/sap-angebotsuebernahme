@@ -27,7 +27,13 @@ from ..models.offer_position import OfferPosition
 from ..models.results import ActionResult
 from ..models.sap_info_record import SapCondition, SapInfoRecord
 from ..models.sap_source_list import SapSourceList, SourceListEntry
-from ..utils.parsing import format_date, format_decimal, similarity
+from ..utils.parsing import (
+    format_date,
+    format_decimal,
+    normalize_material_number,
+    normalize_vendor_number,
+    similarity,
+)
 from .interfaces import (
     ContractServiceBase,
     InfoRecordServiceBase,
@@ -67,13 +73,35 @@ class MockSapSystem:
         self.load()
 
     # -- Schluessel -----------------------------------------------------
+    # SAP behandelt "0000100234" und "100234" ueber die ALPHA-Konvertierung
+    # als dieselbe Nummer.  Das Testsystem muss sich genauso verhalten, sonst
+    # findet es Saetze nicht wieder, sobald irgendwo fuehrende Nullen wegfallen.
     @staticmethod
     def ir_key(material: str, vendor: str, ekorg: str, plant: str) -> str:
-        return f"{material}|{vendor}|{ekorg}|{plant}"
+        return (f"{normalize_material_number(material)}|"
+                f"{normalize_vendor_number(vendor)}|{ekorg}|{plant}")
 
     @staticmethod
     def sl_key(material: str, plant: str) -> str:
-        return f"{material}|{plant}"
+        return f"{normalize_material_number(material)}|{plant}"
+
+    def _rekey(self) -> None:
+        """Gespeicherte Bestaende auf die normalisierten Schluessel bringen."""
+        neu_ir: dict[str, dict] = {}
+        for schluessel, wert in self.info_records.items():
+            teile = schluessel.split("|")
+            if len(teile) == 4:
+                schluessel = self.ir_key(*teile)
+            neu_ir[schluessel] = wert
+        self.info_records = neu_ir
+
+        neu_sl: dict[str, list[dict]] = {}
+        for schluessel, wert in self.source_lists.items():
+            teile = schluessel.split("|")
+            if len(teile) == 2:
+                schluessel = self.sl_key(*teile)
+            neu_sl[schluessel] = wert
+        self.source_lists = neu_sl
 
     # -- Persistenz -----------------------------------------------------
     def load(self) -> None:
@@ -87,6 +115,7 @@ class MockSapSystem:
                 self.contracts = data.get("contracts", {})
                 self.purchase_orders = data.get("purchase_orders", {})
                 self.counters = data.get("counters", {})
+                self._rekey()
                 logger.info("Mock-SAP geladen: %s", self.path)
                 return
             except (OSError, json.JSONDecodeError) as exc:
@@ -425,9 +454,10 @@ class MockVendorService(_MockBase, VendorServiceBase):
     def check(self, vendor_number: str, purchasing_org: str = "") -> VendorMatch | None:
         raw = self.system.vendors.get(vendor_number)
         if raw is None:
-            # auch ohne fuehrende Nullen suchen
+            # ALPHA-Konvertierung: fuehrende Nullen sind bedeutungslos
+            gesucht = normalize_vendor_number(vendor_number)
             for number, candidate in self.system.vendors.items():
-                if number.lstrip("0") == vendor_number.lstrip("0"):
+                if normalize_vendor_number(number) == gesucht:
                     raw = candidate
                     vendor_number = number
                     break

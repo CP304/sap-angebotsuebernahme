@@ -41,6 +41,12 @@ from ...utils.parsing import (
     similarity,
 )
 from ..readers.base import RawDocument, TableBlock
+from .material_roles import (
+    MATERIAL_FIELDS,
+    compile_own_pattern,
+    header_role,
+    own_ratio,
+)
 
 if TYPE_CHECKING:  # pragma: no cover -- nur fuer die Typpruefung
     from .profiles import VendorProfile
@@ -106,6 +112,12 @@ _TIER_RE = re.compile(
 #: Materialnummer-Kandidat (konfigurierbar ueber TableExtractor)
 DEFAULT_MATERIAL_PATTERN = r"^(?:\d{6,18}|[A-Za-z0-9]{2,}(?:[-/.][A-Za-z0-9]+)+)$"
 
+#: Klartext der beiden Artikelnummern-Rollen (fuer das Protokoll)
+_ROLE_LABEL = {
+    "material_number": "unsere Materialnummer",
+    "vendor_material_number": "Artikelnummer des Lieferanten",
+}
+
 #: Wie viele Zeilen werden je Spalte fuer die Typerkennung betrachtet
 _SAMPLE_SIZE = 25
 
@@ -148,9 +160,15 @@ class ColumnAssignment:
     header: str = ""
     confidence: float = 0.0
     reason: str = ""
+    #: Erzwungene Herkunft.  Wird gesetzt, wenn die Zuordnung nicht aus der
+    #: Ueberschrift, sondern aus dem *Inhalt* der Spalte stammt -- solche
+    #: Werte sind grundsaetzlich zu pruefen, egal wie klar der Inhalt wirkt.
+    forced_origin: FieldOrigin | None = None
 
     @property
     def origin(self) -> FieldOrigin:
+        if self.forced_origin is not None:
+            return self.forced_origin
         return FieldOrigin.EXTRACTED if self.confidence >= 0.6 else FieldOrigin.UNCERTAIN
 
 
@@ -215,13 +233,27 @@ def parse_number(value: object, style: str = "auto") -> Decimal | None:
         if re.fullmatch(r"[+-]?\d{1,3}(?:\.\d{3})+", text):
             return parse_decimal(text.replace(".", ""))
         if re.fullmatch(r"[+-]?\d+,\d+", text):
-            return parse_decimal(text.replace(",", "."))
+            # Das Komma ist im deutschen Format *immer* der Dezimaltrenner --
+            # auch bei "1,234".  parse_decimal() wuerde hier die Mehrdeutigkeit
+            # zugunsten der Tausendertrennung aufloesen; genau das darf das
+            # gelernte Format verhindern.
+            return _decimal_or_none(text.replace(",", "."))
     else:
         if re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+", text):
             return parse_decimal(text.replace(",", ""))
         if re.fullmatch(r"[+-]?\d+\.\d+", text):
-            return parse_decimal(text)
+            # Analog: im englischen Format ist der Punkt der Dezimaltrenner,
+            # "1.234" ist also 1,234 -- und nicht Eintausendzweihundertvier.
+            return _decimal_or_none(text)
     return parse_decimal(text)
+
+
+def _decimal_or_none(text: str) -> Decimal | None:
+    """``Decimal`` ohne Heuristik -- der Trenner ist bereits eindeutig."""
+    try:
+        return Decimal(text)
+    except (ArithmeticError, ValueError):
+        return None
 
 
 def find_price_tiers(text: str, style: str = "auto") -> list[tuple[Decimal, Decimal, str]]:
@@ -301,6 +333,8 @@ class TableExtractor:
         except re.error:
             logger.error("Ungueltiges Materialnummernmuster, Standard wird verwendet")
             self.material_re = re.compile(DEFAULT_MATERIAL_PATTERN)
+        self.own_material_re = compile_own_pattern(
+            settings.extraction.own_material_pattern)
         self.decimal_style = (profile.decimal_style if profile else "auto") or "auto"
         self._skip_patterns: list[re.Pattern[str]] = []
         if profile:
@@ -380,7 +414,117 @@ class TableExtractor:
                     "zusammengefuehrt")
 
         self._assign_columns(analysis)
+        self._resolve_material_columns(analysis)
         return analysis
+
+    # ------------------------------------------------------------------
+    # Artikelnummern: welche Spalte ist UNSERE Materialnummer?
+    # ------------------------------------------------------------------
+    def _resolve_material_columns(self, analysis: TableAnalysis) -> None:
+        """Rollen der beiden Artikelnummern-Spalten ueber den Inhalt klaeren.
+
+        Die Ueberschrift allein genuegt nicht: "Artikelnummer" kann unsere
+        Nummer oder die des Lieferanten sein.  Deshalb wird zusaetzlich
+        gezaehlt, welcher Anteil der Werte auf den eigenen Nummernkreis passt
+        (:attr:`ExtractionSettings.own_material_pattern`).
+
+        Entschieden wird nur, was sich belegen laesst, und jede Entscheidung
+        landet als Notiz im Protokoll.  Umsortierte Spalten sind immer
+        ``UNCERTAIN`` -- der Anwender bekommt sie gelb angezeigt.
+        """
+        extraction = self.settings.extraction
+        if not extraction.own_material_pattern_active:
+            return
+        candidates = {index: assignment for index, assignment in analysis.columns.items()
+                      if assignment.field in MATERIAL_FIELDS}
+        if not candidates:
+            return
+
+        rows = [r for r in analysis.block.rows[analysis.data_start:]
+                if not is_summary_row(r)][:_SAMPLE_SIZE]
+        if not rows:
+            return
+
+        learned = self._learned_roles()
+        minimum = max(0.0, min(1.0, float(extraction.own_material_min_ratio or 0.7)))
+        ratios: dict[int, float] = {}
+        for index in candidates:
+            values = [r[index] if index < len(r) else "" for r in rows]
+            ratios[index] = own_ratio(values, self.own_material_re)
+
+        used_fields = {a.field for a in analysis.columns.values()}
+
+        # 1. Gelernte Rollen: der Anwender hat es einmal korrigiert -- fertig.
+        for index, assignment in list(candidates.items()):
+            role = learned.get(_normalize_header(assignment.header))
+            if role and role != assignment.field:
+                self._retag(analysis, index, role, None,
+                            f"Spalte '{assignment.header}' gilt laut Lieferantenprofil "
+                            f"als '{_ROLE_LABEL[role]}' (vom Anwender bestaetigt).")
+        if learned:
+            candidates = {index: assignment
+                          for index, assignment in analysis.columns.items()
+                          if assignment.field in MATERIAL_FIELDS}
+            used_fields = {a.field for a in analysis.columns.values()}
+            if not candidates:
+                return
+
+        # 2. Zwei (oder mehr) Kandidaten: die Marker in der Ueberschrift
+        #    ("Ihre .../Kunden..." gegen "Unsere .../Hersteller...") entscheiden.
+        if len(candidates) >= 2:
+            for index, assignment in list(candidates.items()):
+                if _normalize_header(assignment.header) in learned:
+                    continue
+                role = header_role(assignment.header)
+                if not role or role == assignment.field:
+                    continue
+                self._retag(analysis, index, role, None,
+                            f"Spalte '{assignment.header}' wird als "
+                            f"'{_ROLE_LABEL[role]}' gefuehrt -- die Ueberschrift "
+                            "nennt ausdruecklich, aus wessen Sicht die Nummer ist.")
+            return
+
+        # 3. Genau ein Kandidat, als Lieferantennummer gefuehrt, Inhalt sieht
+        #    aber nach unserer Nummer aus -> umtragen, aber unsicher.
+        index, assignment = next(iter(candidates.items()))
+        if (assignment.field == "vendor_material_number"
+                and "material_number" not in used_fields
+                and ratios.get(index, 0.0) >= minimum
+                and _normalize_header(assignment.header) not in learned
+                and not header_role(assignment.header)):
+            ratio = ratios[index]
+            self._retag(
+                analysis, index, "material_number", FieldOrigin.UNCERTAIN,
+                f"Spalte '{assignment.header or f'Nr. {index + 1}'}' sieht nach "
+                f"unserer Materialnummer aus ({ratio:.0%} der Werte passen auf das "
+                f"Muster {extraction.own_material_pattern}) und wird als solche "
+                "uebernommen -- bitte pruefen.")
+
+    def _retag(self, analysis: TableAnalysis, index: int, field_name: str,
+               forced_origin: FieldOrigin | None, note: str) -> None:
+        """Eine Spalte einem anderen Feld zuordnen und das protokollieren."""
+        assignment = analysis.columns[index]
+        analysis.columns[index] = ColumnAssignment(
+            index=index, field=field_name, header=assignment.header,
+            confidence=assignment.confidence,
+            reason="Inhalt der Spalte (Nummernkreis)",
+            forced_origin=forced_origin)
+        analysis.notes.append(note)
+        logger.info("Spalte %d ('%s') -> %s: %s", index + 1, assignment.header,
+                    field_name, note)
+
+    def _learned_roles(self) -> dict[str, str]:
+        """Vom Anwender bestaetigte Spaltenrollen aus dem Lieferantenprofil."""
+        if self.profile is None:
+            return {}
+        roles = {header: field_name
+                 for header, field_name in getattr(
+                     self.profile, "material_column_role", {}).items()
+                 if field_name in MATERIAL_FIELDS}
+        for header, field_name in self.profile.column_map.items():
+            if field_name in MATERIAL_FIELDS:
+                roles.setdefault(header, field_name)
+        return roles
 
     def _find_header(self, block: TableBlock) -> tuple[int | None, list[str], bool, float]:
         """Beste Kopfzeile suchen; liefert (Index, Texte, verschmolzen, Score)."""
@@ -401,9 +545,16 @@ class TableExtractor:
                 if len(block.rows[index + 1]) > len(row):
                     combined += block.rows[index + 1][len(row):]
                 merged_score, _ = self._score_header_row(combined)
-                # Nur verschmelzen, wenn es wirklich besser wird
+                # Verschmolzen wird in zwei Faellen:
+                #   a) es wird deutlich besser ("Preis" + "EUR/Stueck")
+                #   b) die Folgezeile ist erkennbar eine Kopfzeilen-Fortsetzung
+                #      ("Netto"/"Preis") und keine Datenzeile
                 if merged_score > single_score + 0.4:
                     candidate_score, candidate_texts, merged = merged_score, combined, True
+                elif (self._is_header_continuation(block.rows[index + 1])
+                        and merged_score >= single_score - 0.5):
+                    candidate_score = max(single_score, merged_score)
+                    candidate_texts, merged = combined, True
 
             if candidate_score > best_score:
                 best_index, best_texts = index, candidate_texts
@@ -412,6 +563,23 @@ class TableExtractor:
         if best_score < 1.6:      # entspricht ~2 sicher erkannten Spalten
             return None, [], False, best_score
         return best_index, best_texts, best_merged, best_score
+
+    def _is_header_continuation(self, row: list[str]) -> bool:
+        """Ist diese Zeile die zweite Haelfte einer mehrzeiligen Kopfzeile?
+
+        Kennzeichen einer Fortsetzung: sie enthaelt ausschliesslich Text (keine
+        Zahl, kein Datum -- sonst waere es eine Datenzeile) und mindestens zwei
+        Zellen, die selbst wie Spaltenbeschriftungen aussehen.
+        """
+        texts = [normalize_whitespace(cell) for cell in row]
+        filled = [t for t in texts if t]
+        if len(filled) < 2:
+            return False
+        for value in filled:
+            if _looks_like_number(value) or _looks_like_date(value):
+                return False
+        score, hits = self._score_header_row(texts)
+        return len(hits) >= 2 and score >= 1.2
 
     def _score_header_row(self, row: list[str]) -> tuple[float, dict[int, tuple[str, float, str]]]:
         """Wie gut passt eine Zeile als Kopfzeile?"""

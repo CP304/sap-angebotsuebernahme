@@ -78,12 +78,46 @@ class GuiSmokeTest(unittest.TestCase):
             cls.services.repository.close()
 
     # ------------------------------------------------------------------
-    def test_01_fenster_und_seiten(self) -> None:
-        self.assertEqual(self.window.tabs.count(), 6)
-        titel = [self.window.tabs.tabText(i) for i in range(self.window.tabs.count())]
-        for erwartet in ("Angebot", "Historie", "Zuordnungen", "SAP-Feld-IDs",
+    def test_01_arbeitsflaeche_ohne_verwaltung(self) -> None:
+        """Das Hauptfenster zeigt nur die Arbeitsflaeche, keine Verwaltung."""
+        self.assertFalse(hasattr(self.window, "tabs"),
+                         "Die Verwaltung gehoert nicht ins Hauptfenster")
+        self.assertIsNotNone(self.window.table)
+        self.assertIsNotNone(self.window.details)
+
+        titel = [t for t, _w in self.window._admin_pages]
+        for erwartet in ("Historie", "Zuordnungen", "SAP-Feld-IDs",
                          "Einstellungen", "Protokoll"):
             self.assertIn(erwartet, titel)
+
+    def test_01b_verwaltungsfenster_oeffnet(self) -> None:
+        self.window.open_admin("Einstellungen")
+        fenster = self.window._admin_window
+        self.assertIsNotNone(fenster)
+        self.assertEqual(fenster.tabs.tabText(fenster.tabs.currentIndex()),
+                         "Einstellungen")
+        fenster.hide()
+
+    def test_01c_ablauf_in_drei_schritten(self) -> None:
+        """Die Werkzeugleiste fuehrt durch genau drei Schritte."""
+        for button in (self.window.step1_button, self.window.step2_button,
+                       self.window.step3_button):
+            self.assertTrue(button.text())
+        self.assertIn("1", self.window.step1_button.text())
+        self.assertIn("3", self.window.step3_button.text())
+
+    def test_01d_tabelle_zeigt_standardansicht(self) -> None:
+        """Standardmaessig nur die knappe Spaltenauswahl."""
+        from app.gui.offer_table import COLUMNS, DETAILED_ONLY, COLUMN_INDEX
+
+        self.assertFalse(self.window.table.detailed_columns)
+        for key in DETAILED_ONLY:
+            self.assertTrue(self.window.table.isColumnHidden(COLUMN_INDEX[key]),
+                            f"Spalte {key} sollte in der Standardansicht verborgen sein")
+        self.window.table.set_detailed_columns(True)
+        for index in range(len(COLUMNS)):
+            self.assertFalse(self.window.table.isColumnHidden(index))
+        self.window.table.set_detailed_columns(False)
 
     def test_02_startprobleme_gemeldet(self) -> None:
         """Fehlende Komponenten muessen gemeldet, nicht verschwiegen werden."""
