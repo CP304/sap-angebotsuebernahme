@@ -15,6 +15,11 @@ Grundsaetze
 * Fehlt eine Vorbedingung (Material, Lieferant oder Preis), lautet die Antwort
   ``BLOCKED``.  Der Anwender sieht damit sofort, dass hier nicht SAP das
   Problem ist, sondern die Datenlage.
+* Fremdwaehrung: Kommt das Angebot in einer anderen Waehrung als der Infosatz,
+  wird fuer die **Prozentangabe** ueber den gepflegten Kurs umgerechnet -- und
+  nur dafuer.  Nach SAP geht immer der Originalbetrag in der Originalwaehrung.
+  Fehlt der Kurs oder ist die Umrechnung abgeschaltet, bleibt die Prozentangabe
+  leer (``None``); es wird kein Vergleich erfunden.
 """
 
 from __future__ import annotations
@@ -30,11 +35,13 @@ from ..models.offer_position import OfferPosition
 from ..models.sap_info_record import SapInfoRecord
 from ..models.sap_source_list import SourceListEntry
 from ..utils.parsing import format_date, format_decimal, normalize_uom
+from .currency_service import ConversionResult, CurrencyService
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "ComparisonService",
+    "comparison_currency",
     "normalized_offer_price",
     "normalized_sap_price",
     "price_change_percent",
@@ -72,14 +79,53 @@ def normalized_sap_price(record: SapInfoRecord | None) -> Decimal | None:
         return None
 
 
-def price_change_percent(position: OfferPosition, settings: Settings) -> Decimal | None:
-    """Preisaenderung in Prozent, preiseinheitsbereinigt.
+def offer_currency(position: OfferPosition, settings: Settings) -> str:
+    """Waehrung des Angebots (ersatzweise die Vorbelegung des Einkaufs)."""
+    return (position.currency or settings.purchasing.currency or "").upper()
 
-    ``None``, wenn kein Vergleich moeglich ist (kein Infosatz, kein Preis oder
-    ein alter Preis von 0).
+
+def comparison_currency(position: OfferPosition, settings: Settings) -> str:
+    """Waehrung, in der verglichen wird.
+
+    Das ist die Waehrung des vorhandenen Infosatzes -- denn gegen diesen Wert
+    wird gemessen.  Gibt es keinen Infosatz, gilt die Hauswaehrung.
+    """
+    record = position.sap_info_record
+    if record is not None and record.exists and record.currency:
+        return record.currency.upper()
+    return (settings.currency.company_currency or settings.purchasing.currency or "").upper()
+
+
+def offer_price_in_comparison_currency(position: OfferPosition,
+                                       settings: Settings) -> Decimal | None:
+    """Angebotspreis je Einheit, umgerechnet in die Vergleichswaehrung.
+
+    ``None``, wenn kein Preis vorliegt, die Umrechnung abgeschaltet ist oder
+    kein Kurs hinterlegt wurde.  Der Wert dient ausschliesslich dem Vergleich
+    und wird niemals in die Position zurueckgeschrieben.
+    """
+    new = normalized_offer_price(position, settings)
+    if new is None:
+        return None
+    quelle = offer_currency(position, settings)
+    ziel = comparison_currency(position, settings)
+    if not quelle or not ziel or quelle == ziel:
+        return new
+    if not settings.currency.convert_for_comparison:
+        return None
+    return CurrencyService(settings).convert(new, quelle, ziel)
+
+
+def price_change_percent(position: OfferPosition, settings: Settings) -> Decimal | None:
+    """Preisaenderung in Prozent, preiseinheits- und waehrungsbereinigt.
+
+    ``None``, wenn kein Vergleich moeglich ist: kein Infosatz, kein Preis, ein
+    alter Preis von 0 -- oder eine Fremdwaehrung ohne Kurs.  Der Aufrufer muss
+    "keine Aenderung" und "nicht vergleichbar" unterscheiden koennen, deshalb
+    wird im Zweifel nichts geliefert statt einer 0.
     """
     old = normalized_sap_price(position.sap_info_record)
-    new = normalized_offer_price(position, settings)
+    new = offer_price_in_comparison_currency(position, settings)
     if old is None or new is None or old == 0:
         return None
     return (new - old) / old * Decimal(100)
@@ -94,6 +140,7 @@ class ComparisonService:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.currency = CurrencyService(settings)
 
     # ------------------------------------------------------------------
     # Oeffentliche Schnittstelle
@@ -163,9 +210,12 @@ class ComparisonService:
         """
         old = normalized_sap_price(record)
         new = normalized_offer_price(position, self.settings)
-        if old is None or new is None or old != new:
-            return False
         if self.currency_changed(position, record):
+            # Ein Waehrungswechsel ist IMMER eine Aenderung -- auch dann, wenn
+            # der umgerechnete Betrag zufaellig gleich hoch ist.  Im Infosatz
+            # stuende sonst weiter die alte Waehrung.
+            return False
+        if old is None or new is None or old != new:
             return False
         if self.uom_changed(position, record):
             return False
@@ -299,6 +349,41 @@ class ComparisonService:
             sign = "±"
         return f"{sign}{format_decimal(abs(percent), 2)} %"
 
+    # -- Fremdwaehrung ---------------------------------------------------
+    def is_foreign_currency(self, position: OfferPosition) -> bool:
+        """Weicht die Angebotswaehrung von der Vergleichswaehrung ab?"""
+        quelle = offer_currency(position, self.settings)
+        ziel = comparison_currency(position, self.settings)
+        return bool(quelle and ziel and quelle != ziel)
+
+    def conversion_for(self, position: OfferPosition) -> ConversionResult | None:
+        """Umrechnung des Angebotspreises fuer den Vergleich.
+
+        ``None``, wenn gar keine Fremdwaehrung im Spiel ist.  Sonst immer ein
+        ``ConversionResult`` -- auch dann, wenn nicht umgerechnet werden konnte;
+        dessen ``note`` sagt in Klartext, woran es lag.
+        """
+        if not self.is_foreign_currency(position):
+            return None
+        return self.currency.conversion(
+            position.price,
+            offer_currency(position, self.settings),
+            comparison_currency(position, self.settings),
+        )
+
+    def comparison_note(self, position: OfferPosition) -> str:
+        """Kurzer Hinweis fuer die Tabelle (leer, wenn nichts zu sagen ist)."""
+        conversion = self.conversion_for(position)
+        if conversion is None:
+            return ""
+        if not conversion.ok:
+            return conversion.note
+        hinweis = conversion.note
+        if self.currency.is_stale():
+            alter = self.currency.rate_age_days()
+            hinweis = f"{hinweis} – Kurs ist {alter} Tage alt".strip(" –")
+        return hinweis
+
     def describe_change(self, position: OfferPosition) -> dict[str, str]:
         """Darstellung fuer die Detailansicht einer Position."""
         record = position.sap_info_record
@@ -312,18 +397,38 @@ class ComparisonService:
         if position.price is not None:
             new_price = f"{format_decimal(position.price)} {currency}".strip()
 
+        conversion = self.conversion_for(position)
+        if conversion is not None and conversion.ok and position.price is not None:
+            new_price = f"{new_price} ({conversion.note})"
+
         price_unit = position.price_unit or self.settings.purchasing.price_unit or 1
         uom = position.uom or self.settings.purchasing.order_unit
         unit_text = f"{price_unit} {uom}".strip() or "-"
 
-        return {
+        aenderung = self.price_delta_text(position) or "-"
+        if conversion is not None:
+            if conversion.ok:
+                if aenderung != "-":
+                    aenderung = f"{aenderung} (umgerechnet)"
+            else:
+                # Kein Kurs oder Umrechnung abgeschaltet: es wird ausdruecklich
+                # keine Prozentzahl erfunden.
+                aenderung = conversion.note
+
+        beschreibung = {
             "Alter Preis": old_price,
             "Neuer Preis": new_price,
-            "Änderung": self.price_delta_text(position) or "-",
+            "Änderung": aenderung,
             "Preiseinheit": unit_text,
             "Gültig ab": format_date(self.effective_date(position)),
             "Orderbuch": self.source_list_text(position),
         }
+        if conversion is not None:
+            beschreibung["Währung"] = (
+                f"Angebot in {conversion.currency}, Vergleich in "
+                f"{conversion.target_currency} – nach SAP wird der "
+                f"Originalbetrag in {conversion.currency} geschrieben.")
+        return beschreibung
 
     def info_record_text(self, position: OfferPosition) -> str:
         """Einzeiler zur geplanten Infosatzaktion."""

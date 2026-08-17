@@ -722,6 +722,106 @@ def rtf_angebot(pfad: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# OpenDocument-Tabelle (.ods) und ZIP-Archiv
+# ---------------------------------------------------------------------------
+
+def ods_preisliste(pfad: Path) -> None:
+    """LibreOffice-Calc-Angebot mit zwei Blaettern.
+
+    Blatt 1 traegt Anschreiben und Kopfdaten, Blatt 2 die Positionen -- genau
+    so, wie Lieferanten ihre Preislisten tatsaechlich aufbauen.
+
+    Bewusst eingebaut: zusammengefasste Leerspalten
+    (``table:number-columns-repeated``) und zusammengefasste Leerzeilen
+    (``table:number-rows-repeated``).  So speichert LibreOffice wirklich --
+    und genau daran scheitert ein naiver Leser.  Ebenfalls bewusst: die
+    Preise stehen als roher ``office:value`` in der Datei, waehrend der
+    Anzeigetext deutsch formatiert ist ("4,55 EUR").
+    """
+    import zipfile
+
+    T = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+    TB = "urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+    O = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+
+    def text_zelle(inhalt: str, wiederholt: int = 1) -> str:
+        wdh = f' table:number-columns-repeated="{wiederholt}"' if wiederholt > 1 else ""
+        if not inhalt:
+            return f"<table:table-cell{wdh}/>"
+        return (f'<table:table-cell{wdh} office:value-type="string">'
+                f"<text:p>{inhalt}</text:p></table:table-cell>")
+
+    def zahl_zelle(wert: str, anzeige: str) -> str:
+        """Rohwert und (abweichender) formatierter Anzeigetext."""
+        return (f'<table:table-cell office:value-type="float" office:value="{wert}">'
+                f"<text:p>{anzeige}</text:p></table:table-cell>")
+
+    def zeile(*zellen: str, wiederholt: int = 1) -> str:
+        wdh = f' table:number-rows-repeated="{wiederholt}"' if wiederholt > 1 else ""
+        # Wie LibreOffice: die Zeile wird mit zusammengefassten Leerspalten
+        # bis zum Blattrand aufgefuellt.
+        fuellung = text_zelle("", 1014)
+        return (f"<table:table-row{wdh}>" + "".join(zellen) + fuellung
+                + "</table:table-row>")
+
+    kopf = (
+        '<table:table table:name="Anschreiben">'
+        + zeile(text_zelle("Nordtec Industriebedarf AG"))
+        + zeile(text_zelle("Angebot Nr."), text_zelle("ANG-2026-5501"))
+        + zeile(text_zelle("Datum"), text_zelle(_datum(HEUTE)))
+        + zeile(text_zelle("Waehrung"), text_zelle("EUR"))
+        + zeile(text_zelle("Zahlungsziel"), text_zelle("30 Tage netto"))
+        + zeile(text_zelle(""), wiederholt=1048570)
+        + "</table:table>"
+    )
+
+    positionen = (
+        ("10", "47110001", "Dichtring 52x72x10 NBR", "25", "Stk.", "12.35", "12,35 EUR"),
+        ("20", "47110005", "Rillenkugellager 6204-2RS", "1000", "ST", "4.55", "4,55 EUR"),
+        ("30", "49900010", "Hydraulikschlauch DN12", "500", "Meter", "7.15", "7,15 EUR"),
+    )
+    zeilen = [zeile(
+        text_zelle("Pos"), text_zelle("Material"), text_zelle("Bezeichnung"),
+        text_zelle("Menge"), text_zelle("ME"), text_zelle("Preis"))]
+    for pos, material, bezeichnung, menge, me, wert, anzeige in positionen:
+        zeilen.append(zeile(
+            text_zelle(pos), text_zelle(material), text_zelle(bezeichnung),
+            text_zelle(menge), text_zelle(me), zahl_zelle(wert, anzeige)))
+    zeilen.append(zeile(text_zelle(""), wiederholt=1048000))
+
+    tabelle = ('<table:table table:name="Positionen">' + "".join(zeilen)
+               + "</table:table>")
+
+    inhalt = (
+        f'<?xml version="1.0" encoding="UTF-8"?>'
+        f'<office:document-content xmlns:office="{O}" xmlns:text="{T}" '
+        f'xmlns:table="{TB}"><office:body><office:spreadsheet>'
+        f"{kopf}{tabelle}"
+        f"</office:spreadsheet></office:body></office:document-content>")
+
+    with zipfile.ZipFile(pfad, "w", zipfile.ZIP_DEFLATED) as archiv:
+        archiv.writestr("mimetype",
+                        "application/vnd.oasis.opendocument.spreadsheet")
+        archiv.writestr("content.xml", inhalt)
+
+
+def zip_sammlung(pfad: Path, *quellen: Path) -> None:
+    """ZIP mit PDF + Excel -- und einer Datei, die der Import nicht kennt.
+
+    Die .png-Attrappe ist Absicht: Lieferanten packen regelmaessig ihr Logo
+    oder einen Scan mit ins Archiv.  Der Import muss so etwas sichtbar
+    ueberspringen, statt es zu deuten.
+    """
+    import zipfile
+
+    with zipfile.ZipFile(pfad, "w", zipfile.ZIP_DEFLATED) as archiv:
+        for quelle in quellen:
+            if quelle.exists():
+                archiv.write(quelle, arcname=quelle.name)
+        archiv.writestr("Firmenlogo.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 128)
+
+
+# ---------------------------------------------------------------------------
 
 def main() -> int:
     ZIEL.mkdir(parents=True, exist_ok=True)
@@ -744,6 +844,7 @@ def main() -> int:
         ("Mail_mit_Ergaenzungen_im_Text.eml", mail_mit_ergaenzungen),
         ("Angebot_Staffelpreise_zwei_Seiten.pdf", pdf_staffelpreise_zwei_seiten),
         ("Quotation_vertauschte_Spalten.xlsx", excel_vertauschte_spalten),
+        ("Preisliste_Nordtec.ods", ods_preisliste),
     ]
     # Hinweis: Die Windows-Konsole nutzt cp1252 -- deshalb bewusst nur ASCII
     # ausgeben, sonst bricht die Ausgabe mit einem UnicodeEncodeError ab.
@@ -761,6 +862,15 @@ def main() -> int:
         print("  [ok]     Angebot_Nordtec_mit_Anhang.eml")
     except Exception as fehler:  # noqa: BLE001
         print(f"  [FEHLER] Angebot_Nordtec_mit_Anhang.eml: {fehler}")
+
+    # Das ZIP verpackt bereits erzeugte Beispiele -- deshalb erst zum Schluss.
+    try:
+        zip_sammlung(ZIEL / "Angebot_Sammlung.zip",
+                     ZIEL / "Angebot_Pumpen_Weber.pdf",
+                     ZIEL / "Angebot_Muster_Dichtungstechnik.xlsx")
+        print("  [ok]     Angebot_Sammlung.zip")
+    except Exception as fehler:  # noqa: BLE001
+        print(f"  [FEHLER] Angebot_Sammlung.zip: {fehler}")
 
     print("\nFertig. Ziehen Sie eine dieser Dateien einfach in das Anwendungsfenster.")
     return 0

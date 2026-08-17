@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ...config.settings import ExtractionSettings
 from ...models.enums import SourceKind
+from .archive_reader import ArchiveReader
 from .base import DocumentReader, RawDocument, TableBlock
 from .email_reader import (
     EmailReader,
@@ -23,6 +24,7 @@ from .email_reader import (
 from .excel_reader import CsvReader, ExcelReader
 from .office_reader import OpenDocumentReader, RichTextReader, WordReader
 from .pdf_reader import PdfReader
+from .spreadsheet_reader import OdsReader
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,8 @@ __all__ = [
     "CsvReader",
     "EmailReader",
     "OpenDocumentReader",
+    "OdsReader",
+    "ArchiveReader",
     "RichTextReader",
     "TextReader",
     "WordReader",
@@ -63,6 +67,10 @@ class ReaderRegistry:
         self.settings = settings or ExtractionSettings()
         self.email_reader = EmailReader(self.settings,
                                         attachment_reader=self.read)
+        #: ZIP-Archive werden wie eine Mail mit Anhaengen behandelt -- der
+        #: Inhalt laeuft ueber dieselbe Registry (siehe EmailReader).
+        self.archive_reader = ArchiveReader(attachment_reader=self.read,
+                                            can_read=self.can_read)
         self.readers: list[DocumentReader] = [
             PdfReader(),
             ExcelReader(),
@@ -70,6 +78,8 @@ class ReaderRegistry:
             self.email_reader,
             WordReader(),
             OpenDocumentReader(),
+            OdsReader(),
+            self.archive_reader,
             RichTextReader(),
             TextReader(),
         ]

@@ -37,6 +37,8 @@ from ..models.enums import InfoRecordAction, IssueSeverity, SourceListAction
 from ..models.offer import Offer
 from ..models.offer_position import OfferPosition
 from ..utils.parsing import format_decimal
+from .comparison_service import comparison_currency, offer_currency
+from .currency_service import CurrencyService
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,11 @@ class PreviewSummary:
     contract_plans: list[ContractPlan] = field(default_factory=list)
     purchase_order_plans: list[PurchaseOrderPlan] = field(default_factory=list)
 
+    #: Fremdwaehrungen der ausgewaehlten Positionen (Kuerzel, sortiert)
+    foreign_currencies: list[str] = field(default_factory=list)
+    #: Klartextzeilen zur Fremdwaehrung (Kurs, Kursalter, Hinweis zum Schreiben)
+    currency_lines: list[str] = field(default_factory=list)
+
     warnings: int = 0
     errors: int = 0
     blocking: list[str] = field(default_factory=list)
@@ -184,6 +191,7 @@ class PreviewService:
         self._fill_call_off_quantities(selected, settings)
         self._build_plans(offer, selected, settings, summary)
         self._count_issues(offer, selected, summary)
+        self._check_currencies(selected, settings, summary)
         summary.chain_order = self._chain_order(settings, summary)
         summary.lines = self._build_lines(settings, summary)
 
@@ -295,6 +303,69 @@ class PreviewService:
                     f"({position.display_name}): {reasons}")
 
     # ------------------------------------------------------------------
+    def _check_currencies(self, selected: list[OfferPosition], settings: Settings,
+                          summary: PreviewSummary) -> None:
+        """Fremdwaehrungen der Auswahl aufbereiten.
+
+        Vor dem Schreiben muss unmissverstaendlich dastehen, welche Waehrungen
+        im Spiel sind, mit welchem (wie alten) Kurs verglichen wurde -- und
+        dass nach SAP der Originalbetrag in der Originalwaehrung geht.
+        Fehlt zu einer ausgewaehlten Position der Kurs, ist das ein Eintrag in
+        ``blocking``: der Anwender muss ausdruecklich bestaetigen.
+        """
+        service = CurrencyService(settings)
+        fremde: list[str] = []
+        ohne_kurs: list[OfferPosition] = []
+
+        for position in selected:
+            quelle = offer_currency(position, settings)
+            ziel = comparison_currency(position, settings)
+            if not quelle or not ziel or quelle == ziel:
+                continue
+            if quelle not in fremde:
+                fremde.append(quelle)
+            if not settings.currency.convert_for_comparison:
+                continue
+            if service.rate(quelle, ziel) is None:
+                ohne_kurs.append(position)
+
+        summary.foreign_currencies = sorted(fremde)
+        if not fremde:
+            return
+
+        zeilen: list[str] = [
+            "Fremdwährung: " + ", ".join(summary.foreign_currencies)
+        ]
+        if not settings.currency.convert_for_comparison:
+            zeilen.append("Umrechnung für den Vergleich ist abgeschaltet – "
+                          "es wird keine Preisänderung in Prozent ausgewiesen.")
+        else:
+            kurse = service.rate_info_text(summary.foreign_currencies)
+            if kurse:
+                zeilen.append(f"Verwendete Kurse: {kurse}")
+            alter = service.rate_age_days()
+            if alter is None:
+                zeilen.append("Kursalter: kein Pflegedatum hinterlegt.")
+            elif service.is_stale():
+                zeilen.append(
+                    f"Kursalter: {alter} Tage – älter als die zulässigen "
+                    f"{settings.currency.max_rate_age_days} Tage.")
+            else:
+                zeilen.append(f"Kursalter: {alter} Tage.")
+        zeilen.append("Nach SAP wird immer der Originalbetrag in der "
+                      "Originalwährung des Angebots geschrieben – nie ein "
+                      "umgerechneter Wert.")
+
+        summary.currency_lines = zeilen
+
+        for position in ohne_kurs:
+            quelle = offer_currency(position, settings)
+            summary.blocking.append(
+                f"Position {position.position_number or position.uid} "
+                f"({position.display_name}): kein Umrechnungskurs für {quelle} "
+                f"hinterlegt – die Preisänderung ist nicht überprüfbar.")
+
+    # ------------------------------------------------------------------
     def _chain_order(self, settings: Settings, summary: PreviewSummary) -> list[str]:
         """Feste Reihenfolge des Komplettvorgangs -- nur die aktiven Schritte."""
         transactions = settings.transactions
@@ -363,6 +434,8 @@ class PreviewService:
                 + _plural(summary.purchase_order_items, "Position", "Positionen")
                 + f" ({self._call_off_text(settings)})"
             )
+
+        lines.extend(summary.currency_lines)
 
         if summary.warnings:
             lines.append(f"Warnungen: {summary.warnings}")
