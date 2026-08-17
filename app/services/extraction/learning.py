@@ -47,6 +47,7 @@ __all__ = [
     "learn_from_corrections",
     "forget_rule",
     "describe_learning",
+    "suggest_exclude_keyword",
 ]
 
 #: Felder, deren Spaltenzuordnung gelernt werden darf
@@ -87,6 +88,11 @@ class LearningConfig:
     regex_confirmations: int = 2
     skip_confirmations: int = 1
     decimal_confirmations: int = 1
+    #: Ein vertauschtes Datum ist ein eindeutiger Beleg -- eine Korrektur reicht
+    date_order_confirmations: int = 1
+    #: Ausschlussmerkmale sind scharf (sie verwerfen ein ganzes Profil) und
+    #: werden deshalb erst nach der zweiten Bestaetigung wirksam
+    exclude_keyword_confirmations: int = 2
     #: Wie viele Skip-Muster darf ein Profil hoechstens sammeln
     max_skip_patterns: int = 40
 
@@ -117,13 +123,16 @@ class LearningReport:
 
 def learn_from_corrections(original: Offer, corrected: Offer, document: RawDocument,
                            profile: VendorProfile | None = None,
-                           config: LearningConfig | None = None) -> VendorProfile:
+                           config: LearningConfig | None = None,
+                           profile_rejected: bool = False) -> VendorProfile:
     """Aus dem Unterschied zweier Angebote Erkennungsregeln ableiten.
 
     ``original``  wie die Erkennung es geliefert hat
     ``corrected`` wie der Anwender es korrigiert hat
     ``document``  das zugehoerige Rohdokument (liefert die Zellbezuege)
     ``profile``   bestehendes Profil; ohne Angabe wird eines angelegt
+    ``profile_rejected``  das Profil hatte gegriffen, der Anwender hat es aber
+                  verworfen -- dann wird ein Ausschlussmerkmal *vorgeschlagen*
     """
     config = config or LearningConfig()
     profile = profile or new_profile(corrected, document)
@@ -143,6 +152,9 @@ def learn_from_corrections(original: Offer, corrected: Offer, document: RawDocum
     changed |= _learn_header_rules(original, corrected, document, profile, config, report)
     changed |= _learn_skips(original, corrected, profile, config, report)
     changed |= _learn_decimal_style(original, corrected, document, profile, config, report)
+    changed |= _learn_date_order(original, corrected, profile, config, report)
+    if profile_rejected:
+        changed |= _learn_exclude_keyword(document, profile, config, report)
     _learn_defaults(corrected, profile, report)
 
     if changed:
@@ -177,6 +189,14 @@ def forget_rule(profile: VendorProfile, key: str) -> bool:
     elif kind == "decimal":
         profile.decimal_style = "auto"
         removed = True
+    elif kind == "date_order":
+        if profile.date_order != "auto":
+            profile.date_order = "auto"
+        removed = True
+    elif kind == "exclude_keyword":
+        if payload in profile.exclude_keywords:
+            profile.exclude_keywords.remove(payload)
+            removed = True
     if removed:
         profile.touch()
         logger.info("Gelernte Regel entfernt: %s", key)
@@ -198,6 +218,12 @@ def describe_learning(profile: VendorProfile) -> list[str]:
         lines.append(f"Zeilen mit {pattern!r} werden uebersprungen")
     if profile.decimal_style != "auto":
         lines.append(f"Zahlenformat: {profile.decimal_style}")
+    if profile.date_order != "auto":
+        lines.append("Datumsreihenfolge: "
+                     + ("Tag vor Monat" if profile.date_order == "day_first"
+                        else "Monat vor Tag"))
+    for keyword in profile.exclude_keywords:
+        lines.append(f"Dokumente mit '{keyword}' gehoeren NICHT zu diesem Profil")
     if profile.default_uom:
         lines.append(f"Standard-Mengeneinheit: {profile.default_uom}")
     if profile.default_price_unit:
@@ -431,6 +457,103 @@ def _learn_decimal_style(original: Offer, corrected: Offer, document: RawDocumen
         logger.info("Gelernt: Zahlenformat '%s' (Profil %s)", winner, profile.label)
         return True
     return False
+
+
+def _is_swapped_date(old_value: Any, new_value: Any) -> bool:
+    """Wurden bei einer Datumskorrektur genau Tag und Monat vertauscht?"""
+    if not isinstance(old_value, date) or not isinstance(new_value, date):
+        return False
+    return (old_value.year == new_value.year
+            and old_value.day == new_value.month
+            and old_value.month == new_value.day
+            and old_value.day != old_value.month)
+
+
+def _learn_date_order(original: Offer, corrected: Offer, profile: VendorProfile,
+                      config: LearningConfig, report: LearningReport) -> bool:
+    """Datumsreihenfolge lernen, wenn der Anwender Tag und Monat tauscht.
+
+    Aus 03.04.2026 wird 04.03.2026 -- das ist kein Tippfehler, sondern der
+    eindeutige Beleg, dass dieser Lieferant die andere Reihenfolge schreibt.
+    Gelernt wird wieder nur die *Lesart*, nie das Datum selbst.
+    """
+    swaps = 0
+    for field_name in ("offer_date", "valid_from", "valid_to"):
+        if _is_swapped_date(getattr(original, field_name, None),
+                            getattr(corrected, field_name, None)):
+            swaps += 1
+    for source, target in _position_pairs(original, corrected):
+        if _is_swapped_date(source.valid_from, target.valid_from):
+            swaps += 1
+    if not swaps:
+        return False
+
+    order = "day_first" if profile.date_order == "month_first" else "month_first"
+    if profile.date_order == order:
+        return False
+    key = f"date_order:{order}"
+    if not _confirm(profile, key, config.date_order_confirmations, report):
+        return False
+    profile.date_order = order
+    report.observations.append(
+        f"Bei diesem Lieferanten wird das Datum ab sofort als "
+        f"'{'Tag vor Monat' if order == 'day_first' else 'Monat vor Tag'}' gelesen "
+        f"({swaps} vertauschte Angabe(n) korrigiert).")
+    logger.info("Gelernt: Datumsreihenfolge '%s' (Profil %s)", order, profile.label)
+    return True
+
+
+def suggest_exclude_keyword(document: RawDocument, profile: VendorProfile) -> str:
+    """Charakteristisches Merkmal eines Fehltreffers vorschlagen.
+
+    Gesucht wird eine Zeile, die dieses Dokument von den Angeboten des
+    Lieferanten unterscheidet -- ohne Zahlen (die aendern sich mit jedem
+    Angebot) und ohne den Namen des Lieferanten selbst.
+    """
+    vendor = normalize_whitespace(profile.vendor_name).lower()
+    for line in (document.all_text() or "").splitlines():
+        text = normalize_whitespace(line)
+        if not (6 <= len(text) <= 60):
+            continue
+        lowered = text.lower()
+        if vendor and vendor in lowered:
+            continue
+        if sum(c.isdigit() for c in text) > len(text) / 4:
+            continue
+        if not re.search(r"[A-Za-zÄÖÜäöüß]{4}", text):
+            continue
+        if lowered in profile.exclude_keywords:
+            continue
+        return lowered
+    return ""
+
+
+def _learn_exclude_keyword(document: RawDocument, profile: VendorProfile,
+                           config: LearningConfig, report: LearningReport) -> bool:
+    """Fehltreffer eines Profils -> Ausschlussmerkmal vorschlagen.
+
+    Bewusst nur ein *Vorschlag*: ein Ausschlussmerkmal verwirft das ganze
+    Profil, das darf nicht an einer einzelnen Beobachtung haengen.  Scharf
+    geschaltet wird es -- wie jede andere Regel -- erst nach der noetigen
+    Anzahl Bestaetigungen.
+    """
+    keyword = suggest_exclude_keyword(document, profile)
+    if not keyword:
+        report.observations.append(
+            "Fuer den Fehltreffer liess sich kein unterscheidendes Merkmal "
+            "finden -- es wird nichts vorgeschlagen.")
+        return False
+    key = f"exclude_keyword:{keyword}"
+    if not _confirm(profile, key, config.exclude_keyword_confirmations, report):
+        report.observations.append(
+            f"Vorgeschlagenes Ausschlussmerkmal '{keyword}' wurde vorgemerkt "
+            "(noch nicht wirksam).")
+        return False
+    profile.add_exclude_keyword(keyword)
+    report.observations.append(
+        f"Dokumente mit '{keyword}' werden diesem Profil ab sofort nicht mehr "
+        "zugeordnet.")
+    return True
 
 
 def _learn_defaults(corrected: Offer, profile: VendorProfile,

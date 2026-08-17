@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from .email_merge import (
     MAIL_SOURCE_MARK,
+    UNMATCHED_ISSUE_CODE,
     apply_email_header,
     apply_email_supplements,
+    is_statement,
     mail_segments,
+    report_unmatched,
 )
 from .freetext_extractor import FreetextExtractor, FreetextResult
 from .header_rules import (
@@ -31,7 +34,7 @@ from .material_roles import (
     resolve_position_roles,
 )
 from .learning import LearningConfig, LearningReport, describe_learning, forget_rule, \
-    learn_from_corrections
+    learn_from_corrections, suggest_exclude_keyword
 from .profiles import (
     InMemoryProfileStore,
     JsonProfileStore,
@@ -47,16 +50,21 @@ from .table_extractor import (
     ExtractionResult,
     TableAnalysis,
     TableExtractor,
+    detect_day_first,
     find_price_tiers,
     is_summary_row,
+    parse_date_ordered,
     parse_number,
 )
 
 __all__ = [
     "MAIL_SOURCE_MARK",
+    "UNMATCHED_ISSUE_CODE",
     "apply_email_header",
     "apply_email_supplements",
+    "is_statement",
     "mail_segments",
+    "report_unmatched",
     "CUSTOMER_MARKERS",
     "SUPPLIER_MARKERS",
     "compile_own_pattern",
@@ -86,6 +94,8 @@ __all__ = [
     "apply_header_matches",
     "apply_profile",
     "describe_learning",
+    "detect_day_first",
+    "parse_date_ordered",
     "extract_header_fields",
     "find_incoterm",
     "find_price_tiers",
@@ -96,4 +106,5 @@ __all__ = [
     "match_profile",
     "new_profile",
     "parse_number",
+    "suggest_exclude_keyword",
 ]

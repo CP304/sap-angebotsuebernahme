@@ -344,7 +344,20 @@ class ErgaenzungenTests(unittest.TestCase):
 
     def test_43_jede_uebernahme_erzeugt_genau_eine_notiz(self) -> None:
         notizen = self._anwenden(MAIL_TEXT)
-        self.assertEqual(len(notizen), 4, notizen)
+        uebernahmen = [n for n in notizen if "konnte keiner Position" not in n]
+        self.assertEqual(len(uebernahmen), 4, notizen)
+
+    def test_44_kopfsatz_ohne_positionsbezug_wird_als_hinweis_gemeldet(self) -> None:
+        """Der Satz zu Gueltigkeit/Zahlungsziel betrifft keine Position.
+
+        Im vollstaendigen Ablauf wird er als *Kopfangabe* ausgewertet; hier
+        steht die Erkennung fuer sich, und dann zaehlt nur eines: der Satz darf
+        nicht stillschweigend verschwinden, solange ihn niemand aufgegriffen hat.
+        """
+        notizen = self._anwenden(MAIL_TEXT)
+        hinweise = [n for n in notizen if "konnte keiner Position" in n]
+        self.assertEqual(len(hinweise), 1, notizen)
+        self.assertIn("01.09.2026", hinweise[0])
 
 
 # ==========================================================================

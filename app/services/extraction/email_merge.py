@@ -41,7 +41,8 @@ import re
 from decimal import Decimal
 
 from ...config.settings import Settings
-from ...models.enums import FieldOrigin, SourceKind
+from ...models.enums import FieldOrigin, IssueSeverity, SourceKind
+from ...models.issue import Issue
 from ...models.offer import Offer
 from ...models.offer_position import OfferPosition
 from ...utils.parsing import (
@@ -60,9 +61,12 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "MAIL_SOURCE_MARK",
+    "UNMATCHED_ISSUE_CODE",
     "apply_email_header",
     "apply_email_supplements",
+    "is_statement",
     "mail_segments",
+    "report_unmatched",
 ]
 
 #: Kennzeichen im ``source_hint``: diese Position stammt aus zwei Quellen
@@ -138,6 +142,42 @@ _VALID_FROM = re.compile(
 
 #: "Position 30", "Pos. 30", "Pos 30"
 _POSITION_REF = re.compile(r"\bPos(?:ition)?\.?\s*(\d{1,4})\b", re.I)
+
+#: Befund-Schluessel fuer eine Aussage, die niemand aufgegriffen hat
+UNMATCHED_ISSUE_CODE = "email_statement_unmatched"
+
+#: So lang darf ein Satz im Hinweis werden
+_STATEMENT_LIMIT = 160
+
+#: Datum in einem Satz
+_DATE_TOKEN = re.compile(r"\b(\d{1,2}[.\-/]\s?\d{1,2}[.\-/]\s?\d{2,4}|\d{4}-\d{1,2}-\d{1,2})\b")
+
+#: Menge mit Einheit ("500 Stueck", "20 kg") -- eine nackte Zahl genuegt nicht
+_QUANTITY_TOKEN = re.compile(
+    r"\b\d{1,3}(?:[.\s]\d{3})*(?:[.,]\d+)?\s*"
+    r"(?:St(?:ue|ü)ck|Stk\.?|St\.?|PCS|Pcs|Stueck|Meter|kg|Kg|KG|Liter|Paar|Sets?)\b")
+
+#: Artikel-/Materialnummer: lange Ziffernfolge oder gegliederte Nummer
+_NUMBER_TOKEN = re.compile(
+    r"(?<![\w\-/.])(?:\d{5,}|[A-Za-z0-9]{2,}(?:[-/.][A-Za-z0-9]{2,})+)(?![\w\-/.])")
+
+#: Hoeflichkeit, Signatur, Rechtstext -- das sind keine Aussagen zum Angebot.
+#: Sie duerfen nicht als "uebergangen" gemeldet werden, sonst geht der echte
+#: Hinweis in Rauschen unter.
+_COURTESY = re.compile(
+    r"(sehr\s+geehrte|guten\s+(?:tag|morgen|abend)|hallo\b|liebe[rn]?\s|"
+    r"mit\s+freundlichen\s+gr|freundliche\s+gr(?:ue|ü)|beste[nr]?\s+gr(?:ue|ü)|"
+    r"viele\s+gr(?:ue|ü)|herzliche\s+gr(?:ue|ü)|vielen\s+dank|"
+    r"besten\s+dank|wir\s+danken|gerne\s+zur\s+verf(?:ue|ü)gung|"
+    r"bei\s+(?:r(?:ue|ü)ckfragen|fragen)|zoegern\s+sie\s+nicht|"
+    r"diese\s+e-?mail|vertraulich|confidential|disclaimer|"
+    r"handelsregister|amtsgericht|registergericht|ust-?id|umsatzsteuer-?id|"
+    r"steuernummer|gesch(?:ae|ä)ftsf(?:ue|ü)hr|sitz\s+der\s+gesellschaft|"
+    r"gerichtsstand|es\s+gelten\s+unsere|allgemeine[nr]?\s+gesch(?:ae|ä)fts|"
+    r"\bagb\b|datenschutz|irrt(?:ue|ü)mer\s+vorbehalten|"
+    r"^\s*(?:tel\.?|telefon|fax|mobil|e-?mail|www\.|http)|"
+    r"@[\w.\-]+\.[a-z]{2,}|www\.[\w.\-]+)",
+    re.I)
 
 
 # --------------------------------------------------------------------------
@@ -221,8 +261,10 @@ def apply_email_supplements(offer: Offer, body_text: str, settings: Settings,
         return notes
     extraction = settings.extraction
     own_re = compile_own_pattern(extraction.own_material_pattern)
+    unmatched: list[str] = []
 
     for segment in mail_segments(body_text):
+        before = len(notes)
         targets = _referenced_positions(offer, segment)
 
         # 1. Streichung -- die Position bleibt sichtbar, wird aber abgewaehlt
@@ -235,56 +277,150 @@ def apply_email_supplements(offer: Offer, body_text: str, settings: Settings,
             notes.extend(_add_position(offer, match, segment, source, own_re,
                                        settings))
 
-        if not targets:
-            continue
+        if targets:
+            # 3. Mindestmenge
+            min_match = _MIN_QTY.search(segment)
+            if min_match:
+                quantity = parse_decimal(min_match.group(1))
+                if quantity is not None and quantity > 0:
+                    for position in targets:
+                        notes.extend(_set_value(
+                            position, "min_order_qty", quantity, segment, source,
+                            settings, label="Mindestmenge"))
+                        unit = min_match.group(2)
+                        if unit and not position.uom:
+                            position.set_field("uom", normalize_uom(unit),
+                                               FieldOrigin.EXTRACTED)
 
-        # 3. Mindestmenge
-        min_match = _MIN_QTY.search(segment)
-        if min_match:
-            quantity = parse_decimal(min_match.group(1))
-            if quantity is not None and quantity > 0:
+            # 4. Lieferzeit
+            lead_match = _LEAD_TIME.search(segment)
+            if lead_match:
+                days = int(lead_match.group(1))
                 for position in targets:
-                    notes.extend(_set_value(
-                        position, "min_order_qty", quantity, segment, source,
-                        settings, label="Mindestmenge"))
-                    unit = min_match.group(2)
-                    if unit and not position.uom:
-                        position.set_field("uom", normalize_uom(unit),
-                                           FieldOrigin.EXTRACTED)
+                    notes.extend(_set_value(position, "lead_time_days", days, segment,
+                                            source, settings,
+                                            label="Lieferzeit (Tage)"))
 
-        # 4. Lieferzeit
-        lead_match = _LEAD_TIME.search(segment)
-        if lead_match:
-            days = int(lead_match.group(1))
-            for position in targets:
-                notes.extend(_set_value(position, "lead_time_days", days, segment,
-                                        source, settings, label="Lieferzeit (Tage)"))
+            # 5. Preis -- nur, wenn der Text den Wert des Anhangs ausdruecklich
+            #    ausser Kraft setzt.  Ein blosser Preis im Fliesstext genuegt nicht.
+            if _OVERRIDE.search(segment):
+                price, currency = _find_price(segment)
+                if price is not None:
+                    for position in targets:
+                        notes.extend(_set_value(position, "price", price, segment,
+                                                source, settings, label="Preis"))
+                        if currency and not position.currency:
+                            position.set_field("currency", currency,
+                                               FieldOrigin.EXTRACTED)
 
-        # 5. Preis -- nur, wenn der Text den Wert des Anhangs ausdruecklich
-        #    ausser Kraft setzt.  Ein blosser Preis im Fliesstext genuegt nicht.
-        if _OVERRIDE.search(segment):
-            price, currency = _find_price(segment)
-            if price is not None:
-                for position in targets:
-                    notes.extend(_set_value(position, "price", price, segment,
-                                            source, settings, label="Preis"))
-                    if currency and not position.currency:
-                        position.set_field("currency", currency,
-                                           FieldOrigin.EXTRACTED)
+            # 6. Gueltig ab -- nur mit ausdruecklichem Artikelbezug
+            date_match = _VALID_FROM.search(segment)
+            if date_match:
+                valid_from = parse_date(date_match.group(1))
+                if valid_from is not None:
+                    for position in targets:
+                        notes.extend(_set_value(position, "valid_from", valid_from,
+                                                segment, source, settings,
+                                                label="Gueltig ab"))
 
-        # 6. Gueltig ab -- nur mit ausdruecklichem Artikelbezug
-        date_match = _VALID_FROM.search(segment)
-        if date_match:
-            valid_from = parse_date(date_match.group(1))
-            if valid_from is not None:
-                for position in targets:
-                    notes.extend(_set_value(position, "valid_from", valid_from,
-                                            segment, source, settings,
-                                            label="Gueltig ab"))
+        # 7. Nichts uebernommen?  Dann muss der Satz sichtbar bleiben --
+        #    es sei denn, seine Angaben stehen bereits im Angebot (die
+        #    Kopfdaten der Mail werden vorher gesondert ausgewertet).
+        if len(notes) == before and is_statement(segment) \
+                and not _covered_by_offer(offer, segment):
+            unmatched.append(segment)
 
     if notes:
         logger.info("%d Ergaenzung(en) aus dem Mailtext uebernommen", len(notes))
+    notes.extend(report_unmatched(offer, unmatched, settings, source))
     return notes
+
+
+# --------------------------------------------------------------------------
+# Uebergangene Aussagen
+# --------------------------------------------------------------------------
+
+def is_statement(segment: str) -> bool:
+    """Enthaelt dieser Satz eine Aussage zum Angebot?
+
+    Als Aussage zaehlt ein Satz mit Materialnummer, Preis, Menge oder Datum.
+    Hoeflichkeitsfloskeln, Signatur und Rechtstexte zaehlen ausdruecklich
+    nicht -- sonst ertraenke der Hinweis den echten Befund in Rauschen.
+    """
+    text = normalize_whitespace(segment)
+    if len(text) < 12:
+        return False
+    if _COURTESY.search(text):
+        return False
+    if _NUMBER_TOKEN.search(text) or _DATE_TOKEN.search(text) \
+            or _QUANTITY_TOKEN.search(text):
+        return True
+    price, _currency = _find_price(text)
+    return price is not None
+
+
+def _covered_by_offer(offer: Offer, segment: str) -> bool:
+    """Stehen alle Angaben dieses Satzes bereits im Angebot?
+
+    Der Klassiker: "Die Preise gelten ab 01.09.2026, Zahlungsziel 30 Tage
+    netto."  Das ist eine Kopfangabe und wurde als solche laengst uebernommen
+    -- eine Warnung waere hier nur Laerm.  Gemeldet wird deshalb nur, was
+    *nirgends* gelandet ist.
+    """
+    text = normalize_whitespace(segment)
+    known_dates = {value for value in (offer.offer_date, offer.valid_from,
+                                       offer.valid_to) if value}
+    known_dates |= {p.valid_from for p in offer.positions if p.valid_from}
+
+    signals = 0
+    covered = 0
+    for token in _DATE_TOKEN.findall(text):
+        signals += 1
+        if parse_date(token) in known_dates:
+            covered += 1
+
+    rest = _DATE_TOKEN.sub(" ", text)
+    signals += len(_NUMBER_TOKEN.findall(rest)) + len(_QUANTITY_TOKEN.findall(rest))
+    price, _currency = _find_price(rest)
+    if price is not None:
+        signals += 1
+        if any(p.price == price for p in offer.positions):
+            covered += 1
+    return signals > 0 and signals == covered
+
+
+def report_unmatched(offer: Offer, statements: list[str], settings: Settings,
+                     source: str = "Mailtext") -> list[str]:
+    """Uebergangene Aussagen als Warnung und Klartextnotiz ausweisen.
+
+    Das ist die gefaehrlichste Stelle des ganzen Verfahrens: eine Zusage des
+    Lieferanten, die niemand bemerkt, weil sie sich keiner Position zuordnen
+    liess.  Deshalb wird sie **nie** stillschweigend verworfen.
+    """
+    if not statements or not getattr(
+            settings.extraction, "warn_on_unmatched_email_statements", True):
+        return []
+
+    shortened = [_shorten(s) for s in statements]
+    notes = [f"Aussage aus dem {source} konnte keiner Position zugeordnet werden: "
+             f"\"{text}\" -- bitte selbst pruefen." for text in shortened]
+    offer.issues.add(Issue(
+        UNMATCHED_ISSUE_CODE,
+        f"{len(shortened)} Aussage(n) aus dem {source} wurden nicht uebernommen "
+        "-- bitte pruefen, ob dort etwas Wichtiges steht.",
+        IssueSeverity.WARNING,
+        detail="\n".join(shortened),
+        blocking=False,
+    ))
+    logger.info("%d Aussage(n) aus dem Mailtext blieben unzugeordnet", len(shortened))
+    return notes
+
+
+def _shorten(text: str) -> str:
+    value = normalize_whitespace(text)
+    if len(value) <= _STATEMENT_LIMIT:
+        return value
+    return value[:_STATEMENT_LIMIT - 3].rstrip() + "..."
 
 
 # --------------------------------------------------------------------------

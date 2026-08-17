@@ -59,6 +59,8 @@ __all__ = [
     "ColumnAssignment",
     "ExtractionResult",
     "parse_number",
+    "parse_date_ordered",
+    "detect_day_first",
     "find_price_tiers",
     "is_summary_row",
 ]
@@ -183,6 +185,9 @@ class TableAnalysis:
     data_start: int = 0
     notes: list[str] = field(default_factory=list)
     score: float = 0.0
+    #: Datumsreihenfolge je Spalte, aus dem Inhalt belegt
+    #: (``True`` = Tag zuerst, ``False`` = Monat zuerst)
+    date_day_first: dict[int, bool] = field(default_factory=dict)
 
     @property
     def mapped_fields(self) -> set[str]:
@@ -275,6 +280,57 @@ def find_price_tiers(text: str, style: str = "auto") -> list[tuple[Decimal, Deci
     return tiers
 
 
+#: Zweiteiliges Zahlendatum ("03.04.2026", "03/04/26", "03-04-2026")
+_NUMERIC_DATE = re.compile(r"^\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{2,4})\s*$")
+
+
+def detect_day_first(values: Iterable[str]) -> bool | None:
+    """Ist in dieser Spalte Tag oder Monat zuerst?  ``None`` = nicht belegbar.
+
+    Beweisfuehrung ohne jede Schaetzung: ein Wert > 12 an erster Stelle kann
+    kein Monat sein (dann ist Tag zuerst), ein Wert > 12 an zweiter Stelle kein
+    Tag... halt: ein Tag > 12 an zweiter Stelle heisst, dass dort der Tag steht
+    -- also Monat zuerst.  Widersprechen sich die Werte einer Spalte, wird
+    nichts entschieden.
+    """
+    day_first = month_first = False
+    for value in values:
+        match = _NUMERIC_DATE.match(normalize_whitespace(value))
+        if not match:
+            continue
+        first, second = int(match.group(1)), int(match.group(2))
+        if first > 12 and second <= 12:
+            day_first = True
+        elif second > 12 and first <= 12:
+            month_first = True
+    if day_first and not month_first:
+        return True
+    if month_first and not day_first:
+        return False
+    return None
+
+
+def parse_date_ordered(value: object, day_first: bool | None = None):
+    """Datum mit bekannter Reihenfolge lesen.
+
+    ``parse_date()`` wertet ``day_first`` nur bei Schraegstrich-Datumsangaben
+    aus (das ist bewusst so und wird hier nicht angetastet).  Fuer die Form
+    ``03.04.2026`` wird die Reihenfolge deshalb hier aufgeloest: bei
+    "Monat zuerst" werden die beiden Zahlen getauscht -- aber nur, wenn das
+    ueberhaupt moeglich ist (bei "13.04." bleibt es beim Tag).
+    """
+    if day_first is None:
+        return parse_date(value)
+    if isinstance(value, str):
+        match = _NUMERIC_DATE.match(normalize_whitespace(value))
+        if match and "/" not in value:
+            first, second, year = match.group(1), match.group(2), match.group(3)
+            if not day_first and int(first) <= 12 and int(second) <= 31:
+                return parse_date(f"{second}.{first}.{year}")
+            return parse_date(f"{first}.{second}.{year}")
+    return parse_date(value, day_first=day_first)
+
+
 def is_summary_row(cells: Iterable[str]) -> bool:
     """Erkennt Summen-, Steuer- und Frachtzeilen."""
     values = [normalize_whitespace(c) for c in cells]
@@ -336,6 +392,9 @@ class TableExtractor:
         self.own_material_re = compile_own_pattern(
             settings.extraction.own_material_pattern)
         self.decimal_style = (profile.decimal_style if profile else "auto") or "auto"
+        #: Gelernte Datumsreihenfolge des Lieferanten ("auto"/"day_first"/"month_first")
+        self.date_order = (getattr(profile, "date_order", "auto") if profile
+                           else "auto") or "auto"
         self._skip_patterns: list[re.Pattern[str]] = []
         if profile:
             for pattern in profile.skip_patterns:
@@ -415,7 +474,46 @@ class TableExtractor:
 
         self._assign_columns(analysis)
         self._resolve_material_columns(analysis)
+        self._resolve_date_order(analysis)
         return analysis
+
+    # ------------------------------------------------------------------
+    # Datumsreihenfolge
+    # ------------------------------------------------------------------
+    def _resolve_date_order(self, analysis: TableAnalysis) -> None:
+        """Reihenfolge von Tag und Monat je Datumsspalte belegen.
+
+        Steht in einer Datumsspalte auch nur *ein* Wert mit einer Zahl > 12 an
+        erster Stelle, ist die Reihenfolge bewiesen -- ein Monat 13 gibt es
+        nicht.  Diese Erkenntnis gilt dann fuer die ganze Spalte, auch ohne
+        Lieferantenprofil.  Es wird nichts geraten: ohne Beweis bleibt es beim
+        gelernten bzw. beim Standardverhalten.
+        """
+        rows = [r for r in analysis.block.rows[analysis.data_start:]
+                if not is_summary_row(r)]
+        for index, assignment in analysis.columns.items():
+            if FIELD_KIND.get(assignment.field) != "date":
+                continue
+            values = [normalize_whitespace(r[index]) for r in rows if index < len(r)]
+            decided = detect_day_first(values)
+            if decided is None:
+                continue
+            analysis.date_day_first[index] = decided
+            analysis.notes.append(
+                f"Spalte {index + 1} ('{assignment.header or 'ohne Ueberschrift'}'): "
+                f"die Datumsangaben sind eindeutig "
+                f"{'Tag vor Monat' if decided else 'Monat vor Tag'} "
+                "-- ein Wert der Spalte laesst nur diese Deutung zu.")
+
+    def _day_first_for(self, analysis: TableAnalysis, index: int) -> bool | None:
+        """Belegter Spaltenwert vor gelerntem Profilwert vor "nicht bekannt"."""
+        if index in analysis.date_day_first:
+            return analysis.date_day_first[index]
+        if self.date_order == "day_first":
+            return True
+        if self.date_order == "month_first":
+            return False
+        return None
 
     # ------------------------------------------------------------------
     # Artikelnummern: welche Spalte ist UNSERE Materialnummer?
@@ -853,7 +951,8 @@ class TableExtractor:
                 values.setdefault("remarks_extra", []).append(
                     f"{assignment.header or 'weitere Preisspalte'}: {raw}")
                 continue
-            parsed = self._parse_cell(field_name, raw)
+            parsed = self._parse_cell(field_name, raw,
+                                      self._day_first_for(analysis, index))
             if parsed in (None, "") and FIELD_KIND.get(field_name) == "decimal":
                 # "100 Stk" / "12,85 EUR/St": Zahl und Einheit stehen in einer Zelle
                 parsed, unit = self._split_number_unit(raw)
@@ -891,7 +990,8 @@ class TableExtractor:
             return number, ""       # Waehrung ist keine Mengeneinheit
         return number, unit
 
-    def _parse_cell(self, field_name: str, raw: str) -> Any:
+    def _parse_cell(self, field_name: str, raw: str,
+                    day_first: bool | None = None) -> Any:
         kind = FIELD_KIND.get(field_name, "text")
         if kind == "decimal":
             return parse_number(raw, self.decimal_style)
@@ -899,7 +999,7 @@ class TableExtractor:
             value = parse_int(raw)
             return value if value is not None and value >= 0 else None
         if kind == "date":
-            return parse_date(raw)
+            return parse_date_ordered(raw, day_first)
         if kind == "currency":
             return detect_currency(raw)
         if kind == "uom":

@@ -318,6 +318,30 @@ class ExtractionSettings:
     #: Widersprechen sich Mailtext und Anhang beim Preis, wird der Wert
     #: als unsicher markiert statt einer der beiden Quellen zu glauben
     conflict_marks_uncertain: bool = True
+    #: Saetze des Mailtexts, die eine Materialnummer, einen Preis, eine Menge
+    #: oder ein Datum nennen, aber zu KEINER Uebernahme gefuehrt haben, als
+    #: Warnung ausweisen.
+    #:
+    #: Das ist die gefaehrlichste Stelle des ganzen Verfahrens: eine Aussage
+    #: des Lieferanten, die niemand bemerkt, weil sie stillschweigend unter den
+    #: Tisch fiel.  Lieber ein Hinweis zu viel als eine uebergangene Zusage.
+    warn_on_unmatched_email_statements: bool = True
+
+    # -- PDF-Layout ------------------------------------------------------
+    #: Gezeichnete Tabellenlinien (Vektorgrafik) als Spaltengrenzen verwenden.
+    #: Sind Linien vorhanden, sind sie die verlaesslichste Grenze ueberhaupt --
+    #: fehlen sie, wird auf das Koordinaten-Clustering zurueckgefallen.
+    pdf_use_lattice: bool = True
+    #: So viele brauchbare senkrechte Linien muss eine Seite mindestens haben,
+    #: damit das Linienverfahren greift
+    pdf_min_vertical_lines: int = 3
+    #: Anteil der Zeilenhoehe, bis zu dem Woerter noch als eine Zeile gelten.
+    #: Ein Lieferant mit sehr engem oder sehr weitem Zeilenabstand kann das im
+    #: Profil ueberschreiben (``table_hints["y_tolerance_factor"]``).
+    pdf_y_tolerance_factor: float = 0.6
+    #: Rasterbreite (PDF-Punkte) fuer die Haeufigkeitsanalyse der Spaltenstarts.
+    #: Profil-Ueberschreibung: ``table_hints["x_bin"]``.
+    pdf_x_bin: float = 4.0
 
 
 @dataclass

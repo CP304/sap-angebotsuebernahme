@@ -33,7 +33,11 @@ class TableBlock:
 
     ``origin`` dokumentiert, wie der Block entstanden ist:
 
-    ``"pdf-layout"``  aus Wortkoordinaten rekonstruiert
+    ``"pdf-lattice"`` ueber gezeichnete Tabellenlinien geschnitten (die
+                      verlaesslichste Variante -- die Grenzen stehen im
+                      Dokument und sind nicht geschaetzt)
+    ``"pdf-layout"``  aus Wortkoordinaten rekonstruiert (kein Liniengitter
+                      vorhanden)
     ``"pdf-table"``   von PyMuPDF selbst erkannt
     ``"excel"``       Arbeitsblatt
     ``"html"``        HTML-Tabelle aus einer E-Mail

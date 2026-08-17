@@ -77,8 +77,22 @@ class VendorProfile:
     header_regexes: dict[str, str] = field(default_factory=dict)
     #: Regex-Muster fuer Zeilen, die keine Position sind
     skip_patterns: list[str] = field(default_factory=list)
-    #: Freie Hinweise zur Tabellenstruktur (z. B. {"header_row": 3})
+    #: Freie Hinweise zur Tabellenstruktur (z. B. {"header_row": 3}).
+    #:
+    #: Ausgewertet werden u. a. die Layout-Toleranzen des PDF-Lesers:
+    #: ``y_tolerance_factor`` (Zeilenabstand) und ``x_bin`` (Spaltenraster).
+    #: Damit laesst sich ein Lieferant mit sehr engem oder sehr weitem
+    #: Zeilenabstand einzeln einstellen, ohne die Standardwerte zu verbiegen.
     table_hints: dict = field(default_factory=dict)
+    #: Merkmale, die ein Fehltreffer dieses Profils sind.  Kommt eines davon im
+    #: Dokument vor, wird das Profil verworfen -- egal wie hoch der Score ist.
+    #: Hintergrund: zu generische Merkmale (eine Sammeldomaene, eine
+    #: Allerweltsueberschrift) lassen ein Profil sonst falsch greifen.
+    exclude_keywords: list[str] = field(default_factory=list)
+    #: Datumsreihenfolge dieses Lieferanten:
+    #: ``"auto"`` (Standard), ``"day_first"`` (03.04. = 3. April),
+    #: ``"month_first"`` (03/04 = 4. Maerz)
+    date_order: str = "auto"
     decimal_style: str = "auto"          # "de" | "en" | "auto"
     default_uom: str = ""
     default_price_unit: int = 0
@@ -113,6 +127,39 @@ class VendorProfile:
             del self.match_fingerprints[:-limit]
             self.touch()
 
+    def add_exclude_keyword(self, keyword: str, limit: int = 20) -> None:
+        """Ausschlussmerkmal aufnehmen (ohne Dubletten, klein geschrieben)."""
+        value = normalize_whitespace(keyword).lower()
+        if value and value not in self.exclude_keywords:
+            self.exclude_keywords.append(value)
+            del self.exclude_keywords[:-limit]
+            self.touch()
+            logger.info("Profil %s: Ausschlussmerkmal '%s' aufgenommen",
+                        self.profile_id, value)
+
+    @property
+    def day_first(self) -> bool | None:
+        """Datumsreihenfolge als Flag fuer :func:`parse_date`.
+
+        ``None`` heisst "nicht gelernt" -- dann entscheidet der Aufrufer bzw.
+        der Wert selbst (Tag > 12 ist eindeutig).
+        """
+        if self.date_order == "day_first":
+            return True
+        if self.date_order == "month_first":
+            return False
+        return None
+
+    def excluded_by(self, text: str) -> str:
+        """Welches Ausschlussmerkmal kommt in diesem Text vor? ``""`` = keines."""
+        if not self.exclude_keywords or not text:
+            return ""
+        haystack = text.lower()
+        for keyword in self.exclude_keywords:
+            if keyword and keyword in haystack:
+                return keyword
+        return ""
+
     def add_domain(self, domain: str) -> None:
         domain = (domain or "").lower().strip()
         if domain and domain not in self.email_domains:
@@ -127,6 +174,8 @@ class VendorProfile:
         self.skip_patterns.clear()
         self.pending_rules.clear()
         self.rule_counters.clear()
+        self.exclude_keywords.clear()
+        self.date_order = "auto"
         self.decimal_style = "auto"
         self.touch()
         logger.info("Profil %s zurueckgesetzt", self.profile_id)
@@ -342,15 +391,31 @@ def match_profile(profiles: Iterable[VendorProfile], document: RawDocument,
       * 0.45 Lieferantenschluessel (Nummer bzw. Name)
       * 0.30 exakter Layout-Fingerabdruck
       * 0.25 Uebereinstimmung der Spaltenueberschriften
+
+    Ein Profil, dessen ``exclude_keywords`` im Dokument vorkommen, wird
+    **immer** verworfen -- unabhaengig vom Score.  Ein zu generisches Merkmal
+    (Sammeldomaene, Allerweltsueberschrift) laesst ein Profil sonst falsch
+    greifen, und das faellt dem Anwender erst bei den Preisen auf.
     """
     document_fingerprint = fingerprint(document)
     headers = set(document_headers(document))
     domain = document.email.sender_domain if document.email is not None else ""
     key = vendor_key_for(offer, document) if offer is not None else ""
+    document_text = document.all_text()
 
     best: VendorProfile | None = None
     best_score = 0.0
     for profile in profiles:
+        hit = profile.excluded_by(document_text)
+        if hit:
+            logger.info("Profil '%s' wird trotz moeglicher Uebereinstimmung nicht "
+                        "verwendet: Ausschlussmerkmal '%s' kommt in %s vor.",
+                        profile.label, hit, document.display_name)
+            if offer is not None:
+                offer.add_note(
+                    f"Lieferantenprofil '{profile.label}' wurde nicht verwendet, "
+                    f"weil das Ausschlussmerkmal '{hit}' im Dokument vorkommt.")
+            continue
         score = 0.0
         if domain and domain in profile.email_domains:
             # Die Absenderdomaene ist der belastbarste Hinweis, den es gibt --
@@ -429,9 +494,15 @@ def apply_profile(profile: VendorProfile, document: RawDocument,
             continue
         value: object = raw
         if name in ("offer_date", "valid_from", "valid_to"):
-            value = parse_date(raw)
+            # Gelernte Datumsreihenfolge dieses Lieferanten durchreichen --
+            # ohne Vorgabe bleibt es beim Standard (Tag zuerst).
+            day_first = profile.day_first
+            value = parse_date(raw, day_first=True if day_first is None else day_first)
             if value is None:
                 continue
+            if day_first is not None:
+                notes.append(f"Datum '{raw}' wurde nach der gelernten Reihenfolge "
+                             f"'{profile.date_order}' gelesen.")
         offer.set_field(name, value, FieldOrigin.MAPPED)
         notes.append(f"Kopffeld '{name}' ueber gelernte Profilregel erkannt: '{raw}'")
 
