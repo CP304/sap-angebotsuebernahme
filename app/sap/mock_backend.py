@@ -462,7 +462,14 @@ class MockSourceListService(_MockBase, SourceListServiceBase):
         rows = self.system.source_lists.setdefault(key, [])
         workflow = self.settings.workflow
 
-        existing = next((r for r in rows if r.get("vendor_number") == position.vendor_number), None)
+        # Auch hier gilt die ALPHA-Konvertierung: "0000100234" und "100234"
+        # sind derselbe Lieferant.  Wird das nicht beachtet, entsteht eine
+        # zweite Zeile, waehrend die alte (womoeglich gesperrte) stehen bleibt.
+        gesucht = normalize_vendor_number(position.vendor_number)
+        existing = next(
+            (r for r in rows
+             if normalize_vendor_number(r.get("vendor_number", "")) == gesucht),
+            None)
         old_value = ("gesperrt" if existing and existing.get("blocked")
                      else "aktiv" if existing else "kein Eintrag")
         new_value = "aktiv" + (f", Kontrakt {contract_number}" if contract_number else "")

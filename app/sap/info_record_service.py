@@ -131,8 +131,15 @@ def verify_source_list_write(source_list, position: OfferPosition,
         return False, [f"Ruecklese-Pruefung nicht moeglich: {source_list.read_error}"]
 
     gesucht = (position.vendor_number or "").lstrip("0")
-    eintrag = next((e for e in getattr(source_list, "entries", [])
-                    if (e.vendor_number or "").lstrip("0") == gesucht), None)
+    treffer = [e for e in getattr(source_list, "entries", [])
+               if (e.vendor_number or "").lstrip("0") == gesucht]
+    # SAP erlaubt mehrere Zeilen je Lieferant (verschiedene Gueltigkeits-
+    # zeitraeume).  Bewertet wird die heute gueltige; gibt es keine, die
+    # erste.  Blind die erste zu nehmen waere falsch.
+    heute = date.today()
+    eintrag = next((e for e in treffer if e.valid_on(heute)), None)
+    if eintrag is None:
+        eintrag = next(iter(treffer), None)
     if eintrag is None:
         return False, [f"Ruecklese-Pruefung: Lieferant {position.vendor_number} steht "
                        f"nach dem Sichern nicht im Orderbuch -- bitte in "
