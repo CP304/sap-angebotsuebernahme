@@ -59,6 +59,7 @@ from .offer_table import POSITION_ROLE, OfferFilterProxy, OfferTableModel, Offer
 from .position_details import PositionDetails
 from .selector_view import SelectorView
 from .settings_view import SettingsView
+from .table_import_dialog import TableImportDialog
 from .style import Colors, badge_style, build_stylesheet
 from .workers import BatchWorker, ConnectWorker, ImportWorker, SapLoadWorker
 
@@ -148,6 +149,19 @@ class MainWindow(QMainWindow):
         self.action_paste.setToolTip("Angebotstext aus einer E-Mail einfuegen")
         self.action_paste.triggered.connect(self.paste_offer_text)
         bar.addAction(self.action_paste)
+
+        self.action_table = QAction("Tabelle einfuegen", self)
+        self.action_table.setToolTip(
+            "Tabelle aus Excel einfuegen oder laden und die Spalten selbst zuordnen "
+            "– der schnellste Weg, wenn die Erkennung nicht greift")
+        self.action_table.triggered.connect(self.import_table_manually)
+        bar.addAction(self.action_table)
+
+        self.action_teach = QAction("Erkennung anlernen ...", self)
+        self.action_teach.setToolTip(
+            "Im PDF grafisch markieren, wo Positionen und Spalten stehen")
+        self.action_teach.triggered.connect(self.teach_recognition)
+        bar.addAction(self.action_teach)
 
         bar.addSeparator()
 
@@ -446,11 +460,7 @@ class MainWindow(QMainWindow):
                     len(offer.positions))
 
         if not offer.positions:
-            show_error(self, "Keine Positionen erkannt",
-                       "In der Datei wurden keine Angebotspositionen gefunden.\n\n"
-                       "Sie koennen Positionen von Hand ergaenzen oder den Text ueber "
-                       "„Text einfuegen“ auswerten lassen.",
-                       "\n".join(offer.extraction_notes))
+            self._offer_fallback_workflow()
 
     def _apply_defaults(self, offer: Offer) -> None:
         """Werk, Einkaufsorganisation und Vorbelegungen setzen."""
@@ -524,6 +534,208 @@ class MainWindow(QMainWindow):
             number = getattr(resolution, "material_number", "")
             if number:
                 position.set_field("material_number", number, FieldOrigin.MAPPED)
+
+    # ==================================================================
+    # Auffang-Workflow: wenn die automatische Erkennung nicht greift
+    # ==================================================================
+    def _offer_fallback_workflow(self) -> None:
+        """Bei null erkannten Positionen aktiv einen Ausweg anbieten.
+
+        Eine blosse Fehlermeldung waere hier das Schlimmste: Der Anwender hat
+        ein Angebot vor sich, das er verarbeiten muss, und das Werkzeug sagt
+        nur „geht nicht“.  Stattdessen werden beide Auffangwege direkt
+        angeboten -- und beide lernen fuer das naechste Mal mit.
+        """
+        offer = self.offer
+        gruende = "\n".join(f"• {note}" for note in (offer.extraction_notes[:5]
+                                                     if offer else []))
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Keine Positionen erkannt")
+        box.setText("In diesem Angebot wurden keine Positionen gefunden.")
+        box.setInformativeText(
+            "Das kommt bei ungewoehnlichen Angebotsformaten vor. Sie haben zwei "
+            "schnelle Wege – beide merkt sich die Anwendung fuer kuenftige Angebote "
+            "dieses Lieferanten:\n\n"
+            "• Tabelle einfuegen: Bereich in Excel kopieren, hier einfuegen, Spalten "
+            "zuordnen\n"
+            "• Grafisch anlernen: im PDF markieren, wo Positionen und Spalten stehen")
+        if gruende:
+            box.setDetailedText(f"Was die Erkennung versucht hat:\n{gruende}")
+
+        table_button = box.addButton("Tabelle einfuegen",
+                                     QMessageBox.ButtonRole.AcceptRole)
+        teach_button = box.addButton("Grafisch anlernen",
+                                     QMessageBox.ButtonRole.AcceptRole)
+        manual_button = box.addButton("Von Hand erfassen",
+                                      QMessageBox.ButtonRole.ActionRole)
+        box.addButton("Spaeter", QMessageBox.ButtonRole.RejectRole)
+        teach_button.setEnabled(self._teachable_pdf() is not None)
+        if not teach_button.isEnabled():
+            teach_button.setToolTip("Grafisches Anlernen gibt es nur fuer PDF-Angebote.")
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is table_button:
+            self.import_table_manually()
+        elif clicked is teach_button:
+            self.teach_recognition()
+        elif clicked is manual_button:
+            self._add_position()
+
+    def _teachable_pdf(self) -> str | None:
+        """Pfad des PDFs, auf dem angelernt werden kann (falls vorhanden)."""
+        if self.offer is None:
+            return None
+        for path in self.offer.source_files:
+            if str(path).lower().endswith(".pdf") and Path(path).is_file():
+                return str(path)
+        return None
+
+    def import_table_manually(self) -> None:
+        """Tabelle einfuegen/laden und Spalten selbst zuordnen."""
+        vendor = self.offer.vendor_name if self.offer else ""
+        dialog = TableImportDialog(self.settings, vendor, self)
+        if dialog.exec() != TableImportDialog.DialogCode.Accepted:
+            return
+        ergebnis = dialog.result_data
+        if not ergebnis.positions:
+            return
+        self._add_positions(ergebnis.positions, ergebnis.source_name)
+        if ergebnis.remember and ergebnis.column_map:
+            self._remember_column_map(ergebnis.column_map)
+        self.counter_label.setText(
+            f"{len(ergebnis.positions)} Position(en) aus der Tabelle uebernommen")
+
+    def teach_recognition(self) -> None:
+        """Grafisches Anlernen auf dem PDF-Seitenbild."""
+        pfad = self._teachable_pdf()
+        if pfad is None:
+            show_error(
+                self, "Kein PDF geladen",
+                "Grafisches Anlernen funktioniert auf dem Seitenbild eines PDFs.\n\n"
+                "Fuer Excel- oder Textangebote nutzen Sie „Tabelle einfuegen“ – dort "
+                "ordnen Sie die Spalten direkt zu.")
+            return
+
+        from .teach_dialog import TeachDialog
+
+        vendor = self.offer.vendor_name if self.offer else ""
+        dialog = TeachDialog(pfad, vendor, self)
+        if dialog.exec() != TeachDialog.DialogCode.Accepted:
+            return
+        ergebnis = dialog.result_data
+        if not ergebnis.positions:
+            return
+        self._add_positions(ergebnis.positions, f"angelernt: {Path(pfad).name}")
+        if ergebnis.remember and ergebnis.column_map:
+            self._remember_column_map(ergebnis.column_map)
+        self.counter_label.setText(
+            f"{len(ergebnis.positions)} Position(en) angelernt "
+            f"({ergebnis.pages_applied} Seite(n))")
+
+    def _add_positions(self, positions: list[OfferPosition], quelle: str) -> None:
+        """Manuell gewonnene Positionen in das aktuelle Angebot uebernehmen."""
+        if self.offer is None:
+            self.offer = Offer()
+            self.offer.set_field("currency", self.settings.purchasing.currency,
+                                 FieldOrigin.DEFAULT)
+        self._snapshot("Positionen ergaenzt")
+
+        vorhanden = len(self.offer.positions)
+        self.offer.positions.extend(positions)
+        self.offer.add_note(f"{len(positions)} Position(en) manuell erfasst ({quelle})")
+
+        self._apply_defaults_to_new(positions)
+        self._resolve_materials(self.offer)
+        self.offer.renumber()
+        self._revalidate()
+
+        self.table_model.set_offer(self.offer)
+        self.table.apply_column_widths()
+        self._fill_header()
+        self._update_counters()
+        self._update_actions()
+        logger.info("%d Position(en) ergaenzt (%s), vorher %d",
+                    len(positions), quelle, vorhanden)
+
+    def _apply_defaults_to_new(self, positions: list[OfferPosition]) -> None:
+        """Vorbelegung nur fuer neu hinzugekommene Positionen."""
+        purchasing = self.settings.purchasing
+        workflow = self.settings.workflow
+        offer = self.offer
+        for position in positions:
+            position.purchasing_org = position.purchasing_org or purchasing.purchasing_org
+            position.plant = position.plant or purchasing.plant
+            position.vendor_number = position.vendor_number or (offer.vendor_number
+                                                                if offer else "")
+            if not position.currency:
+                position.set_field("currency", (offer.currency if offer else "")
+                                   or purchasing.currency, FieldOrigin.DEFAULT)
+            if position.price_unit is None:
+                position.set_field("price_unit", purchasing.price_unit, FieldOrigin.DEFAULT)
+            if not position.uom:
+                position.set_field("uom", purchasing.order_unit, FieldOrigin.DEFAULT)
+            if position.valid_from is None and offer is not None and offer.valid_from:
+                position.set_field("valid_from", offer.valid_from, FieldOrigin.EXTRACTED)
+            if position.delivery_date is None:
+                position.delivery_date = date.today() + timedelta(
+                    days=purchasing.default_delivery_days)
+            position.selected = True
+            position.do_info_record = workflow.chain_info_record
+            position.do_source_list = workflow.chain_source_list
+            position.do_contract = workflow.chain_contract
+            position.do_purchase_order = workflow.chain_purchase_order
+
+    def _remember_column_map(self, column_map: dict[str, str]) -> None:
+        """Manuelle Spaltenzuordnung als Lieferantenprofil sichern.
+
+        Das ist der eigentliche Gewinn des Auffang-Workflows: Aus einer
+        einmaligen Handarbeit wird dauerhaftes Wissen ueber diesen Lieferanten.
+        """
+        if self.offer is None or not column_map:
+            return
+        schluessel = self.offer.vendor_number or self.offer.vendor_name
+        if not schluessel:
+            logger.info("Zuordnung nicht gespeichert: Lieferant noch unbekannt.")
+            return
+        try:
+            merker = getattr(self.import_service, "remember_column_map", None)
+            if callable(merker):
+                merker(schluessel, self.offer.vendor_name, column_map)
+            else:
+                self._save_profile_directly(schluessel, column_map)
+        except Exception as exc:  # noqa: BLE001 - Lernen darf nie den Ablauf stoppen
+            logger.warning("Spaltenzuordnung konnte nicht gespeichert werden: %s", exc)
+            return
+        logger.info("Spaltenzuordnung fuer %s gespeichert: %s", schluessel, column_map)
+        self.mapping_view.reload()
+        self.counter_label.setText(
+            f"Zuordnung gespeichert – kuenftige Angebote von "
+            f"{self.offer.vendor_name or schluessel} werden so gelesen")
+
+    def _save_profile_directly(self, vendor_key: str, column_map: dict[str, str]) -> None:
+        """Ersatzweg, falls die Erkennung keine eigene Merkfunktion anbietet."""
+        from ..services.extraction.profiles import VendorProfile
+
+        store = getattr(self.import_service, "profile_store", None)
+        if store is None:
+            logger.info("Kein Profilspeicher verfuegbar – Zuordnung gilt nur diesmal.")
+            return
+
+        profil = None
+        for vorhanden in store.load_profiles():
+            if getattr(vorhanden, "vendor_key", "") == vendor_key:
+                profil = vorhanden
+                break
+        if profil is None:
+            profil = VendorProfile(vendor_key=vendor_key,
+                                   vendor_name=self.offer.vendor_name if self.offer else "")
+            if not getattr(profil, "profile_id", ""):
+                profil.profile_id = f"manuell-{vendor_key}"
+        profil.column_map.update(column_map)
+        profil.correction_count = getattr(profil, "correction_count", 0) + 1
+        store.save_profile(profil)
 
     # ==================================================================
     # SAP
@@ -1029,6 +1241,9 @@ class MainWindow(QMainWindow):
         self.action_open.setEnabled(not running)
         self.action_paste.setEnabled(not running)
         self.action_cancel.setEnabled(running)
+        # Auffangwege: Tabelle geht immer, Anlernen nur auf einem PDF
+        self.action_table.setEnabled(not running)
+        self.action_teach.setEnabled(not running and self._teachable_pdf() is not None)
 
     def _update_mode_badges(self) -> None:
         if self.settings.use_mock_sap:

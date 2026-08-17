@@ -210,6 +210,52 @@ Lieferantenartikelnummer/Text → eigene Materialnummer werden lokal gepflegt un
 beim naechsten Angebot automatisch angewandt. Unterhalb des Schwellwerts wird
 **nicht** automatisch zugeordnet, sondern nur vorgeschlagen.
 
+### Wenn die Erkennung nicht greift
+
+Kein Werkzeug erkennt jedes Format. Entscheidend ist, dass der Anwender dann
+nicht in einer Sackgasse steht. Werden keine Positionen gefunden, bietet die
+Anwendung von sich aus drei Wege an — **alle drei lernen fuer das naechste Mal
+mit**:
+
+**1. Tabelle einfuegen** (schnellster Weg, funktioniert immer)
+Bereich in Excel markieren → Strg+C → im Dialog Strg+V. Die Tabelle erscheint
+als Raster, ueber jeder Spalte ein Auswahlfeld: *Material*, *Preis*, *Menge* …
+Ein Vorschlag ist bereits gesetzt, der Anwender korrigiert nur. Alternativ
+laesst sich eine Datei direkt laden. Trennzeichen (Tabulator, Semikolon,
+mehrere Leerzeichen) werden automatisch erkannt.
+
+**2. Grafisch anlernen** (fuer PDFs mit ungewoehnlichem Layout)
+Das Angebot wird als Seitenbild angezeigt. Zwei Fragen werden nacheinander
+geklaert:
+
+```
+Schritt 1: Was ist eine Position?
+    Rechteck um EINE vollstaendige Positionszeile ziehen.
+    -> Startpunkt der Liste, Zeilenhoehe, Ankerspalte
+
+Schritt 2: Was ist eine Spalte?
+    In dieser Zeile die Felder markieren und benennen.
+    -> Die Breite des Rechtecks definiert die Spalte
+
+Schritt 3 (freiwillig): zweite Zeile als Gegenprobe
+```
+
+Aus der Beispielzeile wird zusaetzlich ein Plausibilitaetsmuster fuer die
+Ankerspalte abgeleitet (z. B. „achtstellige Zahl"). Deshalb wird Fliesstext
+unterhalb der Tabelle nicht faelschlich als Position gelesen, obwohl er
+geometrisch in dieselben Spalten faellt. Mehrseitige Angebote uebernehmen das
+Raster auf alle Seiten.
+
+**3. Von Hand erfassen**
+Einzelne Positionen ergaenzen — fuer den Rest eines sonst gut erkannten
+Angebots.
+
+Der eigentliche Gewinn: Die Zuordnung aus Weg 1 und 2 wird als
+Lieferantenprofil gespeichert. Bei Weg 2 wird dabei aus der Geometrie die
+Kopfzeile ueber den markierten Spalten ausgelesen und in eine ganz normale
+Spaltenzuordnung „Ueberschrift → Feld" uebersetzt — davon profitiert dann auch
+die *automatische* Erkennung beim naechsten Angebot desselben Lieferanten.
+
 ---
 
 ## SAP-Feld-IDs einsetzen
@@ -351,7 +397,9 @@ Zugriff auf Ihre echten Anwendungsdaten (temporaeres `SAP_ANGEBOT_HOME`).
 | `tests/test_database.py` | Migrationen, Historie, Zuordnungen, CSV-Export, Nebenlaeufigkeit |
 | `tests/test_services.py` | Vergleich, Pruefung, Vorschau, Komplettvorgang, Undo |
 | `tests/test_extraction.py` | Angebotsformate, E-Mails, Freitext, Lernen |
+| `tests/test_fallback.py` | Tabelle einfuegen, grafisches Anlernen |
 | `tests/test_gui_smoke.py` | Aufbau der Oberflaeche (ohne sichtbares Fenster) |
+| `tests/test_integration.py` | komplette Kette Datei → SAP-Beleg, Robustheit |
 
 ---
 
@@ -373,11 +421,12 @@ Die hinterlegte ID passt nicht zu Ihrer Maske. ID neu aufzeichnen und
 eintragen. Die technische Element-ID steht in den aufklappbaren Details.
 
 **Keine Positionen erkannt**
-Bei PDFs ohne Textebene (reine Scans) ist keine Erkennung moeglich — OCR ist
-bewusst nicht eingebaut. Weg: Text aus der Mail ueber **Text einfuegen**
-auswerten, Positionen von Hand ergaenzen, oder den Lieferanten um eine
-Excel-Datei bitten. Nach ein bis zwei Korrekturen kennt die Anwendung das
-Format dieses Lieferanten.
+Die Anwendung bietet dann selbst die drei Auffangwege an (Tabelle einfuegen,
+grafisch anlernen, von Hand erfassen) — siehe
+[Wenn die Erkennung nicht greift](#wenn-die-erkennung-nicht-greift).
+Bei PDFs ohne Textebene (reine Scans) hilft auch das Anlernen nicht, weil gar
+kein Text vorhanden ist; OCR ist bewusst nicht eingebaut. Dann bleibt
+**Tabelle einfuegen** oder eine Excel-Datei vom Lieferanten.
 
 **`.xls` laesst sich nicht oeffnen**
 Altes Excel-Format. Entweder `pip install xlrd` oder die Datei als `.xlsx`
