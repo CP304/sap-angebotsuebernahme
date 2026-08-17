@@ -593,6 +593,134 @@ def excel_vertauschte_spalten(pfad: Path) -> None:
     mappe.save(pfad)
 
 
+
+# ---------------------------------------------------------------------------
+# Textverarbeitungsformate: Word, OpenDocument, RTF
+# ---------------------------------------------------------------------------
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _docx_absatz(text: str) -> str:
+    return f'<w:p><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>'
+
+
+def _docx_zeile(*werte: str) -> str:
+    zellen = "".join(
+        f'<w:tc><w:p><w:r><w:t xml:space="preserve">{w}</w:t></w:r></w:p></w:tc>'
+        for w in werte)
+    return f"<w:tr>{zellen}</w:tr>"
+
+
+def word_angebot(pfad: Path) -> None:
+    """Angebot als Word-Datei -- viele Lieferanten schicken genau das.
+
+    Wird ohne Zusatzbibliothek erzeugt: .docx ist ein ZIP mit XML darin.
+    """
+    import zipfile
+
+    koerper = (
+        _docx_absatz("Schmidt &amp; Partner Werkstoffe KG")
+        + _docx_absatz("Kronenstrasse 8, 42651 Solingen")
+        + _docx_absatz("Angebot Nr. ANG-2026-7788 vom " + _datum(HEUTE))
+        + _docx_absatz("Waehrung: EUR&#9;Zahlungsziel: 30 Tage netto")
+        + _docx_absatz("Preise gueltig ab " + _datum(GUELTIG_AB))
+        + "<w:tbl>"
+        + _docx_zeile("Pos.", "Ihre Artikelnummer", "Unsere Art.-Nr.",
+                      "Bezeichnung", "Menge", "ME", "Preis")
+        + _docx_zeile("10", "47110001", "SP-DR-4052", "Dichtring NBR 40x52x7",
+                      "500", "Stk.", "12,95")
+        + _docx_zeile("20", "47110005", "SP-KL-6204", "Kugellager 6204-2RS",
+                      "1.000", "St", "4,45")
+        + _docx_zeile("30", "49900010", "SP-HS-DN12", "Hydraulikschlauch DN12 2SN",
+                      "300", "Meter", "7,30")
+        + _docx_zeile("40", "47110004", "SP-FD-1006", "Flachdichtung 100x60x2",
+                      "800", "Stk.", "auf Anfrage")
+        + "</w:tbl>"
+        + _docx_absatz("Mindestbestellmenge 50 Stueck, Lieferzeit 14 Tage.")
+        + _docx_absatz("Das Angebot ist 60 Tage gueltig.")
+    )
+    dokument = (f'<?xml version="1.0" encoding="UTF-8"?>'
+                f'<w:document xmlns:w="{_W_NS}"><w:body>{koerper}</w:body></w:document>')
+    beziehungen = (
+        '<?xml version="1.0" encoding="UTF-8"?><Relationships '
+        'xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/'
+        'officeDocument/2006/relationships/officeDocument" '
+        'Target="word/document.xml"/></Relationships>')
+    typen = (
+        '<?xml version="1.0" encoding="UTF-8"?><Types '
+        'xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Default Extension="rels" ContentType="application/vnd.'
+        'openxmlformats-package.relationships+xml"/></Types>')
+
+    with zipfile.ZipFile(pfad, "w", zipfile.ZIP_DEFLATED) as archiv:
+        archiv.writestr("[Content_Types].xml", typen)
+        archiv.writestr("_rels/.rels", beziehungen)
+        archiv.writestr("word/document.xml", dokument)
+
+
+def opendocument_angebot(pfad: Path) -> None:
+    """Dasselbe als OpenDocument (LibreOffice)."""
+    import zipfile
+
+    T = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+    TB = "urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+    O = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+
+    def zelle(text: str) -> str:
+        return f'<table:table-cell><text:p>{text}</text:p></table:table-cell>'
+
+    def zeile(*werte: str) -> str:
+        return "<table:table-row>" + "".join(zelle(w) for w in werte) + "</table:table-row>"
+
+    inhalt = (
+        f'<?xml version="1.0" encoding="UTF-8"?>'
+        f'<office:document-content xmlns:office="{O}" xmlns:text="{T}" '
+        f'xmlns:table="{TB}"><office:body><office:text>'
+        f'<text:p>Nordtec Industriebedarf AG</text:p>'
+        f'<text:p>Quotation No. Q-2026-9911, date {_datum(HEUTE)}</text:p>'
+        f'<text:p>Currency: EUR, payment terms 30 days net</text:p>'
+        f'<table:table>'
+        + zeile("Item", "Customer Material", "Description", "Qty", "Unit", "Unit price")
+        + zeile("10", "47110005", "Ball bearing 6204-2RS", "1,000", "PCS", "4.55")
+        + zeile("20", "49900010", "Hydraulic hose DN12", "500", "M", "7.15")
+        + f'</table:table>'
+        f'<text:p>Prices valid from {_datum(GUELTIG_AB)}.</text:p>'
+        f'</office:text></office:body></office:document-content>')
+
+    with zipfile.ZipFile(pfad, "w", zipfile.ZIP_DEFLATED) as archiv:
+        archiv.writestr("mimetype", "application/vnd.oasis.opendocument.text")
+        archiv.writestr("content.xml", inhalt)
+
+
+def rtf_angebot(pfad: Path) -> None:
+    """Kurzes RTF-Angebot (kommt selten, aber es kommt vor).
+
+    RTF kennt keine Tabellenstruktur -- Zellen und Zeilen sind Steuerworte
+    (cell, row).  Genau daraus baut der Leser die Tabelle wieder zusammen.
+    """
+    s = chr(92)      # Rueckstrich, damit die Quelltextzeilen lesbar bleiben
+
+    def tabellenzeile(*werte: str) -> str:
+        return (s + "cell ").join(werte) + s + "cell" + s + "row"
+
+    zeilen = [
+        "{" + s + "rtf1" + s + "ansi" + s + "deff0",
+        "{" + s + "fonttbl{" + s + "f0 Arial;}}",
+        "Pumpen Weber GmbH " + s + "& Co. KG" + s + "par",
+        f"Angebot Nr. AG-2026-4455 vom {_datum(HEUTE)}" + s + "par",
+        "Waehrung EUR, Zahlungsziel 60 Tage netto" + s + "par",
+        tabellenzeile("Pos.", "Material", "Bezeichnung", "Menge", "ME", "Preis"),
+        tabellenzeile("10", "48200110", "Kreiselpumpe KP-40", "12", "ST", "1.310,00"),
+        tabellenzeile("20", "48200111", "Gleitringdichtung KP-40", "40", "ST", "292,00"),
+        s + "par Preise gueltig ab " + _datum(GUELTIG_AB) + s + "par",
+        "}",
+    ]
+    pfad.write_text(chr(10).join(zeilen), encoding="cp1252")
+
+
 # ---------------------------------------------------------------------------
 
 def main() -> int:
@@ -607,6 +735,9 @@ def main() -> int:
         ("Preisanpassung_Muster.eml", mail_freitext),
         ("Preismitteilung.txt", textdatei),
         ("Preisliste_Muster.csv", csv_datei),
+        ("Angebot_Schmidt_Partner.docx", word_angebot),
+        ("Quotation_Nordtec.odt", opendocument_angebot),
+        ("Angebot_Pumpen_Weber.rtf", rtf_angebot),
         # -- die schwierigen Faelle --------------------------------------
         ("Angebot_Fliesstext_Dichtungswerk.pdf", pdf_fliesstext),
         ("Angebot_Kopfdaten_quer_verteilt.xlsx", excel_kopfdaten_quer),

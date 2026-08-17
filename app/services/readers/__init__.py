@@ -21,6 +21,7 @@ from .email_reader import (
     strip_signature,
 )
 from .excel_reader import CsvReader, ExcelReader
+from .office_reader import OpenDocumentReader, RichTextReader, WordReader
 from .pdf_reader import PdfReader
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,10 @@ __all__ = [
     "ExcelReader",
     "CsvReader",
     "EmailReader",
+    "OpenDocumentReader",
+    "RichTextReader",
     "TextReader",
+    "WordReader",
     "HtmlTableParser",
     "ReaderRegistry",
     "html_to_text",
@@ -64,6 +68,9 @@ class ReaderRegistry:
             ExcelReader(),
             CsvReader(),
             self.email_reader,
+            WordReader(),
+            OpenDocumentReader(),
+            RichTextReader(),
             TextReader(),
         ]
 
