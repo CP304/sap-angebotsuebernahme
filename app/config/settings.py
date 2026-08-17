@@ -60,6 +60,16 @@ class PurchasingDefaults:
     #: Hauseigener Platzhalter -- bewusst *nicht* 31.12.9999.
     info_record_valid_to: str = "31.12.2099"
 
+    # -- Kontierung der Bestellung --------------------------------------
+    #: Kontierungstyp: "" = Lagerbestellung (kein Kontierungsbild),
+    #: "K" = Kostenstelle, "F" = Auftrag, "A" = Anlage ...
+    account_assignment_category: str = ""
+    #: Vorbelegung, wenn kontiert wird (leer = Anwender traegt ein)
+    default_cost_center: str = ""
+    default_gl_account: str = ""
+    #: Bei kontierten Positionen ist das Sachkonto in vielen Systemen Pflicht
+    require_gl_account_when_assigned: bool = True
+
 
 @dataclass
 class Thresholds:
@@ -129,6 +139,17 @@ class SapRuntime:
     verify_context_before_write: bool = True
     #: Maximale Anzahl Zeilen, die in einem Table-Control durchsucht werden
     max_table_rows: int = 200
+
+    # -- Ruecklese-Pruefung ---------------------------------------------
+    #: Nach dem Sichern den Satz erneut lesen und gegen den Sollwert
+    #: vergleichen.  Die Statusleiste allein ist kein Beweis: sie meldet
+    #: "gesichert", auch wenn ein Feld gar nicht uebernommen wurde.
+    verify_after_write: bool = True
+    #: Zulaessige Abweichung beim Preisvergleich (Rundung im SAP-Bild)
+    verify_price_tolerance: Decimal = Decimal("0.005")
+    #: Schlaegt die Ruecklese-Pruefung fehl, gilt die Position als
+    #: fehlerhaft (True) oder nur als warnungsbehaftet (False).
+    verify_failure_is_error: bool = True
 
 
 @dataclass
@@ -282,6 +303,22 @@ class ExtractionSettings:
     #: Signatur-/Disclaimer-Bloecke in Mails abschneiden
     strip_email_signature: bool = True
 
+    # -- Mail und Anhang gehoeren zusammen ------------------------------
+    #: Haeufigster Fall im Alltag: Die Preistabelle steckt im Anhang, die
+    #: Ergaenzungen ("gilt ab 01.09.", "Mindestmenge jetzt 500", "Position 30
+    #: entfaellt") stehen im Mailtext.  Beides ergibt EIN Angebot.
+    merge_email_and_attachment: bool = True
+    #: Kopfdaten: Der Mailtext ist meist aktueller als ein mitgeschicktes
+    #: Standard-Preisblatt -- bei Widerspruch gewinnt die Mail, der
+    #: abweichende Wert wird aber als Hinweis protokolliert.
+    email_header_wins_over_attachment: bool = True
+    #: Aussagen im Mailtext auf Positionen des Anhangs anwenden
+    #: (Preis, Gueltigkeit, Mindestmenge, Lieferzeit, Streichung)
+    apply_email_supplements: bool = True
+    #: Widersprechen sich Mailtext und Anhang beim Preis, wird der Wert
+    #: als unsicher markiert statt einer der beiden Quellen zu glauben
+    conflict_marks_uncertain: bool = True
+
 
 @dataclass
 class WorkflowDefaults:
@@ -340,6 +377,25 @@ class WorkflowDefaults:
     #: Wenn die Nachrichten nicht nachweislich entfernt werden konnten,
     #: wird der Beleg NICHT gesichert.  Nur bewusst abschaltbar.
     abort_if_messages_present: bool = True
+
+    # -- Bestehende Kontrakte weiterverwenden ---------------------------
+    #: Vor der Neuanlage pruefen, ob es zu Lieferant/EKorg schon einen
+    #: laufenden Mengenkontrakt gibt, und diesen erweitern (ME32K) statt
+    #: einen zweiten anzulegen.  Sonst wachsen die Belegnummern endlos.
+    contract_reuse_existing: bool = True
+    #: Nur Kontrakte beruecksichtigen, die noch mindestens so viele Tage
+    #: laufen (ein morgen auslaufender Kontrakt hilft niemandem)
+    contract_min_remaining_days: int = 30
+    #: Belegart, nach der gesucht wird (leer = wie contract_document_type)
+    contract_search_document_type: str = ""
+
+    # -- Mengenstaffeln im Infosatz -------------------------------------
+    #: Erkannte Staffelpreise als Konditionsstaffel schreiben statt nur den
+    #: ersten Preis zu uebernehmen
+    info_record_write_scales: bool = True
+    #: Mehr Staffelstufen als hier zugelassen werden abgeschnitten (mit
+    #: Protokolleintrag -- stillschweigend verschwinden darf nichts)
+    max_scale_levels: int = 6
 
 
 @dataclass
