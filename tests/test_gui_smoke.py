@@ -69,6 +69,12 @@ class GuiSmokeTest(unittest.TestCase):
         cls.settings.dry_run = True
         cls.settings.ensure_dirs()
         cls.services = build_services(cls.settings)
+        # Beim Gesamtlauf teilen sich alle Suiten dasselbe
+        # SAP_ANGEBOT_HOME und damit den Mock-Bestand.  Ohne
+        # Zuruecksetzen haengt das Ergebnis davon ab, welche Suite
+        # vorher lief -- ein Test, der nur manchmal gruen ist, ist
+        # wertlos.
+        cls.services.gateway.reset_mock_data()
         cls.window = MainWindow(cls.settings, cls.services.as_dict())
 
     @classmethod

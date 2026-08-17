@@ -380,13 +380,58 @@ class EmailReader(DocumentReader):
             document.add_warning(f"Nachrichtenstruktur nicht lesbar: {exc}")
             return "", "", []
 
+        # Teile einer eingebetteten Nachricht duerfen nicht zusaetzlich als
+        # Text des aeusseren Briefes gelten, sonst steht alles doppelt da.
+        uebersprungen: set[int] = set()
+
         for part in parts:
             try:
+                if id(part) in uebersprungen:
+                    continue
+                content_type = part.get_content_type()
+
+                # Weitergeleitete Mail: Der Anhang ist selbst eine Nachricht.
+                # Sie ist mehrteilig (wuerde also gleich uebersprungen) und
+                # get_payload(decode=True) liefert dafuer None -- deshalb hier
+                # eigens behandeln und serialisiert weiterreichen.
+                if content_type == "message/rfc822":
+                    eingebettet = part.get_payload()
+                    if isinstance(eingebettet, list):
+                        eingebettet = eingebettet[0] if eingebettet else None
+
+                    # Ist die eingebettete Nachricht base64-kodiert (das ist bei
+                    # Weiterleitungen die Regel), liefert nur decode=True die
+                    # tatsaechlichen Bytes.  Ohne diesen Schritt reicht man den
+                    # Base64-Text weiter, und die Erkennung findet erwartungs-
+                    # gemaess nichts.
+                    rohdaten = b""
+                    try:
+                        rohdaten = part.get_payload(decode=True) or b""
+                    except Exception:  # noqa: BLE001
+                        rohdaten = b""
+                    if not rohdaten and eingebettet is not None and                             hasattr(eingebettet, "as_bytes"):
+                        rohdaten = eingebettet.as_bytes()
+
+                    rohdaten = _unwrap_base64(rohdaten)
+                    if rohdaten:
+                        if eingebettet is not None and hasattr(eingebettet, "walk"):
+                            for teil in eingebettet.walk():
+                                uebersprungen.add(id(teil))
+                        name = part.get_filename() or ""
+                        if not name and eingebettet is not None and                                 hasattr(eingebettet, "get"):
+                            name = _safe_filename(
+                                str(eingebettet.get("Subject") or ""))[:60]
+                        if not name:
+                            name = "Weitergeleitete Nachricht"
+                        if not name.lower().endswith((".eml", ".msg")):
+                            name += ".eml"
+                        attachments.append((name, rohdaten))
+                    continue
+
                 if part.is_multipart():
                     continue
                 disposition = (part.get_content_disposition() or "").lower()
                 filename = part.get_filename() or ""
-                content_type = part.get_content_type()
                 if disposition == "attachment" or filename:
                     payload = part.get_payload(decode=True) or b""
                     attachments.append((filename or "anhang.bin", payload))
@@ -643,6 +688,34 @@ def _compose_email_text(context: EmailContext, body: str) -> str:
     if context.sent:
         header_lines.append(f"Gesendet: {context.sent.strftime('%d.%m.%Y %H:%M')}")
     return "\n".join(header_lines + ["", body]).strip()
+
+
+def _looks_like_message(data: bytes) -> bool:
+    """Sieht das nach einem Briefkopf aus (``Header: Wert``)?"""
+    kopf = data[:200].lstrip()
+    if not kopf:
+        return False
+    erste = kopf.split(bytes([10]), 1)[0]
+    return b":" in erste and not erste.startswith(b"--")
+
+
+def _unwrap_base64(data: bytes) -> bytes:
+    """Doppelt verpackte Nachrichten auspacken.
+
+    Manche Programme betten eine weitergeleitete Nachricht base64-kodiert
+    ein.  Wird das nicht ausgepackt, reicht man Buchstabensalat weiter und
+    die Erkennung findet erwartungsgemaess nichts.
+    """
+    import base64
+    import binascii
+
+    if _looks_like_message(data):
+        return data
+    try:
+        entpackt = base64.b64decode(data, validate=False)
+    except (binascii.Error, ValueError):
+        return data
+    return entpackt if _looks_like_message(entpackt) else data
 
 
 def _safe_filename(name: str) -> str:

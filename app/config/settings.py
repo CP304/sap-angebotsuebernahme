@@ -360,8 +360,17 @@ class ExtractionSettings:
     #: Anhaenge einer E-Mail mitverarbeiten
     process_email_attachments: bool = True
     #: Dateiendungen, die als Angebotsanhang gelten
+    #: Was als Angebotsanhang gilt.  Muss zu den Lesern passen -- steht ein
+    #: Format hier nicht drin, wird der Anhang stillschweigend ignoriert,
+    #: obwohl die Anwendung ihn lesen koennte.
     attachment_extensions: list[str] = field(
-        default_factory=lambda: [".pdf", ".xlsx", ".xlsm", ".xls", ".csv"]
+        default_factory=lambda: [
+            ".pdf", ".xlsx", ".xlsm", ".xltx", ".xls", ".csv", ".tsv",
+            ".docx", ".dotx", ".docm", ".odt", ".ott", ".ods", ".ots",
+            ".rtf", ".zip", ".txt", ".html", ".htm",
+            # Weitergeleitete Mail mit angehaengter Mail -- kommt vor
+            ".eml", ".msg",
+        ]
     )
     #: Maximale Anhangsgroesse in MB
     max_attachment_mb: int = 25
