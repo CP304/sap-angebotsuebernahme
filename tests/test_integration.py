@@ -343,6 +343,72 @@ class KomplettvorgangTest(unittest.TestCase):
                           (PositionStatus.ERROR, PositionStatus.SKIPPED, PositionStatus.DONE))
 
 
+class RobustheitTest(unittest.TestCase):
+    """Kaputte Eingaben duerfen die Anwendung nie zum Absturz bringen.
+
+    Im Einkaufsalltag landen alle moeglichen Dateien im Werkzeug: abgebrochene
+    Downloads, umbenannte ZIPs, leere Exporte, Mails ohne Inhalt.  Erwartet
+    wird jeweils: keine Ausnahme, keine Position, ein verstaendlicher Hinweis.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.settings = _settings()
+        cls.import_service = OfferImportService(cls.settings)
+        cls.tmp = Path(tempfile.mkdtemp(prefix="sap_fuzz_"))
+
+    def _pruefe(self, name: str, daten: bytes) -> None:
+        pfad = self.tmp / name
+        pfad.write_bytes(daten)
+        try:
+            offer = self.import_service.import_file(str(pfad))
+        except Exception as exc:  # noqa: BLE001 - genau das darf nicht passieren
+            self.fail(f"{name} fuehrte zum Absturz: {type(exc).__name__}: {exc}")
+        self.assertEqual(len(offer.positions), 0,
+                         f"{name} lieferte erfundene Positionen")
+        self.assertTrue(len(offer.issues) or offer.extraction_notes,
+                        f"{name} lieferte weder Positionen noch einen Hinweis")
+
+    def test_leere_datei(self) -> None:
+        self._pruefe("leer.xlsx", b"")
+
+    def test_kaputtes_pdf(self) -> None:
+        self._pruefe("kaputt.pdf", b"%PDF-1.4\nJUNK JUNK JUNK")
+
+    def test_kein_excel_trotz_endung(self) -> None:
+        self._pruefe("muell.xlsx", b"\x00\x01\x02 kein Excel")
+
+    def test_csv_nur_kopfzeile(self) -> None:
+        self._pruefe("nur_kopf.csv", "Pos;Material;Preis\n".encode())
+
+    def test_kaputte_mail(self) -> None:
+        self._pruefe("kaputt.eml", b"Das ist keine gueltige Mail\x00\xff")
+
+    def test_kaputte_msg(self) -> None:
+        """OLE-Kennung vorhanden, Inhalt Schrott."""
+        self._pruefe("kaputt.msg", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 100)
+
+    def test_umbenannte_zip(self) -> None:
+        self._pruefe("unbekannt.xlsx", b"PK\x03\x04kaputt")
+
+    def test_html_ohne_tabelle(self) -> None:
+        self._pruefe("ohne_tabelle.html", b"<html><body><p>Hallo</p></body></html>")
+
+    def test_leerer_und_riesiger_text(self) -> None:
+        for text in ("", "   ", "Hallo Welt", "a" * 100_000):
+            with self.subTest(laenge=len(text)):
+                try:
+                    offer = self.import_service.import_text(text, "Fuzz")
+                except Exception as exc:  # noqa: BLE001
+                    self.fail(f"Text der Laenge {len(text)} stuerzte ab: {exc}")
+                self.assertEqual(len(offer.positions), 0)
+
+    def test_sehr_grosse_tabelle(self) -> None:
+        """5000 Zeilen duerfen weder haengen noch Unsinn erzeugen."""
+        inhalt = "A;B;C\n" + "x;y;z\n" * 5000
+        self._pruefe("riesig.csv", inhalt.encode())
+
+
 class SicherheitsTest(unittest.TestCase):
     """Die harten Sperren muessen greifen."""
 
