@@ -168,6 +168,7 @@ class ValidationService:
         self._check_organisation(position)
         self._check_validity(position, offer)
         self._check_documents(position)
+        self._check_conditions(position)
         self._check_maintenance_hints(position)
         self._check_uncertain(position)
         self._check_duplicate(position, offer)
@@ -445,6 +446,104 @@ class ValidationService:
                              f"Es wird die Voreinstellung (+{days} Tage) verwendet."),
                     severity=IssueSeverity.WARNING,
                     field="delivery_date",
+                ))
+
+    # -- Zusatzkonditionen ----------------------------------------------
+    def _check_conditions(self, position: OfferPosition) -> None:
+        """Erkannte Rabatte, Zuschlaege und Frachtkosten bewerten.
+
+        Drei Dinge sind hier teuer, wenn sie durchrutschen:
+
+        1. Ein Rabatt wurde erkannt, wird aber gar nicht geschrieben.  Der
+           Anwender sieht ihn in der Vorschau und glaubt, er sei
+           beruecksichtigt -- der Infosatz traegt aber den vollen Preis.
+        2. Unplausible Werte (70 % Rabatt) stammen fast immer aus einer
+           Fehlerkennung und wuerden den Einkaufspreis verfaelschen.
+        3. Eine absolute Kondition in fremder Waehrung ist schlicht nicht
+           schreibbar -- es wird grundsaetzlich nichts umgerechnet.
+        """
+        konditionen = list(getattr(position, "conditions", []) or [])
+        if not konditionen:
+            return
+
+        einstellungen = self.settings.conditions
+
+        # 1. Rabatt erkannt, aber nicht geschrieben
+        rabatte = [k for k in konditionen
+                   if str(getattr(k, "art", "")).startswith("discount")]
+        if rabatte and not einstellungen.write_additional_conditions \
+                and not einstellungen.fold_discounts_into_net_price:
+            texte = ", ".join(k.display() for k in rabatte)
+            position.issues.add(Issue(
+                code="discount_not_written",
+                message=(f"Es wurde ein Rabatt erkannt ({texte}), er wird aber nicht "
+                         f"nach SAP geschrieben."),
+                severity=IssueSeverity.WARNING,
+                field="conditions",
+                detail=("Die Einstellung 'write_additional_conditions' ist aus und "
+                        "'fold_discounts_into_net_price' ebenfalls. Der Infosatz "
+                        "erhält damit den vollen Bruttopreis."),
+            ))
+
+        # 2. Unplausible Werte
+        positionswert = position.price
+        if positionswert is not None and position.quantity:
+            positionswert = positionswert * Decimal(position.quantity)
+
+        for kondition in konditionen:
+            art = str(getattr(kondition, "art", ""))
+            wert = getattr(kondition, "wert", None)
+            if wert is None:
+                continue
+            wert = Decimal(wert)
+            if art in ("discount_percent", "cash_discount") and wert > Decimal(50):
+                position.issues.add(Issue(
+                    code="condition_discount_implausible",
+                    message=(f"Der erkannte Rabatt von {format_decimal(wert, 2)} % ist "
+                             f"unplausibel hoch (Grenze 50 %)."),
+                    severity=IssueSeverity.WARNING,
+                    field="conditions",
+                    detail=f"Fundstelle: {getattr(kondition, 'quelltext', '')[:120]}",
+                ))
+            elif art in ("surcharge_percent", "freight_percent") and wert > Decimal(100):
+                position.issues.add(Issue(
+                    code="condition_surcharge_implausible",
+                    message=(f"Der erkannte Zuschlag von {format_decimal(wert, 2)} % ist "
+                             f"unplausibel hoch (Grenze 100 %)."),
+                    severity=IssueSeverity.WARNING,
+                    field="conditions",
+                    detail=f"Fundstelle: {getattr(kondition, 'quelltext', '')[:120]}",
+                ))
+            elif art == "freight_absolute" and positionswert is not None \
+                    and wert > positionswert:
+                position.issues.add(Issue(
+                    code="condition_freight_implausible",
+                    message=(f"Die erkannten Frachtkosten "
+                             f"({format_decimal(wert)} {getattr(kondition, 'waehrung', '')}) "
+                             f"liegen über dem Positionswert "
+                             f"({format_decimal(positionswert)})."),
+                    severity=IssueSeverity.WARNING,
+                    field="conditions",
+                    detail="Meist eine Kopfkondition für das gesamte Angebot, keine "
+                           "Positionskondition.",
+                ))
+
+        # 3. Fremde Waehrung -> blockierend
+        eigene = (position.currency or self.settings.purchasing.currency or "").upper()
+        for kondition in konditionen:
+            if getattr(kondition, "ist_prozent", False):
+                continue
+            fremd = (getattr(kondition, "waehrung", "") or "").upper()
+            if fremd and eigene and fremd != eigene:
+                position.issues.add(Issue(
+                    code="condition_currency_mismatch",
+                    message=(f"Die Kondition {kondition.display()} lautet auf {fremd}, "
+                             f"die Position auf {eigene}."),
+                    severity=IssueSeverity.ERROR,
+                    field="conditions",
+                    blocking=True,
+                    detail=("Es wird grundsätzlich nichts umgerechnet. Bitte die "
+                            "Kondition prüfen und korrigieren."),
                 ))
 
     # -- Pflegehinweise -------------------------------------------------

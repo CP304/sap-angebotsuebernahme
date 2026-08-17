@@ -103,6 +103,23 @@ class SapInfoRecord:
             text += f" / {self.price_unit} {self.order_unit}".rstrip()
         return text
 
+    def additional_conditions(self, gross_price_type: str = "PB00") -> list[SapCondition]:
+        """Alle Konditionen ausser dem Bruttopreis.
+
+        Der Alt/Neu-Vergleich ist nur dann vollstaendig, wenn auch Rabatte,
+        Zuschlaege und Fracht des Bestandssatzes sichtbar sind -- sonst sieht
+        der Einkaeufer einen unveraenderten Preis, obwohl der Lieferant den
+        Rabatt gestrichen hat.
+        """
+        schluessel = (gross_price_type or "PB00").upper()
+        return [c for c in self.conditions
+                if (c.condition_type or "").upper() != schluessel]
+
+    def conditions_display(self, gross_price_type: str = "PB00") -> str:
+        """Zusatzkonditionen als lesbarer Text (leer, wenn es keine gibt)."""
+        return "; ".join(c.display()
+                         for c in self.additional_conditions(gross_price_type))
+
     def validity_display(self) -> str:
         if not self.valid_from and not self.valid_to:
             return "-"
@@ -113,6 +130,7 @@ class SapInfoRecord:
             return {"Infosatz": "noch nicht gelesen"}
         if not self.exists:
             return {"Infosatz": "nicht vorhanden"}
+        zusatz = self.conditions_display()
         return {
             "Infosatz": self.info_record_number or "vorhanden",
             "SAP-Lieferant": self.vendor_number,
@@ -123,4 +141,5 @@ class SapInfoRecord:
             "Lieferzeit": f"{self.lead_time_days} Tage" if self.lead_time_days is not None else "-",
             "Mindestmenge": format_decimal(self.min_order_qty, 3) or "-",
             "Lieferantenmaterial": self.vendor_material_number or "-",
+            "Zusatzkonditionen": zusatz or "-",
         }

@@ -40,6 +40,7 @@ from ..utils.parsing import (
     similarity,
 )
 from .info_record_service import (
+    plan_conditions,
     scale_levels_for,
     scale_not_written_message,
     unverified_scale_selectors,
@@ -319,11 +320,16 @@ class MockInfoRecordService(_MockBase, InfoRecordServiceBase):
             record.min_order_qty = _d(str(raw["min_order_qty"]))
         record.vendor_material_number = raw.get("vendor_material_number", "")
         record.purchasing_group = raw.get("purchasing_group", "")
+        # Bewusst ALLE abgelegten Konditionen zurueckgeben, nicht nur den
+        # Bruttopreis -- sonst waere der Alt/Neu-Vergleich unvollstaendig und
+        # die Ruecklese-Pruefung koennte Zusatzkonditionen gar nicht pruefen.
         record.conditions = [
             SapCondition(condition_type=c.get("type", ""), description=c.get("description", ""),
-                         amount=_d(str(c.get("amount", "0"))), currency=c.get("currency", "EUR"),
+                         amount=_d(str(c.get("amount", "0"))),
+                         currency=c.get("currency", "") or "",
                          price_unit=c.get("price_unit"), uom=c.get("uom", ""),
-                         valid_from=record.valid_from, valid_to=record.valid_to)
+                         valid_from=record.valid_from, valid_to=record.valid_to,
+                         is_percentage=bool(c.get("is_percentage")))
             for c in raw.get("conditions", [])
         ]
         record.raw = dict(raw)
@@ -355,6 +361,12 @@ class MockInfoRecordService(_MockBase, InfoRecordServiceBase):
         messages: list[str] = [
             f"Infosatz {number} wurde {'geaendert' if existing else 'angelegt'}"]
 
+        # -- Zusatzkonditionen ---------------------------------------------
+        # Dieselbe Planung wie im Echtbetrieb, damit sich Testsystem und
+        # Produktivsystem nicht unterschiedlich verhalten.
+        plan = plan_conditions(position, self.settings, self.selectors)
+        messages.extend(plan.messages)
+
         # -- Mengenstaffel -------------------------------------------------
         staffel: list[list[str]] = []
         if self.settings.workflow.info_record_write_scales and position.has_scales:
@@ -377,7 +389,7 @@ class MockInfoRecordService(_MockBase, InfoRecordServiceBase):
 
         # SAP legt den Konditionsbetrag zweistellig ab -- das Testsystem
         # ebenso, sonst waere die Ruecklese-Pruefung unrealistisch scharf.
-        gespeicherter_preis = position.price
+        gespeicherter_preis = plan.price_for(position)
         if gespeicherter_preis is not None:
             gespeicherter_preis = gespeicherter_preis.quantize(Decimal("0.01"))
         abweichung = self.system.forced_price_deviations.get(key)
@@ -396,9 +408,21 @@ class MockInfoRecordService(_MockBase, InfoRecordServiceBase):
             "min_order_qty": str(position.min_order_qty) if position.min_order_qty is not None else "",
             "vendor_material_number": position.vendor_material_number,
             "purchasing_group": self.settings.purchasing.purchasing_group,
-            "conditions": [{"type": "PB00", "description": "Bruttopreis",
-                            "amount": str(gespeicherter_preis), "currency": position.currency,
-                            "price_unit": position.price_unit or 1, "uom": position.uom}],
+            "conditions": [
+                {"type": self.settings.conditions.gross_price,
+                 "description": "Bruttopreis",
+                 "amount": str(gespeicherter_preis), "currency": position.currency,
+                 "price_unit": position.price_unit or 1, "uom": position.uom,
+                 "is_percentage": False},
+                *[{"type": k.condition_type,
+                   "description": k.kind,
+                   "amount": str(k.amount),
+                   "currency": "" if k.is_percentage else k.currency,
+                   "price_unit": None if k.is_percentage else (position.price_unit or 1),
+                   "uom": "" if k.is_percentage else position.uom,
+                   "is_percentage": k.is_percentage}
+                  for k in plan.conditions],
+            ],
             "scales": staffel,
         }
         self.system.save()
@@ -408,7 +432,9 @@ class MockInfoRecordService(_MockBase, InfoRecordServiceBase):
             geprueft = self.read(position.material_number, position.vendor_number,
                                  position.purchasing_org, position.plant)
             in_ordnung, hinweise = verify_info_record_write(
-                geprueft, position, context, self.settings)
+                geprueft, position, context, self.settings,
+                expected_conditions=plan.conditions,
+                expected_price=plan.net_price)
             messages.extend(hinweise)
             if not in_ordnung and self.settings.sap.verify_failure_is_error:
                 return self._result(

@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..models.enums import ResultState
 from ..models.offer_position import OfferPosition
@@ -62,11 +63,20 @@ def _decimal_display(value: Decimal | None) -> str:
 
 
 def verify_info_record_write(record: SapInfoRecord, position: OfferPosition,
-                             context, settings) -> tuple[bool, list[str]]:
+                             context, settings,
+                             expected_conditions: list | None = None,
+                             expected_price: Decimal | None = None
+                             ) -> tuple[bool, list[str]]:
     """Gelesenen Infosatz gegen den Sollzustand vergleichen.
 
     Liefert ``(in_ordnung, meldungen)``.  Die Meldungen sind Klartext fuer den
     Einkaeufer -- inklusive Hinweis, wo er in SAP nachsehen kann.
+
+    ``expected_conditions`` sind die tatsaechlich geschriebenen
+    Zusatzkonditionen (:class:`PlannedCondition`).  Sie werden mitgeprueft:
+    eine Kondition, die SAP stillschweigend verworfen hat, faellt sonst erst
+    in der naechsten Bestellung auf.  ``expected_price`` weicht vom
+    Positionspreis ab, wenn Rabatte in den Nettopreis eingerechnet wurden.
     """
     transaktion = settings.transactions.info_record_display
     if record.read_error:
@@ -79,7 +89,7 @@ def verify_info_record_write(record: SapInfoRecord, position: OfferPosition,
 
     # -- Preis (mit Toleranz, weil SAP im Bild rundet) -------------------
     toleranz = Decimal(str(settings.sap.verify_price_tolerance or 0))
-    erwartet = position.price
+    erwartet = expected_price if expected_price is not None else position.price
     if erwartet is not None:
         if record.price is None:
             abweichungen.append(f"SAP hat keinen Preis gespeichert, erwartet war "
@@ -104,6 +114,29 @@ def verify_info_record_write(record: SapInfoRecord, position: OfferPosition,
         abweichungen.append(f"Gueltig bis {format_date(record.valid_to)} statt "
                             f"{format_date(erwartetes_ende)}")
 
+    # -- Zusatzkonditionen ------------------------------------------------
+    # Eine Konditionszeile, die SAP nicht uebernommen hat, faellt sonst erst
+    # auf, wenn die erste Bestellung mit falschem Preis herauslaeuft.
+    bestaetigte_konditionen: list[str] = []
+    for erwartete in (expected_conditions or []):
+        schluessel = (erwartete.condition_type or "").upper()
+        gefunden = next((c for c in record.conditions
+                         if (c.condition_type or "").upper() == schluessel), None)
+        if gefunden is None:
+            abweichungen.append(f"Kondition {schluessel} fehlt im Infosatz "
+                                f"(erwartet {erwartete.display()})")
+            continue
+        if gefunden.amount is None:
+            abweichungen.append(f"Kondition {schluessel} ohne Betrag gespeichert")
+            continue
+        if abs(Decimal(gefunden.amount) - erwartete.amount) > toleranz:
+            abweichungen.append(
+                f"Kondition {schluessel}: SAP hat "
+                f"{_decimal_display(gefunden.amount)} gespeichert, erwartet war "
+                f"{_decimal_display(erwartete.amount)}")
+            continue
+        bestaetigte_konditionen.append(erwartete.display())
+
     if abweichungen:
         return False, ["Ruecklese-Pruefung fehlgeschlagen: " + "; ".join(abweichungen)
                        + f" -- bitte in {transaktion} pruefen."]
@@ -113,6 +146,9 @@ def verify_info_record_write(record: SapInfoRecord, position: OfferPosition,
     if record.price_unit:
         bestaetigt += f" / {record.price_unit}"
     meldungen = [f"Ruecklese-Pruefung: Preis {bestaetigt} bestaetigt"]
+    if bestaetigte_konditionen:
+        meldungen.append("Ruecklese-Pruefung: Zusatzkonditionen bestaetigt ("
+                         + ", ".join(bestaetigte_konditionen) + ")")
     if record.valid_to:
         meldungen.append(f"Ruecklese-Pruefung: gueltig bis {format_date(record.valid_to)}")
     return True, meldungen
@@ -204,6 +240,241 @@ def scale_not_written_message(offen: list[str], settings) -> str:
             + ", ".join("info_record_conditions." + key for key in offen)
             + "). Es wurde nur der Grundpreis gepflegt -- die Staffel bitte in "
             + f"{settings.transactions.info_record_change} von Hand nachtragen.")
+
+
+# ---------------------------------------------------------------------------
+# Zusatzkonditionen (Rabatt, Zuschlag, Fracht, Skonto)
+# ---------------------------------------------------------------------------
+#
+# Bisher wanderte nur der Bruttopreis in den Infosatz.  Ein Angebot nennt aber
+# regelmaessig mehr.  Diese Angaben werden als *eigene* Konditionszeilen
+# gepflegt und ausdruecklich NICHT in den Preis eingerechnet -- sonst ist
+# spaeter nicht mehr nachvollziehbar, woraus der Preis entstanden ist.
+#
+# Alles hier ist bewusst frei von SAP-GUI-Aufrufen, damit Echtbetrieb und
+# Testsystem exakt dieselben Regeln (und dieselben Meldungen) verwenden.
+
+#: Feld-IDs, ohne die keine Zusatzkondition gepflegt werden kann
+CONDITION_SELECTOR_KEYS = ("condition_row_type_cell", "condition_row_amount_cell",
+                           "condition_row_unit_cell")
+
+#: Reihenfolge der Konditionszeilen im Konditionsbild.  Bewusst fest verdrahtet
+#: und NICHT die Reihenfolge des Fundes im Angebotstext: so sieht jeder
+#: Infosatz gleich aus, egal wie der Lieferant formuliert hat -- und beim
+#: Kappen entfaellt immer das Unwichtigste zuerst.
+ADDITIONAL_CONDITION_ORDER = (
+    "discount_percent", "discount_absolute",
+    "surcharge_percent", "surcharge_absolute",
+    "freight_percent", "freight_absolute",
+    "cash_discount",
+)
+
+
+def _condition_sort_key(kind: str) -> int:
+    try:
+        return ADDITIONAL_CONDITION_ORDER.index(kind)
+    except ValueError:
+        return len(ADDITIONAL_CONDITION_ORDER)
+
+
+@dataclass
+class PlannedCondition:
+    """Eine konkret zu schreibende Konditionszeile."""
+
+    condition_type: str = ""        # SAP-Konditionsart, z. B. RA01
+    amount: Decimal = Decimal("0")  # immer positiv
+    currency: str = ""              # leer bei Prozentkonditionen
+    is_percentage: bool = False
+    kind: str = ""                  # Art der Erkennung (discount_percent ...)
+    source_text: str = ""           # Fundstelle im Angebot
+
+    def display(self) -> str:
+        from ..utils.parsing import format_decimal
+        if self.is_percentage:
+            wert = f"{format_decimal(self.amount, 3)} %"
+        else:
+            wert = f"{format_decimal(self.amount)} {self.currency}".strip()
+        return f"{self.condition_type} {wert}"
+
+
+@dataclass
+class ConditionWritePlan:
+    """Ergebnis der Konditionsplanung fuer eine Position."""
+
+    conditions: list[PlannedCondition] = field(default_factory=list)
+    messages: list[str] = field(default_factory=list)
+    #: Abweichender Preis, wenn Rabatte eingerechnet wurden (sonst ``None``)
+    net_price: Decimal | None = None
+
+    def price_for(self, position: OfferPosition) -> Decimal | None:
+        """Der tatsaechlich zu schreibende Preis."""
+        return self.net_price if self.net_price is not None else position.price
+
+
+def unverified_condition_selectors(registry) -> list[str]:
+    """Welche Feld-IDs der Zusatzkonditionen sind (noch) nicht geprueft?
+
+    Leere Liste = es darf geschrieben werden.  Echtbetrieb und Testsystem
+    verwenden dieselbe Pruefung.
+    """
+    offen: list[str] = []
+    for key in CONDITION_SELECTOR_KEYS:
+        if not registry.has("info_record_conditions", key):
+            offen.append(key)
+            continue
+        if not registry.get("info_record_conditions", key).verified:
+            offen.append(key)
+    return offen
+
+
+def conditions_not_written_message(offen: list[str], settings) -> str:
+    """Einheitlicher Klartext, wenn Zusatzkonditionen nicht geschrieben wurden."""
+    return ("Zusatzkonditionen nicht geschrieben: Feld-IDs ungeprueft ("
+            + ", ".join("info_record_conditions." + key for key in offen)
+            + "). Es wurde nur der Bruttopreis gepflegt -- die Zusatzkonditionen "
+            + f"bitte in {settings.transactions.info_record_change} von Hand "
+            + "nachtragen.")
+
+
+def condition_type_for(kind: str, settings) -> str:
+    """SAP-Konditionsart zu einer erkannten Konditionsart."""
+    return getattr(settings.conditions, kind, "") or ""
+
+
+def _percent_text(value: Decimal) -> str:
+    from ..utils.parsing import format_decimal
+    return format_decimal(value, 2).rstrip("0").rstrip(",")
+
+
+def fold_discounts(position: OfferPosition, settings
+                   ) -> tuple[Decimal | None, list, list[str]]:
+    """Rabatte in den Nettopreis einrechnen.
+
+    Liefert ``(nettopreis, verbleibende_kandidaten, meldungen)``.  Der Weg ist
+    einfacher als eigene Konditionszeilen, kostet aber die Nachvollziehbarkeit
+    -- deshalb steht im Ergebnis ausdruecklich, wie gerechnet wurde::
+
+        Nettopreis 12,46 = 12,85 abzueglich 3 %
+
+    Skonto wird bewusst NICHT eingerechnet: es ist eine Zahlungsbedingung und
+    haengt davon ab, ob die Rechnung fristgerecht bezahlt wird.
+    """
+    from ..utils.parsing import format_decimal
+
+    kandidaten = list(position.conditions or [])
+    rabatte = [k for k in kandidaten
+               if getattr(k, "art", "") in ("discount_percent", "discount_absolute")]
+    if position.price is None or not rabatte:
+        return None, kandidaten, []
+
+    preis = Decimal(position.price)
+    schritte: list[str] = []
+    verbraucht: list = []
+    for kandidat in rabatte:
+        wert = Decimal(getattr(kandidat, "wert", 0) or 0)
+        if wert <= 0:
+            continue
+        if kandidat.art == "discount_percent":
+            preis = preis - (preis * wert / Decimal(100))
+            schritte.append(f"abzueglich {_percent_text(wert)} %")
+        else:
+            waehrung = (getattr(kandidat, "waehrung", "") or "").upper()
+            if waehrung and position.currency and waehrung != position.currency.upper():
+                # Fremdwaehrung wird nie umgerechnet -- lieber gar nicht falten.
+                continue
+            preis = preis - wert
+            schritte.append(f"abzueglich {format_decimal(wert)} "
+                            f"{waehrung or position.currency}".rstrip())
+        verbraucht.append(kandidat)
+
+    if not verbraucht:
+        return None, kandidaten, []
+
+    preis = preis.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if preis <= 0:
+        return None, kandidaten, [
+            "Rabatte wurden NICHT in den Nettopreis eingerechnet: das Ergebnis "
+            f"waere {format_decimal(preis)} und damit nicht plausibel."]
+
+    meldung = (f"Nettopreis {format_decimal(preis)} = "
+               f"{format_decimal(position.price)} " + " ".join(schritte)
+               + " (Einstellung 'fold_discounts_into_net_price')")
+    rest = [k for k in kandidaten if k not in verbraucht]
+    return preis, rest, [meldung]
+
+
+def plan_conditions(position: OfferPosition, settings, registry) -> ConditionWritePlan:
+    """Zu schreibende Zusatzkonditionen ermitteln.
+
+    Es wird nie stillschweigend etwas weggelassen: jeder Grund, aus dem eine
+    erkannte Kondition nicht geschrieben wird, steht als Meldung im Ergebnis.
+    """
+    plan = ConditionWritePlan()
+    kandidaten = list(position.conditions or [])
+    if not kandidaten:
+        return plan
+
+    # 1. Alternative: Rabatte in den Preis einrechnen
+    if settings.conditions.fold_discounts_into_net_price:
+        netto, kandidaten, meldungen = fold_discounts(position, settings)
+        plan.net_price = netto
+        plan.messages.extend(meldungen)
+        if not kandidaten:
+            return plan
+
+    # 2. Zusatzkonditionen ueberhaupt gewuenscht?
+    if not settings.conditions.write_additional_conditions:
+        plan.messages.append(
+            "Zusatzkonditionen nicht geschrieben: die Einstellung "
+            "'write_additional_conditions' ist ausgeschaltet. Nicht geschrieben: "
+            + "; ".join(k.display() for k in kandidaten))
+        return plan
+
+    # 3. Sind die Feld-IDs geprueft?  Sonst nur der Bruttopreis.
+    offen = unverified_condition_selectors(registry)
+    if offen:
+        plan.messages.append(conditions_not_written_message(offen, settings))
+        return plan
+
+    # 4. Konditionsarten zuordnen -- in fester Reihenfolge
+    zeilen: list[PlannedCondition] = []
+    kandidaten = sorted(kandidaten,
+                        key=lambda k: _condition_sort_key(getattr(k, "art", "")))
+    for kandidat in kandidaten:
+        art = getattr(kandidat, "art", "")
+        schluessel = condition_type_for(art, settings)
+        if not schluessel:
+            plan.messages.append(
+                f"Kondition '{kandidat.display()}' nicht geschrieben: fuer '{art}' "
+                "ist keine SAP-Konditionsart hinterlegt (Einstellungen -> "
+                "Konditionsarten).")
+            continue
+        zeilen.append(PlannedCondition(
+            condition_type=schluessel,
+            amount=Decimal(getattr(kandidat, "wert", 0) or 0),
+            currency=("" if getattr(kandidat, "ist_prozent", False)
+                      else (getattr(kandidat, "waehrung", "") or position.currency)),
+            is_percentage=bool(getattr(kandidat, "ist_prozent", False)),
+            kind=art,
+            source_text=getattr(kandidat, "quelltext", ""),
+        ))
+
+    # 5. Kappung -- die entfallenen Zeilen werden einzeln protokolliert
+    grenze = max(0, int(settings.conditions.max_additional_conditions or 0))
+    if grenze and len(zeilen) > grenze:
+        entfallen = zeilen[grenze:]
+        zeilen = zeilen[:grenze]
+        plan.messages.append(
+            f"Zusatzkonditionen gekappt: {len(zeilen) + len(entfallen)} erkannt, "
+            f"nur {grenze} geschrieben (Einstellung 'max_additional_conditions'). "
+            "Nicht geschrieben: " + "; ".join(z.display() for z in entfallen))
+
+    plan.conditions = zeilen
+    if zeilen:
+        plan.messages.append(
+            f"{len(zeilen)} Zusatzkondition(en) gepflegt: "
+            + ", ".join(z.display() for z in zeilen))
+    return plan
 
 
 class SapInfoRecordService(InfoRecordServiceBase):
@@ -315,7 +586,11 @@ class SapInfoRecordService(InfoRecordServiceBase):
             return self._result("info_record", ResultState.FAILED,
                                 "Keine SAP-Verbindung.", started_ms=started)
 
-        messages: list[str] = []
+        # Zusatzkonditionen planen, BEVOR irgendetwas gesetzt wird: ergibt die
+        # Planung einen abweichenden Nettopreis (eingerechnete Rabatte), muss
+        # schon das EKorg-Bild diesen Preis bekommen.
+        plan = plan_conditions(position, self.settings, self.selectors)
+        messages: list[str] = list(plan.messages)
         try:
             connection.allow_write = True
             connection.ensure_transaction(transaction)
@@ -327,10 +602,10 @@ class SapInfoRecordService(InfoRecordServiceBase):
 
             # Allgemeine Daten -> EKorg-Daten
             self._advance_to_purchasing_screen(position)
-            self._write_purchasing_fields(position, context, messages)
+            self._write_purchasing_fields(position, context, messages, plan)
 
             if self.settings.sap.info_record_price_via_conditions:
-                self._write_conditions(position, context, messages)
+                self._write_conditions(position, context, messages, plan)
 
             status = connection.press_save()
             if status.is_error:
@@ -352,7 +627,9 @@ class SapInfoRecordService(InfoRecordServiceBase):
                 geprueft = self.read(position.material_number, position.vendor_number,
                                      position.purchasing_org, position.plant)
                 in_ordnung, hinweise = verify_info_record_write(
-                    geprueft, position, context, self.settings)
+                    geprueft, position, context, self.settings,
+                    expected_conditions=plan.conditions,
+                    expected_price=plan.net_price)
                 messages.extend(hinweise)
                 if not in_ordnung:
                     if self.settings.sap.verify_failure_is_error:
@@ -465,7 +742,9 @@ class SapInfoRecordService(InfoRecordServiceBase):
             )
 
     def _write_purchasing_fields(self, position: OfferPosition, context: WriteContext,
-                                 messages: list[str]) -> None:
+                                 messages: list[str],
+                                 plan: ConditionWritePlan | None = None) -> None:
+        plan = plan or ConditionWritePlan()
         connection = self.connection
         registry = self.selectors
 
@@ -477,7 +756,7 @@ class SapInfoRecordService(InfoRecordServiceBase):
                 connection.set_text(element_id, str(value))
 
         if not self.settings.sap.info_record_price_via_conditions:
-            maybe("net_price", self._decimal_text(position.price))
+            maybe("net_price", self._decimal_text(plan.price_for(position)))
         maybe("currency", position.currency)
         maybe("price_unit", position.price_unit)
         maybe("order_unit", position.uom)
@@ -492,11 +771,15 @@ class SapInfoRecordService(InfoRecordServiceBase):
         messages.append("EKorg-Daten gesetzt")
 
     def _write_conditions(self, position: OfferPosition, context: WriteContext,
-                          messages: list[str]) -> None:
+                          messages: list[str],
+                          plan: ConditionWritePlan | None = None) -> None:
         """Preis mit Gueltigkeitszeitraum ueber das Konditionsbild pflegen.
 
         Nur so laesst sich das hauseigene "gueltig bis 31.12.2099" setzen.
+        In den Folgezeilen stehen die Zusatzkonditionen (Rabatt, Zuschlag,
+        Fracht, Skonto), sofern deren Feld-IDs geprueft sind.
         """
+        plan = plan or ConditionWritePlan()
         connection = self.connection
         registry = self.selectors
 
@@ -525,10 +808,11 @@ class SapInfoRecordService(InfoRecordServiceBase):
 
         # Konditionsbetrag in der ersten Zeile der Konditionstabelle
         amount_key = "condition_amount_cell"
-        if registry.has("info_record_conditions", amount_key) and position.price is not None:
+        preis = plan.price_for(position)
+        if registry.has("info_record_conditions", amount_key) and preis is not None:
             element_id = registry.id_for("info_record_conditions", amount_key, row=0)
             if connection.exists(element_id):
-                connection.set_text(element_id, self._decimal_text(position.price))
+                connection.set_text(element_id, self._decimal_text(preis))
                 if registry.has("info_record_conditions", "condition_per_cell") and position.price_unit:
                     per_id = registry.id_for("info_record_conditions", "condition_per_cell", row=0)
                     if connection.exists(per_id):
@@ -542,7 +826,51 @@ class SapInfoRecordService(InfoRecordServiceBase):
         messages.append(f"Konditionen gueltig {format_date(valid_from)} – "
                         f"{format_date(valid_to) or 'offen'}")
 
+        self._write_additional_conditions(plan, messages)
         self._write_scales(position, messages)
+
+    def _write_additional_conditions(self, plan: ConditionWritePlan,
+                                     messages: list[str]) -> None:
+        """Zusatzkonditionen in die Folgezeilen des Konditionsbilds schreiben.
+
+        Die Pruefung der Feld-IDs ist bereits in :func:`plan_conditions`
+        erfolgt: ist auch nur eine ID ungeprueft, ist ``plan.conditions`` leer
+        und im Ergebnis steht, warum.  Hier wird nur noch geschrieben.
+        """
+        if not plan.conditions:
+            return
+        connection = self.connection
+        registry = self.selectors
+
+        geschrieben = 0
+        for versatz, kondition in enumerate(plan.conditions):
+            # Zeile 0 traegt den Bruttopreis -- Zusatzkonditionen folgen darunter.
+            row = versatz + 1
+            art_id = registry.id_for("info_record_conditions",
+                                     "condition_row_type_cell", row=row)
+            betrag_id = registry.id_for("info_record_conditions",
+                                        "condition_row_amount_cell", row=row)
+            einheit_id = registry.id_for("info_record_conditions",
+                                         "condition_row_unit_cell", row=row)
+            if not connection.exists(art_id) or not connection.exists(betrag_id):
+                messages.append(
+                    f"Zusatzkonditionen unvollstaendig: Zeile {row + 1} ist in SAP "
+                    f"nicht vorhanden -- bitte in "
+                    f"{self.settings.transactions.info_record_change} pruefen.")
+                break
+            connection.set_text(art_id, kondition.condition_type)
+            connection.set_text(betrag_id, self._decimal_text(kondition.amount))
+            if connection.exists(einheit_id):
+                connection.set_text(einheit_id,
+                                    "%" if kondition.is_percentage else kondition.currency)
+            geschrieben += 1
+
+        connection.send_vkey(0)
+        connection.raise_on_error_status("Zusatzkonditionen setzen")
+        if geschrieben and geschrieben < len(plan.conditions):
+            messages.append(
+                f"Nur {geschrieben} von {len(plan.conditions)} Zusatzkonditionen "
+                "konnten gesetzt werden.")
 
     def _write_scales(self, position: OfferPosition, messages: list[str]) -> None:
         """Mengenstaffel im Konditionsbild pflegen.
@@ -657,7 +985,12 @@ class SapInfoRecordService(InfoRecordServiceBase):
 
             if not registry.has("info_record_conditions", "condition_type_cell"):
                 return
-            for row in range(8):
+            # Es werden ausdruecklich ALLE Zeilen gelesen, nicht nur der
+            # Bruttopreis: ohne die Zusatzkonditionen des Bestandssatzes ist
+            # der Alt/Neu-Vergleich unvollstaendig -- ein gestrichener Rabatt
+            # bliebe unsichtbar.
+            grenze = max(8, int(self.settings.conditions.max_additional_conditions or 0) + 1)
+            for row in range(grenze):
                 type_id = registry.id_for("info_record_conditions", "condition_type_cell", row=row)
                 if not connection.exists(type_id):
                     break
@@ -668,11 +1001,19 @@ class SapInfoRecordService(InfoRecordServiceBase):
                 if registry.has("info_record_conditions", "condition_amount_cell"):
                     amount = parse_decimal(connection.read_text(
                         registry.id_for("info_record_conditions", "condition_amount_cell", row=row)))
+                einheit = ""
+                if registry.has("info_record_conditions", "condition_unit_cell"):
+                    einheit = connection.read_text(
+                        registry.id_for("info_record_conditions",
+                                        "condition_unit_cell", row=row)) or ""
+                prozent = "%" in einheit
                 record.conditions.append(SapCondition(
                     condition_type=condition_type, amount=amount,
-                    currency=record.currency, price_unit=record.price_unit,
-                    uom=record.order_unit, valid_from=record.valid_from,
-                    valid_to=record.valid_to,
+                    currency="" if prozent else (einheit or record.currency),
+                    price_unit=None if prozent else record.price_unit,
+                    uom="" if prozent else record.order_unit,
+                    valid_from=record.valid_from, valid_to=record.valid_to,
+                    is_percentage=prozent,
                 ))
         except SapError as exc:
             logger.debug("Konditionen konnten nicht gelesen werden: %s", exc)
@@ -707,6 +1048,9 @@ class SapInfoRecordService(InfoRecordServiceBase):
             text += f" bis {format_date(context.valid_to)}"
         if position.has_scales:
             text += f" (Staffel: {position.scale_display()})"
+        if position.has_conditions:
+            text += (" (Zusatzkonditionen: "
+                     + ", ".join(k.display() for k in position.conditions) + ")")
         return text
 
     @staticmethod

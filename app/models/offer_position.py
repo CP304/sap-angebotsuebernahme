@@ -74,6 +74,15 @@ class OfferPosition:
     #: Dient allein der Nachvollziehbarkeit im Ergebnis.
     merged_scale_uids: list[int] = field(default_factory=list)
 
+    #: Erkannte Zusatzkonditionen (``ConditionCandidate`` aus
+    #: ``app.services.extraction.condition_rules``): Rabatte, Zu- und
+    #: Abschlaege, Frachtkosten, Skonto.  Sie werden bewusst NICHT in
+    #: ``price`` eingerechnet -- der Bruttopreis bleibt der Bruttopreis, und
+    #: jede Kondition bleibt als eigene Zeile nachvollziehbar.
+    #: Bewusst als ``list`` typisiert (nicht ``list[ConditionCandidate]``):
+    #: das Datenmodell soll nicht von der Erkennungsschicht abhaengen.
+    conditions: list = field(default_factory=list)
+
     # -- Zuordnung -------------------------------------------------------
     vendor_number: str = ""        # aufgeloester SAP-Lieferant (Kopf oder Position)
     purchasing_org: str = ""
@@ -163,6 +172,44 @@ class OfferPosition:
         """Staffel als lesbarer Text fuer Vorschau und Protokoll."""
         return "; ".join(f"ab {format_decimal(menge, 3)}: {format_decimal(preis)}"
                          for menge, preis in self.sorted_scales())
+
+    @property
+    def has_conditions(self) -> bool:
+        """Traegt diese Position Zusatzkonditionen ausser dem Bruttopreis?"""
+        return bool(self.conditions)
+
+    def condition_display(self, condition_types: Any = None) -> str:
+        """Kurze Klartextzusammenfassung fuer die Oberflaeche.
+
+        Beispiel: ``PB00 12,85 EUR, RA01 -3 %, FRB1 +45,00 EUR``
+
+        ``condition_types`` ist die Konditionsarten-Einstellung
+        (``settings.conditions``).  Fehlt sie, gelten die Standardarten -- die
+        Anzeige darf nie daran scheitern, dass gerade keine Einstellung zur
+        Hand ist.
+        """
+        if condition_types is None:
+            from ..config.settings import ConditionTypes
+            condition_types = ConditionTypes()
+
+        teile: list[str] = []
+        if self.price is not None:
+            brutto = getattr(condition_types, "gross_price", "PB00")
+            teile.append(f"{brutto} {format_decimal(self.price)} "
+                         f"{self.currency}".strip())
+        for kondition in self.conditions:
+            art = getattr(kondition, "art", "")
+            schluessel = getattr(condition_types, art, "") or art.upper()
+            vorzeichen = "-" if getattr(kondition, "ist_abzug", False) else "+"
+            wert = getattr(kondition, "wert", None)
+            if wert is None:
+                continue
+            if getattr(kondition, "ist_prozent", False):
+                betrag = f"{format_decimal(wert, 2).rstrip('0').rstrip(',')} %"
+            else:
+                betrag = f"{format_decimal(wert)} {getattr(kondition, 'waehrung', '')}".strip()
+            teile.append(f"{schluessel} {vorzeichen}{betrag}")
+        return ", ".join(teile)
 
     @property
     def old_price(self) -> Decimal | None:

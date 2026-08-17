@@ -31,6 +31,7 @@ from ..models.issue import Issue
 from ..models.offer import Offer
 from ..models.offer_position import OfferPosition
 from ..utils.parsing import normalize_uom
+from .extraction.condition_rules import attach_conditions
 from .extraction.email_merge import apply_email_header, apply_email_supplements
 from .extraction.freetext_extractor import FreetextExtractor
 from .extraction.header_rules import apply_header_matches, extract_header_fields, \
@@ -420,6 +421,13 @@ class OfferImportService:
         if inherited:
             offer.add_note(f"Waehrung '{offer.currency}' auf {inherited} Position(en) "
                            "vererbt.")
+
+        # Zusatzkonditionen (Rabatt, Zuschlag, Fracht, Skonto) erkennen.  Erst
+        # jetzt, weil dafuer sowohl der Angebotstext als auch die fertigen
+        # Positionen vorliegen muessen -- Kopfkonditionen gelten nur fuer
+        # Positionen ohne eigene Angabe.
+        for note in attach_conditions(offer, self.settings):
+            offer.add_note(note)
 
         offer.renumber()
         self._add_issues(offer)

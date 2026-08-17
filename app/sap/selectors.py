@@ -227,6 +227,30 @@ def default_screens() -> dict[str, Screen]:
                                      "table", optional=True),
             "validity_periods_button": _s("wnd[0]/tbar[1]/btn[16]", "Gueltigkeitsperioden",
                                           "button", optional=True),
+            # -- Zusatzkonditionen (Rabatt/Zuschlag/Fracht/Skonto) --------
+            # TODO: kundenspezifische SAP-GUI-ID pruefen.  Zusatzkonditionen
+            # stehen im selben Table-Control wie der Bruttopreis, aber in den
+            # Folgezeilen.  Solange diese IDs ungeprueft sind, schreibt die
+            # Anwendung NUR den Bruttopreis und vermerkt das im Ergebnis --
+            # ein zur Haelfte gepflegtes Konditionsbild waere schlimmer als
+            # gar keine Zusatzkondition, weil der Preis dann falsch waere,
+            # ohne dass es jemand bemerkt.
+            "condition_row_type_cell": _s("wnd[0]/usr/tblSAPMV13ATCTRL_A017/"
+                                          "ctxtKOMV-KSCHL[0,%d]",
+                                          "Zusatzkondition: Konditionsart "
+                                          "(Zeilenplatzhalter %d)", "table",
+                                          optional=True),
+            "condition_row_amount_cell": _s("wnd[0]/usr/tblSAPMV13ATCTRL_A017/"
+                                            "txtKOMV-KBETR[1,%d]",
+                                            "Zusatzkondition: Betrag bzw. Prozentsatz "
+                                            "(Zeilenplatzhalter %d)", "table",
+                                            optional=True),
+            "condition_row_unit_cell": _s("wnd[0]/usr/tblSAPMV13ATCTRL_A017/"
+                                          "ctxtKOMV-KOEIN[2,%d]",
+                                          "Zusatzkondition: Waehrung bzw. Einheit "
+                                          "('%%' bei Prozentkonditionen, "
+                                          "Zeilenplatzhalter %d)", "table",
+                                          optional=True),
             # -- Mengenstaffel -------------------------------------------
             # TODO: kundenspezifische SAP-GUI-ID pruefen.  Die Staffelpflege
             # liegt in einem eigenen Bild (Konditionsdetail -> "Staffeln").
