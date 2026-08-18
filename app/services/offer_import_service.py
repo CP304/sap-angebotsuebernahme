@@ -40,6 +40,13 @@ from .extraction.header_rules import apply_header_matches, extract_header_fields
 from .extraction.learning import learn_from_corrections
 from .extraction.material_roles import compile_own_pattern, resolve_position_roles
 from .extraction.plausibility import run_checks
+from .extraction.position_kinds import (
+    KIND_ALTERNATIVE,
+    KIND_MATERIAL,
+    KIND_ONE_TIME_COST,
+    KIND_SUBTOTAL,
+    apply_position_kinds,
+)
 from .extraction.price_parsing import footer_price_unit
 from .extraction.profiles import (
     InMemoryProfileStore,
@@ -453,6 +460,14 @@ class OfferImportService:
         # Belegsumme, Positionsnummernfolge, Preisgroessenordnung).  Sie laufen
         # vor ``renumber()``, weil selbst vergebene Nummern keine Aussage ueber
         # Luecken zulassen -- und vor der Konfidenz, die ihre Befunde braucht.
+        # Positionsarten einordnen: Einmalkosten (Werkzeug, Muster, Einricht),
+        # Zwischensummenzeilen und Alternativpositionen.  Das laeuft VOR den
+        # Kreuzpruefungen, weil diese die Einordnung brauchen: eine
+        # Zwischensummenzeile darf nicht in die Belegsumme, ein Werkzeugpreis
+        # nicht in den Preisvergleich.  Nichts wird verworfen -- die Zeilen
+        # bleiben erhalten und sind nur nicht vorausgewaehlt.
+        apply_position_kinds(offer)
+
         run_checks(offer)
         offer.renumber()
         apply_confidence(offer)
@@ -525,6 +540,28 @@ class OfferImportService:
         note = missing_header_note(offer)
         if note:
             offer.issues.add(Issue("header_incomplete", note, IssueSeverity.WARNING))
+
+        # Nicht vorausgewaehlte Sonderzeilen zusammenfassen.  Der Anwender
+        # soll auf einen Blick sehen, dass da noch etwas liegt -- sonst
+        # wundert er sich ueber leere Haken.
+        sonder = {
+            KIND_ONE_TIME_COST: "Einmalkosten",
+            KIND_ALTERNATIVE: "Alternativposition(en)",
+            KIND_SUBTOTAL: "Zwischensummenzeile(n)",
+        }
+        teile = []
+        for kind, wort in sonder.items():
+            anzahl = sum(1 for p in offer.positions
+                         if getattr(p, "position_kind", KIND_MATERIAL) == kind)
+            if anzahl:
+                teile.append(f"{anzahl} {wort}")
+        if teile:
+            offer.issues.add(Issue(
+                "special_positions",
+                "Nicht vorausgewaehlt: " + ", ".join(teile)
+                + ". Sie bleiben erhalten -- bitte anhaken, was uebernommen "
+                  "werden soll.",
+                IssueSeverity.INFO))
 
         uncertain = sum(1 for p in offer.positions if p.uncertain_fields)
         if uncertain:

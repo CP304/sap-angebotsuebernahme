@@ -157,6 +157,11 @@ _DATE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^(\d{1,2})[.](\d{1,2})[.](\d{4})$"), "dmy"),
     (re.compile(r"^(\d{1,2})[.](\d{1,2})[.](\d{2})$"), "dmy2"),
     (re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$"), "ymd"),
+    # "2026/8/18", "2026/08/18" -- in englischen Angeboten gaengig.  Ein
+    # vierstelliges Jahr VORNE ist eindeutig: es kann weder Tag noch Monat
+    # sein.  Deshalb steht dieses Muster vor "slash" (tt/mm gegen mm/tt),
+    # das ohne Zusatzwissen mehrdeutig bleibt -- hier wird nichts geraten.
+    (re.compile(r"^(\d{4})/(\d{1,2})/(\d{1,2})$"), "ymd"),
     (re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$"), "slash"),
     (re.compile(r"^(\d{1,2})-(\d{1,2})-(\d{4})$"), "dmy"),
     (re.compile(r"^(\d{4})(\d{2})(\d{2})$"), "ymd"),

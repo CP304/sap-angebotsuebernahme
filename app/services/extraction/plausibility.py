@@ -51,6 +51,9 @@ __all__ = [
     "check_document_total",
     "check_position_numbers",
     "check_price_outliers",
+    "counts_in_document_total",
+    "is_material_price",
+    "is_scale_row",
     "expected_line_total",
     "find_document_total",
     "position_value",
@@ -170,6 +173,30 @@ def position_value(position: OfferPosition) -> Decimal | None:
 def is_scale_row(position: OfferPosition) -> bool:
     """Ist diese Position nur eine Staffelstufe der Vorposition?"""
     return _SCALE_MARK in (position.remarks or "").lower()
+
+
+def counts_in_document_total(position: OfferPosition) -> bool:
+    """Darf diese Position in die Summe aller Positionen einfliessen?
+
+    Staffelstufen sind dieselbe Ware wie die Vorposition, Zwischensummen
+    wiederholen Betraege, und Alternativpositionen sind ein Entweder-oder --
+    alle drei wuerden die Belegsumme verfaelschen.  Einmalkosten dagegen
+    zaehlen mit: der Lieferant rechnet sie in seine Belegsumme ein.
+    """
+    from .position_kinds import counts_towards_document_total
+
+    return not is_scale_row(position) and counts_towards_document_total(position)
+
+
+def is_material_price(position: OfferPosition) -> bool:
+    """Traegt diese Position einen vergleichbaren *Material*preis?
+
+    Ein Werkzeugpreis von 8.500 EUR neben Drehteilen zu 12 EUR ist kein
+    Dezimaltrennerfehler -- er darf die Ausreisserpruefung nicht ausloesen.
+    """
+    from .position_kinds import counts_as_material_price
+
+    return counts_as_material_price(position)
 
 
 def position_label(position: OfferPosition) -> str:
@@ -327,8 +354,12 @@ def check_document_total(offer: Offer, text: str | None = None) -> list[str]:
 
     werte: list[Decimal] = []
     ohne_wert = 0
+    ausgeklammert = 0
     for position in offer.positions:
         if is_scale_row(position):
+            continue
+        if not counts_in_document_total(position):
+            ausgeklammert += 1
             continue
         wert = position_value(position)
         if wert is None:
@@ -377,6 +408,9 @@ def check_document_total(offer: Offer, text: str | None = None) -> list[str]:
     note = (f"Summe der {len(werte)} erkannten Positionen: {format_decimal(summe)}, "
             f"im Beleg steht {format_decimal(beleg_summe)} ('{label}') -- "
             f"Differenz {format_decimal(abs(differenz))}, {vermutung}.")
+    if ausgeklammert:
+        note += (f" ({ausgeklammert} Zwischensummen-/Alternativposition(en) "
+                 "wurden bewusst nicht mitgezaehlt.)")
     offer.issues.add(Issue(CODE_DOCUMENT_TOTAL_MISMATCH, note,
                            IssueSeverity.WARNING, blocking=False,
                            detail=f"Beschriftung im Beleg: {label}"))
@@ -431,6 +465,8 @@ def _number_groups(offer: Offer) -> dict[str, list[tuple[int, tuple[str, str]]]]
             continue        # selbst vergebene Nummern beweisen nichts
         if is_scale_row(position):
             continue
+        if getattr(position, "position_kind", "material") == "subtotal":
+            continue        # Summenzeilen tragen keine echte Positionsnummer
         text = normalize_whitespace(position.position_number)
         if not re.fullmatch(r"\d{1,6}", text):
             continue
@@ -524,7 +560,8 @@ def check_price_outliers(offer: Offer) -> list[str]:
     Korrigiert wird trotzdem nichts -- es koennte ja das teure Sonderteil sein.
     """
     kandidaten = [p for p in offer.positions
-                  if p.price is not None and not is_scale_row(p)]
+                  if p.price is not None and not is_scale_row(p)
+                  and is_material_price(p)]
     if len(kandidaten) < PRICE_OUTLIER_MIN_POSITIONS:
         return []
     werte = [Decimal(p.price) / _price_unit(p) for p in kandidaten]

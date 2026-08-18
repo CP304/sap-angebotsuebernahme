@@ -240,7 +240,9 @@ class ExtractionSettings:
     #: sein) -- deshalb entscheidet zusaetzlich der Inhalt der Spalte, siehe
     #: ``own_material_pattern`` weiter unten.
     column_aliases: dict[str, list[str]] = field(default_factory=lambda: {
-        "position_number": ["pos", "pos.", "position", "positionsnummer", "item", "lfd", "nr", "nr."],
+        "position_number": ["pos", "pos.", "position", "positionsnummer", "item", "lfd", "nr", "nr.",
+                            "pos.nr", "pos.nr.", "pos-nr", "pos nr", "posnr", "positions-nr",
+                            "positionsnr", "lfd. nr"],
         # -- UNSERE Materialnummer (so, wie der Lieferant sie nennt) --------
         "material_number": [
             # neutrale/eindeutige Beschriftungen
@@ -307,10 +309,18 @@ class ExtractionSettings:
         ],
         "description": ["bezeichnung", "beschreibung", "benennung", "text", "artikelbezeichnung",
                         "kurztext", "description", "material description"],
-        "quantity": ["menge", "anzahl", "stueckzahl", "stückzahl", "qty", "quantity", "bedarf"],
-        "uom": ["me", "einheit", "mengeneinheit", "meh", "uom", "unit", "verpackungseinheit"],
+        "quantity": ["menge", "anzahl", "stueckzahl", "stückzahl", "qty", "quantity", "bedarf",
+                     "bestellmenge", "liefermenge", "abnahmemenge"],
+        "uom": ["me", "einheit", "mengeneinheit", "meh", "uom", "unit", "verpackungseinheit",
+                # "WE" = Werteinheit/Verkaufseinheit auf deutschen Angeboten
+                "we", "werteinheit"],
         "price": ["preis", "ep", "einzelpreis", "netto", "nettopreis", "stueckpreis",
-                  "stückpreis", "preis/einheit", "unit price", "price", "vk", "ek-preis"],
+                  "stückpreis", "preis/einheit", "unit price", "price", "vk", "ek-preis",
+                  # Preis mit Bezugsgroesse in derselben Ueberschrift
+                  "ep/me", "e-preis", "preis/me", "preis je me", "preis je einheit",
+                  # ausgeschriebene Preisspalten der Lieferanten
+                  "artikelpreis", "artikelpreis in", "preis pro stck", "preis pro stueck",
+                  "preis in eur", "preis eur", "netto-preis", "nettoeinzelpreis"],
         "price_unit": ["preiseinheit", "pe", "peh", "per", "price unit", "je"],
         "currency": ["waehrung", "währung", "wkz", "currency", "curr"],
         "min_order_qty": ["mindestmenge", "mindestbestellmenge", "min. menge", "mbm",

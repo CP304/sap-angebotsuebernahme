@@ -273,15 +273,31 @@ def detect_delimiter(sample: str) -> str:
     except csv.Error:
         logger.debug("CSV-Sniffer ohne Ergebnis, es wird gezaehlt")
 
-    # Fallback: das Zeichen, das in den meisten Zeilen gleich oft vorkommt
+    # Fallback: das Zeichen, das in den meisten Zeilen gleich oft vorkommt.
+    #
+    # Wichtig sind hier NUR die Zeilen, in denen das Zeichen ueberhaupt
+    # vorkommt.  Die frueher benutzte Formel verglich gegen die *erste*
+    # Zeile -- und wenn die ein Briefkopf ohne Trennzeichen war ("Preisliste
+    # 2026"), gewann ausgerechnet das Zeichen, das nirgends steht: alle
+    # uebrigen Zeilen "stimmten" ja mit der Null der ersten Zeile ueberein.
+    # Bei deutschen Preislisten fiel damit die Wahl auf das Komma, worauf
+    # "2,95" zerfiel und die Tabelle ungetrennt blieb -- die Datei ergab
+    # null Positionen, ohne dass ein Trennzeichenproblem erkennbar war.
     lines = [line for line in head.splitlines() if line.strip()]
     best, best_score = ";", -1.0
     for candidate in _DELIMITERS:
-        counts = [line.count(candidate) for line in lines]
-        if not counts or max(counts) == 0:
+        counts = [line.count(candidate) for line in lines
+                  if line.count(candidate) > 0]
+        if not counts:
             continue
-        consistent = sum(1 for c in counts if c == counts[0])
-        score = consistent + max(counts) * 0.1
+        # Haeufigste Anzahl je Zeile: eine echte Tabelle hat in fast jeder
+        # Zeile gleich viele Trennzeichen.
+        haeufigste = max(set(counts), key=counts.count)
+        einheitlich = counts.count(haeufigste)
+        # Zeilen mit Treffer zaehlen doppelt, die Spaltenzahl schwach mit --
+        # so gewinnt ein Zeichen, das viele Zeilen gleichmaessig aufteilt,
+        # gegen eines, das nur in einer einzigen Zeile oft vorkommt.
+        score = einheitlich * 2 + haeufigste * 0.1
         if score > best_score:
             best, best_score = candidate, score
     return best

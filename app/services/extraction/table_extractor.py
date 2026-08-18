@@ -82,6 +82,14 @@ __all__ = [
 PSEUDO_TOTAL = "_total"
 PSEUDO_IGNORE = "_ignore"
 PSEUDO_ALT_PRICE = "_alternative_price"
+#: Liefertermin/-woche der Zeile.  Dafuer gibt es *kein* SAP-Feld in der
+#: Position; die Spalte wird trotzdem erkannt, damit sie die Zuordnung der
+#: Nachbarspalten nicht verschiebt.
+PSEUDO_DELIVERY = "_delivery_date"
+#: Zusatzangabe ohne SAP-Bezug (Werkstoff, Oberflaeche, Gewicht, Rahmenvertrag)
+PSEUDO_EXTRA = "_extra_info"
+#: Weitere Mengenspalte einer ueber Spalten verteilten Mengenstaffel
+PSEUDO_ALT_QTY = "_alternative_quantity"
 
 #: Zusatzaliase fuer Spalten, die nicht in eine Position gehoeren.
 #: Sie stehen bewusst vor den echten Feldern, damit "Gesamtpreis" nicht als
@@ -90,10 +98,21 @@ PSEUDO_ALIASES: dict[str, list[str]] = {
     PSEUDO_TOTAL: ["gesamt", "gesamtpreis", "gesamtwert", "gesamtbetrag", "summe",
                    "zeilensumme", "betrag", "wert", "total", "total price",
                    "amount", "net amount", "line total", "extended price",
-                   "positionswert", "gesamtsumme"],
+                   "positionswert", "gesamtsumme",
+                   # Kuerzel und Schreibweisen aus echten Angeboten
+                   "gp", "g-preis", "gesamt-preis", "poswert", "pos-wert",
+                   "summe in eur", "wert eur", "subtotal", "netto gesamt"],
     PSEUDO_IGNORE: ["rabatt", "discount", "nachlass", "mwst", "ust", "umsatzsteuer",
                     "steuer", "tax", "vat", "skonto", "zoll", "gewicht", "kg-preis",
-                    "bild", "foto", "status"],
+                    "bild", "foto", "status",
+                    # Rabattspalten kuerzen die Lieferanten gern extrem ab
+                    "rab", "rab.", "rabatt %", "prozent"],
+    PSEUDO_DELIVERY: ["l-termin", "liefertermin", "lieferdatum", "leistungsdatum",
+                      "lieferwoche", "kalenderwoche", "erwart. versanddatum",
+                      "versanddatum", "versandtermin", "termin",
+                      "delivery date", "delivery week", "ship date"],
+    PSEUDO_EXTRA: ["werkstoff", "oberflaeche", "nettogewicht", "rahmenvertrag",
+                   "bruttogewicht", "werkstoffnummer"],
 }
 
 #: Zeilen, die eine Summe/Steuer/Fracht ausweisen -- keine Position
@@ -132,6 +151,82 @@ _MATRIX_TIER_RE = re.compile(
     r"(?:stk\.?|st\.?|st(?:ue|ü)ck|pcs\.?|pc\.?|pieces|m|kg|l|set|paar)?\.?\s*$",
     re.I,
 )
+
+#: Durchnummerierte Mengenspalte einer Staffel ueber Spalten:
+#: "Menge1", "Menge 2", "Qty 3", "Anzahl 1"
+_NUMBERED_QTY_RE = re.compile(
+    r"^(?:menge|mengen|anzahl|stueckzahl|st(?:ue|ü)ckzahl|qty|quantity)\s*[-_]?\s*(\d{1,2})$",
+    re.I,
+)
+
+#: Preis mit Bezugsgroesse in einer Ueberschrift: "EP /ME", "Preis je ME",
+#: "Einzelpreis / Stk".  Massgeblich ist der PREIS -- die Mengeneinheit ist
+#: hier nur die Bezugsgroesse und darf die Spalte nicht an sich reissen.
+_PRICE_PER_UOM_RE = re.compile(
+    r"^(?:ep|e-preis|preis|einzelpreis|stueckpreis|nettopreis|netto|"
+    r"unit price|price|artikelpreis)"
+    r"\s*(?:/|je|pro|per)\s*"
+    r"(?:me|meh|einheit|stk|st|stueck|kg|m|ea|pc|pcs|unit|uom)\.?$",
+    re.I,
+)
+
+#: Bekannte Incoterm-Kuerzel (Incoterms 2010/2020 plus die alten Klassiker).
+#: Steht eines davon in einer Ueberschrift und zusaetzlich eine Waehrung in
+#: Klammern, dann ist diese Spalte der Preis -- so beschriften viele
+#: Lieferanten ihre Preisspalte ("DDP 48336 Sassenberg (EUR/ST)").
+INCOTERMS = ("EXW", "FCA", "FAS", "FOB", "CFR", "CIF", "CPT", "CIP", "DAP",
+             "DPU", "DDP", "DDU", "DAF", "DES", "DEQ", "DAT")
+
+_INCOTERM_RE = re.compile(r"(?:^|[^A-Za-z])(" + "|".join(INCOTERMS) + r")(?:$|[^A-Za-z])")
+
+#: Klammerinhalt einer Incoterm-Preisspalte: "(EUR/ST)", "(EUR)", "(EUR / Stk)"
+_BRACKET_RE = re.compile(r"[\(\[]([^\)\]]*)[\)\]]")
+
+#: Bindestrich zwischen zwei Kleinbuchstaben ohne Leerzeichen -- so bricht ein
+#: PDF-Spaltenkopf um ("Liefer-woche", "Ober-flaeche", "Preis-einheit").  Vor
+#: oder nach einem Grossbuchstaben bzw. einem Punkt bleibt der Strich stehen,
+#: denn dort ist er echt ("E-Preis", "L-Termin", "Art.-Nr.").
+_SOFT_HYPHEN_RE = re.compile(r"(?<=[a-zaeoeuessäöüß])-(?=[a-zäöüß])")
+
+
+def dehyphenate_header(text: str) -> str:
+    """Umbruch-Bindestrich eines Spaltenkopfes entfernen.
+
+    ``"Liefer-woche" -> "Lieferwoche"``, ``"E-Preis"`` bleibt unveraendert.
+    Liefert den Text unveraendert zurueck, wenn nichts zu tun ist.
+    """
+    if "-" not in text:
+        return text
+    return _SOFT_HYPHEN_RE.sub("", text)
+
+
+def incoterm_price_header(text: str) -> tuple[str, str, str] | None:
+    """Incoterm-Preisspalte erkennen: ``(Incoterm, Waehrung, Mengeneinheit)``.
+
+    Verlangt werden *beide* Merkmale -- ein Incoterm-Kuerzel UND eine Waehrung
+    in Klammern.  Nur das Kuerzel allein waere zu wenig: "DDP" kann auch in
+    einer Lieferbedingungsspalte ohne Preis stehen.
+    """
+    raw = normalize_whitespace(text)
+    if not raw:
+        return None
+    match = _INCOTERM_RE.search(raw.upper())
+    if not match:
+        return None
+    for inhalt in _BRACKET_RE.findall(raw):
+        teile = [t for t in re.split(r"[/ ]+", inhalt) if t]
+        currency = ""
+        uom = ""
+        for teil in teile:
+            found = detect_currency(teil)
+            if found and not currency:
+                currency = found
+            elif not uom and _looks_like_uom(teil):
+                uom = normalize_uom(teil)
+        if currency:
+            return match.group(1), currency, uom
+    return None
+
 
 #: Dekorierte Zwischenueberschrift ("-- Gruppe B --", "=== Dichtungen ===")
 _GROUP_DECOR_RE = re.compile(r"^\s*[-=~*#>]{2,}\s*\S.*$|^.*\S\s*[-=~*#<]{2,}\s*$")
@@ -216,6 +311,13 @@ class TableAnalysis:
     #: Mengen-Matrix: Spaltenindex -> Ab-Menge ("ab 100 | ab 500 | ab 1000").
     #: Jede dieser Spalten traegt Preise, die zu Staffelpositionen werden.
     tier_columns: dict[int, Decimal] = field(default_factory=dict)
+    #: Incoterm, der in der Preisueberschrift steht ("DDP", "FCA", "EXW").
+    #: Er gehoert zum Kopf des Angebots, nicht in die einzelne Position.
+    incoterm: str = ""
+    #: Waehrung/Mengeneinheit, die nur in der Preisueberschrift stehen
+    #: ("DDP 48336 Sassenberg (EUR/ST)") und fuer alle Zeilen gelten.
+    header_currency: str = ""
+    header_uom: str = ""
 
     @property
     def mapped_fields(self) -> set[str]:
@@ -521,7 +623,35 @@ class TableExtractor:
         self._resolve_material_columns(analysis)
         self._resolve_date_order(analysis)
         self._resolve_header_price_unit(analysis)
+        self._resolve_incoterm_column(analysis)
         return analysis
+
+    def _resolve_incoterm_column(self, analysis: TableAnalysis) -> None:
+        """Incoterm-Preisspalte auswerten ("DDP 48336 Sassenberg (EUR/ST)").
+
+        Waehrung und Mengeneinheit aus der Ueberschrift gelten fuer die ganze
+        Tabelle, der Incoterm selbst ist eine Kopfangabe des Angebots.  Die
+        Spalte bleibt bewusst als *unsicher* markiert -- die Ueberschrift ist
+        eine Lieferbedingung, keine saubere Preisbeschriftung.
+        """
+        for assignment in analysis.columns.values():
+            if assignment.field != "price" or not assignment.header:
+                continue
+            treffer = incoterm_price_header(assignment.header)
+            if treffer is None:
+                continue
+            incoterm, currency, uom = treffer
+            analysis.incoterm = incoterm
+            analysis.header_currency = currency
+            analysis.header_uom = uom
+            assignment.forced_origin = FieldOrigin.UNCERTAIN
+            zusatz = f", Mengeneinheit {uom}" if uom else ""
+            analysis.notes.append(
+                f"Die Spalte '{assignment.header}' wird als Preisspalte "
+                f"gefuehrt: sie nennt die Lieferbedingung {incoterm} und die "
+                f"Waehrung {currency}{zusatz}. Waehrung und Einheit werden fuer "
+                "alle Zeilen dieser Tabelle uebernommen -- bitte pruefen.")
+            return
 
     def _resolve_header_price_unit(self, analysis: TableAnalysis) -> None:
         """Bezugsmenge aus der Preisueberschrift ziehen ("Preis EUR/100 St").
@@ -794,7 +924,68 @@ class TableExtractor:
 
     # ------------------------------------------------------------------
     def _match_header_text(self, text: str) -> tuple[str, float, str]:
-        """Ueberschrift -> (Feld, Konfidenz, Begruendung)."""
+        """Ueberschrift -> (Feld, Konfidenz, Begruendung).
+
+        Zusaetzlich zum reinen Aliasvergleich wird die Ueberschrift in einer
+        zweiten Schreibweise geprueft: In PDFs bricht ein Spaltenkopf um und
+        hinterlaesst einen Bindestrich ("Liefer-woche", "Preis-einheit").  Es
+        werden deshalb *beide* Varianten bewertet und die mit der hoeheren
+        Konfidenz genommen -- echte Bindestrich-Woerter ("E-Preis",
+        "L-Termin", "Art.-Nr.") bleiben dabei unangetastet, weil der Strich
+        dort neben einem Grossbuchstaben bzw. einem Punkt steht.
+        """
+        raw = normalize_whitespace(text)
+
+        # 0. Sonderfaelle, die die Normalisierung nicht ueberleben oder die
+        #    aus einer einzelnen Ueberschrift eindeutig hervorgehen.
+        direct = self._direct_header_match(raw)
+        if direct is not None:
+            return direct
+
+        best = self._match_header_variant(raw)
+        entfaltet = dehyphenate_header(raw)
+        if entfaltet != raw:
+            other = self._match_header_variant(entfaltet)
+            if other[1] > best[1]:
+                best = (other[0], other[1],
+                        f"{other[2]} (Trennstrich der Kopfzeile zusammengefuehrt)")
+        return best
+
+    def _direct_header_match(self, raw: str) -> tuple[str, float, str] | None:
+        """Ueberschriften, die der Aliasvergleich nicht erreichen kann."""
+        text = raw.strip()
+        if not text:
+            return None
+        # "%" und ein einzelnes "P" sind Rabattspalten.  "%" verliert bei der
+        # Normalisierung sein einziges Zeichen, "P" waere als Alias viel zu
+        # gefaehrlich -- beides deshalb hier ausdruecklich.
+        if text in ("%", "% ", "P", "p", "Rab", "Rab.", "rab", "rab."):
+            return PSEUDO_IGNORE, 0.9, "Rabattspalte (ohne SAP-Bezug)"
+        # Ein alleinstehendes "pro" trennt in Koepfen wie
+        # "Artikelpreis in | pro | WE" nur den Preis von seiner Bezugsgroesse.
+        # Als Alias waere "pro" viel zu gierig ("Netto-gewicht pro Stck.").
+        if text.lower() in ("pro", "je", "/"):
+            return "price_unit", 0.9, "Bezugsgroesse des Preises"
+        # "EP /ME", "EP/ME", "Preis/ME", "Preis je ME": das ist der PREIS je
+        # Mengeneinheit -- nicht die Mengeneinheit und nicht die Preiseinheit.
+        # Ohne diese Regel gewinnt das Kuerzel "ME" und die Preisspalte geht
+        # verloren; genau das ist bei echten Angeboten passiert.
+        if _PRICE_PER_UOM_RE.match(_normalize_header(text)):
+            return ("price", 0.95,
+                    f"Preis je Mengeneinheit ('{text}')")
+        # Incoterm-Preisspalte: "DDP 48336 Sassenberg (EUR/ST)"
+        treffer = incoterm_price_header(text)
+        if treffer is not None:
+            incoterm, currency, uom = treffer
+            teile = f"Waehrung {currency}"
+            if uom:
+                teile += f", Mengeneinheit {uom}"
+            return ("price", 0.7,
+                    f"Incoterm-Preisspalte '{incoterm}' ({teile}) -- bitte pruefen")
+        return None
+
+    def _match_header_variant(self, text: str) -> tuple[str, float, str]:
+        """Eine Schreibweise gegen Profil und Aliaskatalog bewerten."""
         header = _normalize_header(text)
         if not header:
             return "", 0.0, ""
@@ -820,6 +1011,72 @@ class TableExtractor:
         if best_confidence >= 0.55:
             return best_field, best_confidence, best_reason
         return "", 0.0, ""
+
+    # ------------------------------------------------------------------
+    def _mark_numbered_quantity_columns(self, analysis: TableAnalysis,
+                                        headers: list[str],
+                                        assigned: dict[int, ColumnAssignment],
+                                        used: dict[str, int], width: int) -> None:
+        """Durchnummerierte Mengenspalten ("Menge1 | Menge2 | Menge3") klaeren.
+
+        Mehrere gleichartige Mengenspalten sind eine Mengenstaffel ueber die
+        Spalten -- KEIN Zuordnungskonflikt.  Welche der Mengen der Anwender
+        bestellen will, steht aber nirgends im Beleg.  Deshalb wird hier
+        bewusst NICHT geraten: die erste Spalte traegt die Menge, alle
+        weiteren werden als solche erkannt, aber nicht uebernommen, und der
+        Anwender bekommt einen Klartext-Befund.  Ebenso werden die dazu
+        gehoerenden mehrfachen Einheitenspalten ("ME | ME | ME") entschaerft,
+        damit sie nicht als widersprechende Zuordnungen auftauchen.
+        """
+        if analysis.tier_columns:
+            return              # eine echte Ab-Mengen-Matrix ist genauer
+        nummeriert: list[tuple[int, int]] = []      # (Nummer, Spaltenindex)
+        for index in range(width):
+            if index in assigned:
+                continue
+            text = normalize_whitespace(headers[index]) if index < len(headers) else ""
+            match = _NUMBERED_QTY_RE.match(text)
+            if match:
+                nummeriert.append((int(match.group(1)), index))
+        if len(nummeriert) < 2:
+            return
+
+        nummeriert.sort()
+        _, erste = nummeriert[0]
+        assigned[erste] = ColumnAssignment(
+            erste, "quantity", normalize_whitespace(headers[erste]), 0.7,
+            "erste von mehreren durchnummerierten Mengenspalten",
+            forced_origin=FieldOrigin.UNCERTAIN)
+        used["quantity"] = erste
+        for _nummer, index in nummeriert[1:]:
+            assigned[index] = ColumnAssignment(
+                index, PSEUDO_ALT_QTY, normalize_whitespace(headers[index]), 0.7,
+                "weitere Mengenspalte einer Mengenstaffel")
+        beschriftungen = ", ".join(f"'{normalize_whitespace(headers[i])}'"
+                                   for _n, i in nummeriert)
+        analysis.notes.append(
+            f"Mehrere Mengenspalten erkannt ({beschriftungen}) -- der Beleg "
+            "nennt eine Mengenstaffel ueber die Spalten. Uebernommen wird nur "
+            f"die erste Spalte ('{normalize_whitespace(headers[erste])}'), "
+            "bitte pruefen, welche Menge gelten soll.")
+
+        # Die zu diesen Mengen gehoerenden Einheitenspalten stehen mehrfach mit
+        # demselben Kopf ("ME | ME | ME").  Die erste gilt, die weiteren werden
+        # als Dublette gefuehrt -- sonst waeren es scheinbare Widersprueche.
+        gesehen: dict[str, int] = {}
+        for index in range(width):
+            if index in assigned:
+                continue
+            key = _normalize_header(headers[index]) if index < len(headers) else ""
+            if not key:
+                continue
+            if key in gesehen:
+                assigned[index] = ColumnAssignment(
+                    index, PSEUDO_ALT_QTY, normalize_whitespace(headers[index]),
+                    0.7, "Dublette der Spalte "
+                         f"{gesehen[key] + 1} ('{normalize_whitespace(headers[index])}')")
+            else:
+                gesehen[key] = index
 
     # ------------------------------------------------------------------
     def _assign_columns(self, analysis: TableAnalysis) -> None:
@@ -856,6 +1113,8 @@ class TableExtractor:
                 "Preisspalten mit Ab-Mengen ("
                 + ", ".join(f"ab {q}" for q in sorted(tier_candidates.values()))
                 + ") -- je Zeile entstehen Staffelpositionen.")
+
+        self._mark_numbered_quantity_columns(analysis, headers, assigned, used, width)
 
         candidates: dict[int, tuple[str, float, str]] = {}
         for index in range(width):
@@ -1186,7 +1445,8 @@ class TableExtractor:
             if not raw:
                 continue
             field_name = assignment.field
-            if field_name in (PSEUDO_IGNORE, PSEUDO_TIER):
+            if field_name in (PSEUDO_IGNORE, PSEUDO_TIER, PSEUDO_DELIVERY,
+                              PSEUDO_EXTRA, PSEUDO_ALT_QTY):
                 continue
             if (field_name in ("material_number", "vendor_material_number")
                     and row_index >= 0 and (row_index, index) in merged_cells):
@@ -1251,6 +1511,11 @@ class TableExtractor:
                 currency = detect_currency(raw)
                 if currency:
                     values.setdefault("_extra_currency", currency)
+                elif analysis.header_currency:
+                    # Waehrung steht nur im Spaltenkopf ("... (EUR/ST)")
+                    values.setdefault("_extra_currency", analysis.header_currency)
+                if analysis.header_uom:
+                    values.setdefault("_extra_uom", analysis.header_uom)
             values[field_name] = parsed
             values.setdefault("_raw", {})[field_name] = raw
             if field_name in _COUNTING_FIELDS:

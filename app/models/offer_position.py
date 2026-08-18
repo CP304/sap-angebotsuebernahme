@@ -81,6 +81,16 @@ class OfferPosition:
     #: bleibt der Wert ``None`` -- dann findet auch keine Pruefung statt.
     line_total: Decimal | None = None
 
+    #: Art der Position -- siehe ``app.services.extraction.position_kinds``:
+    #: ``"material"`` (Standard), ``"one_time_cost"`` (Werkzeug-, Muster-,
+    #: Einrichtkosten), ``"subtotal"`` (Zwischensummenzeile) oder
+    #: ``"alternative"`` (Alternativ-/Optionalposition).  Nur eine
+    #: Materialposition traegt einen Materialpreis; alles andere wird bewusst
+    #: nicht vorausgewaehlt, aber auch nie verworfen.  Bewusst ein ``str`` und
+    #: kein Enum: das Datenmodell soll nicht von der Erkennungsschicht
+    #: abhaengen, und aeltere Historieneintraege bleiben lesbar.
+    position_kind: str = "material"
+
     #: Erkannte Zusatzkonditionen (``ConditionCandidate`` aus
     #: ``app.services.extraction.condition_rules``): Rabatte, Zu- und
     #: Abschlaege, Frachtkosten, Skonto.  Sie werden bewusst NICHT in
@@ -346,6 +356,7 @@ class OfferPosition:
             "uid": self.uid,
             "source_kind": self.source_kind.value,
             "source_hint": self.source_hint,
+            "position_kind": self.position_kind,
             "position_number": self.position_number,
             "material_number": self.material_number,
             "vendor_material_number": self.vendor_material_number,
