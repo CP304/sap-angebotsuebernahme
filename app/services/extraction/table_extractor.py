@@ -159,6 +159,19 @@ _NUMBERED_QTY_RE = re.compile(
     re.I,
 )
 
+#: Felder, bei denen ein unverstandenes Kuerzel im Kopf die Bedeutung
+#: verschieben kann.  Bei einer Bezeichnungsspalte ist ein Kuerzel egal --
+#: bei Menge und Preis nicht.
+_QUALIFIER_RELEVANT_FIELDS = frozenset({"quantity", "price", "price_unit", "uom"})
+
+#: Kuerzel, die in einem Spaltenkopf nichts verschieben: Einheiten,
+#: Waehrungen und die gaengigen Preis-/Mengenabkuerzungen selbst.
+_HARMLOSE_KUERZEL = frozenset({
+    "me", "meh", "pe", "we", "ep", "gp", "vk", "ek", "st", "stk", "kg", "m",
+    "mm", "cm", "l", "ml", "t", "pc", "pcs", "ea", "uom", "qty", "eur", "usd",
+    "chf", "gbp", "pln", "czk", "sek", "dkk", "nok", "netto", "ust", "mwst",
+})
+
 #: Preis mit Bezugsgroesse in einer Ueberschrift: "EP /ME", "Preis je ME",
 #: "Einzelpreis / Stk".  Massgeblich ist der PREIS -- die Mengeneinheit ist
 #: hier nur die Bezugsgroesse und darf die Spalte nicht an sich reissen.
@@ -951,6 +964,37 @@ class TableExtractor:
                         f"{other[2]} (Trennstrich der Kopfzeile zusammengefuehrt)")
         return best
 
+    def unexplained_qualifier(self, header: str, field_name: str) -> str:
+        """Unerklaerter Zusatz in einem sonst erkannten Spaltenkopf.
+
+        Aus der Praxis: eine Mengenspalte heisst ``Menge RS``.  ``Menge``
+        ist eindeutig, ``RS`` nicht -- es koennte "Rahmenspezifikation"
+        heissen und dann eine Kontraktmenge statt einer Bestellmenge
+        bezeichnen.  Das ist ein Unterschied, den niemand am Zahlenwert
+        erkennt.
+
+        Die Spalte wird deshalb weiter uebernommen (sie einfach zu
+        verwerfen waere schlimmer), aber als unsicher markiert.  Gelb
+        heisst hier: "gelesen, aber jemand sollte einmal hinsehen".
+
+        Gemeldet werden nur kurze Grossbuchstaben-Kuerzel.  Ausgeschrieben
+        Erklaerendes (``Menge gesamt``) ist harmlos, und bekannte
+        Einheiten- oder Waehrungskuerzel sind es ebenfalls.
+        """
+        if field_name not in _QUALIFIER_RELEVANT_FIELDS:
+            return ""
+        treffer = []
+        for wort in re.split(r"[\s/,()\[\]]+", header or ""):
+            wort = wort.strip(".-:")
+            if not (2 <= len(wort) <= 3):
+                continue
+            if not wort.isupper() or not wort.isalpha():
+                continue
+            if wort.lower() in _HARMLOSE_KUERZEL:
+                continue
+            treffer.append(wort)
+        return treffer[0] if treffer else ""
+
     def _direct_header_match(self, raw: str) -> tuple[str, float, str] | None:
         """Ueberschriften, die der Aliasvergleich nicht erreichen kann."""
         text = raw.strip()
@@ -1153,9 +1197,17 @@ class TableExtractor:
                                                        header_text, confidence,
                                                        "Mehrdeutigkeit")
                 continue
-            assigned[index] = ColumnAssignment(index, field_name, header_text,
-                                               confidence, reason)
+            kuerzel = self.unexplained_qualifier(header_text, field_name)
+            assigned[index] = ColumnAssignment(
+                index, field_name, header_text, confidence, reason,
+                forced_origin=FieldOrigin.UNCERTAIN if kuerzel else None)
             used[field_name] = index
+            if kuerzel:
+                analysis.notes.append(
+                    f"Spalte '{header_text}' wurde als {field_name} uebernommen, "
+                    f"aber das Kuerzel '{kuerzel}' ist unbekannt -- es koennte die "
+                    "Bedeutung veraendern (z. B. eine Rahmen- statt einer "
+                    "Bestellmenge). Die Werte sind deshalb als unsicher markiert.")
 
         self._assign_by_type(analysis, assigned, used, headers)
         analysis.columns = dict(sorted(assigned.items()))

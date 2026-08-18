@@ -28,6 +28,7 @@ from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QMenu, QTableView
 
 from ..models.enums import FieldOrigin, InfoRecordAction, PositionStatus, SourceListAction
+from ..services.extraction.position_kinds import KIND_LABELS
 from ..models.offer import Offer
 from ..models.offer_position import OfferPosition
 from ..utils.parsing import (
@@ -292,6 +293,14 @@ class OfferTableModel(QAbstractTableModel):
 
         if spec.kind in ("check",):
             return None
+        if (key == "description" and not editing
+                and getattr(position, "position_kind", "material") != "material"):
+            # Nicht nur Farbe: auf einem Ausdruck und bei Farbsehschwaeche
+            # waere die blaue Zeile unsichtbar.  Beim BEARBEITEN bleibt der
+            # reine Text stehen -- sonst schriebe der Anwender das Kuerzel
+            # beim naechsten Speichern mit in die Bezeichnung.
+            art = KIND_LABELS.get(position.position_kind, position.position_kind)
+            return f"[{art}] {position.description or ''}".strip()
         if spec.kind == "actions":
             # Sammelspalte: nur die tatsaechlich geplanten Aktionen anzeigen
             aktiv = [kuerzel for feld, kuerzel in ACTION_BADGES
@@ -392,6 +401,12 @@ class OfferTableModel(QAbstractTableModel):
         # Unsicher erkannte Felder deutlich hervorheben
         if position.field_origins.get(spec.key) is FieldOrigin.UNCERTAIN:
             return QBrush(QColor(Colors.AMBER_BG))
+        # Sonderpositionen (Einmalkosten, Alternativen, Zwischensummen) als
+        # ganze Zeile abheben.  Der leere Haken allein genuegt nicht: in einem
+        # Angebot mit vierzig Zeilen faellt eine fehlende Markierung nicht auf
+        # -- und ausgerechnet dort ist der Fehler am teuersten.
+        if getattr(position, "position_kind", "material") != "material":
+            return QBrush(QColor(Colors.BLUE_BG))
         if spec.key == "status":
             return QBrush(QColor(STATUS_STYLE.get(position.status, ("", Colors.GREY_BG, ""))[1]))
         if position.status is PositionStatus.ERROR and spec.key in (
@@ -413,6 +428,10 @@ class OfferTableModel(QAbstractTableModel):
 
     def _tooltip(self, position: OfferPosition, spec: ColumnSpec) -> str:
         parts: list[str] = []
+        art = getattr(position, "position_kind", "material")
+        if art != "material":
+            parts.append(f"{KIND_LABELS.get(art, art)} -- "
+                         "nicht vorausgewaehlt, bitte pruefen")
         origin = position.field_origins.get(spec.key)
         if origin is not None:
             parts.append(f"Herkunft: {origin.label}")
@@ -613,6 +632,7 @@ class OfferFilterProxy(QSortFilterProxyModel):
         self._status_filter: set[PositionStatus] = set()
         self._only_changed = False
         self._only_selected = False
+        self._only_special = False
         self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
 
     def _refresh(self) -> None:
@@ -639,6 +659,16 @@ class OfferFilterProxy(QSortFilterProxyModel):
         self._only_selected = active
         self._refresh()
 
+    def set_only_special(self, active: bool) -> None:
+        """Nur Sonderpositionen zeigen (Einmalkosten, Alternativen, Summen).
+
+        Bei einem Angebot mit vielen Zeilen ist das der schnellste Weg, die
+        Entscheidungen abzuarbeiten, die das Werkzeug bewusst dem Anwender
+        ueberlassen hat.
+        """
+        self._only_special = active
+        self._refresh()
+
     def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:  # noqa: N802
         model = self.sourceModel()
         if not isinstance(model, OfferTableModel):
@@ -651,6 +681,9 @@ class OfferFilterProxy(QSortFilterProxyModel):
         if self._only_changed and not position.has_changes:
             return False
         if self._only_selected and not position.selected:
+            return False
+        if (self._only_special
+                and getattr(position, "position_kind", "material") == "material"):
             return False
         if self._search:
             haystack = " ".join(str(x) for x in (

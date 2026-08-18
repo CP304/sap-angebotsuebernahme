@@ -548,6 +548,14 @@ class MainWindow(QMainWindow):
         status_aktion.setDefaultWidget(self.status_filter)
         filter_menu.addAction(status_aktion)
 
+        self.only_special_action = QAction("Nur Sonderpositionen", self)
+        self.only_special_action.setCheckable(True)
+        self.only_special_action.setToolTip(
+            "Einmalkosten, Alternativpositionen und Zwischensummen -- also "
+            "genau die Zeilen, ueber die Sie entscheiden muessen")
+        self.only_special_action.toggled.connect(self.proxy.set_only_special)
+        filter_menu.addAction(self.only_special_action)
+
         self.only_changed_action = QAction("Nur mit Aenderung", self)
         self.only_changed_action.setCheckable(True)
         self.only_changed_action.toggled.connect(self.proxy.set_only_changed)
