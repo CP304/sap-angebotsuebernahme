@@ -139,10 +139,13 @@ class MainWindow(QMainWindow):
         from .diagnosis_view import DiagnosisView
         self.diagnosis_view = DiagnosisView(self.settings)
 
+        from .vbs_importer import VbsImporterWidget
+        self.vbs_importer = VbsImporterWidget(self.settings)
+
         self._admin_pages = [
             ("Historie", self.history_view),
             ("Zuordnungen", self.mapping_view),
-            ("SAP-Feld-IDs", self.selector_view),
+            ("SAP Feld-ID Zuordnung", self.vbs_importer),
             ("Einstellungen", self.settings_view),
             ("Diagnose", self.diagnosis_view),
             ("Protokoll", self.log_view),

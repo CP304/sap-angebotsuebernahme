@@ -647,6 +647,10 @@ class Settings:
     log_path: str = ""
     selectors_path: str = ""
 
+    #: SAP GUI Scripting: Zuordnung von Feld-IDs zu Feldnamen.
+    #: Wird durch die VBS-Import-Maske gefuellt; Format: {"wnd[0]/usr/...": "price", ...}
+    sap_field_ids: dict[str, str] = field(default_factory=dict)
+
     # ------------------------------------------------------------------
     # Pfade
     # ------------------------------------------------------------------
