@@ -65,7 +65,16 @@ def make_settings(dry_run: bool = False) -> Settings:
 
 
 def make_gateway(dry_run: bool = False) -> SapGateway:
-    return SapGateway(make_settings(dry_run))
+    """Frisches Testsystem.
+
+    Alle Suiten teilen sich dasselbe SAP_ANGEBOT_HOME und damit denselben
+    Mock-Bestand auf der Platte.  Ohne Zuruecksetzen haengt das Ergebnis
+    davon ab, welcher Test vorher lief -- ein Test, der nur manchmal gruen
+    ist, ist wertlos.
+    """
+    gateway = SapGateway(make_settings(dry_run))
+    gateway.reset_mock_data()
+    return gateway
 
 
 def make_context(gateway: SapGateway) -> WriteContext:
@@ -147,17 +156,21 @@ class VendorWriteTests(unittest.TestCase):
     def setUp(self) -> None:
         self.gateway = make_gateway()
 
-    def test_neuanlage_erfolgreich(self) -> None:
-        plan = make_plan()
-        result = self.gateway.vendors.write(plan, make_context(self.gateway))
-        self.assertEqual(result.state, ResultState.SUCCESS)
-        self.assertTrue(result.document_number)
-        self.assertTrue(plan.document_number)
+    def test_neuanlage_wird_abgelehnt(self) -> None:
+        """Lieferanten werden hier gepflegt, nie angelegt.
 
-        gelesen = self.gateway.vendors.read(result.document_number)
-        self.assertTrue(gelesen.exists)
-        self.assertEqual(gelesen.name, "Neu Testlieferant GmbH")
-        self.assertEqual(gelesen.city, "Musterstadt")
+        Eine Neuanlage ist ein kontrollierter Vorgang (Dublettenpruefung,
+        Compliance, Bankdaten, Kontengruppe, Freigabe).  Ein Werkzeug, das
+        nebenbei Preise pflegt, hat dabei nichts verloren.
+        """
+        vorher = dict(self.gateway.mock_system.vendors)
+        plan = make_plan()          # ohne existing_vendor_number
+        result = self.gateway.vendors.write(plan, make_context(self.gateway))
+        self.assertEqual(result.state, ResultState.FAILED)
+        self.assertIn("Neuanlage", result.message)
+        self.assertFalse(result.document_number)
+        # Es darf sich nichts im Bestand geaendert haben
+        self.assertEqual(vorher, self.gateway.mock_system.vendors)
 
     def test_aenderung_erfolgreich(self) -> None:
         plan = make_plan(existing_vendor_number="0000100234",
@@ -171,20 +184,23 @@ class VendorWriteTests(unittest.TestCase):
         self.assertEqual(gelesen.city, "Bielefeld-Neu")
 
     def test_fehlender_name_blockiert(self) -> None:
-        plan = make_plan(name="")
+        plan = make_plan(existing_vendor_number="0000100234", name="")
         result = self.gateway.vendors.write(plan, make_context(self.gateway))
         self.assertEqual(result.state, ResultState.FAILED)
         self.assertIn("Name", result.message)
 
     def test_fehlendes_land_blockiert(self) -> None:
-        plan = make_plan(country="")
+        plan = make_plan(existing_vendor_number="0000100234",
+                         name="Muster Dichtungstechnik GmbH", country="")
         result = self.gateway.vendors.write(plan, make_context(self.gateway))
         self.assertEqual(result.state, ResultState.FAILED)
         self.assertIn("Land", result.message)
 
     def test_dry_run_schreibt_nichts(self) -> None:
         gateway = make_gateway(dry_run=True)
-        plan = make_plan()
+        plan = make_plan(existing_vendor_number="0000100234",
+                         name="Muster Dichtungstechnik GmbH",
+                         city="Irgendwo-Anders")
         vorher = dict(gateway.mock_system.vendors)
         result = gateway.vendors.write(plan, make_context(gateway))
         self.assertEqual(result.state, ResultState.SIMULATED)
@@ -207,7 +223,9 @@ class VendorWriteTests(unittest.TestCase):
         self.assertEqual(result.state, ResultState.FAILED)
 
     def test_ruecklese_pruefung_erfolgreich(self) -> None:
-        plan = make_plan()
+        plan = make_plan(existing_vendor_number="0000100234",
+                         name="Muster Dichtungstechnik GmbH",
+                         city="Bielefeld-Geprueft")
         result = self.gateway.vendors.write(plan, make_context(self.gateway))
         self.assertTrue(any("Ruecklese-Pruefung" in m for m in result.sap_messages))
 
@@ -227,12 +245,16 @@ class VendorWriteTests(unittest.TestCase):
         ok, meldungen = verify_vendor_master_write(record, plan)
         self.assertFalse(ok)
 
-    def test_neuanlage_vergibt_neue_nummer(self) -> None:
-        plan1 = make_plan(name="Erster Neuer GmbH")
-        plan2 = make_plan(name="Zweiter Neuer GmbH")
-        result1 = self.gateway.vendors.write(plan1, make_context(self.gateway))
-        result2 = self.gateway.vendors.write(plan2, make_context(self.gateway))
-        self.assertNotEqual(result1.document_number, result2.document_number)
+    def test_aenderung_legt_keinen_neuen_satz_an(self) -> None:
+        """Zweimal aendern darf keinen zweiten Lieferanten erzeugen."""
+        anzahl_vorher = len(self.gateway.mock_system.vendors)
+        for ort in ("Bielefeld-A", "Bielefeld-B"):
+            plan = make_plan(existing_vendor_number="0000100234",
+                             name="Muster Dichtungstechnik GmbH", city=ort)
+            result = self.gateway.vendors.write(plan, make_context(self.gateway))
+            self.assertEqual(result.state, ResultState.SUCCESS)
+        self.assertEqual(anzahl_vorher, len(self.gateway.mock_system.vendors))
+        self.assertEqual(self.gateway.vendors.read("0000100234").city, "Bielefeld-B")
 
     def test_alpha_konvertierung_bei_aenderung(self) -> None:
         plan = make_plan(existing_vendor_number="100234",
@@ -315,8 +337,13 @@ class VendorMasterServiceTests(unittest.TestCase):
         self.assertIn("Land", self.service.missing_fields(plan))
 
     def test_missing_fields_leer_wenn_vollstaendig(self) -> None:
-        plan = make_plan()
+        plan = make_plan(existing_vendor_number="0000100234")
         self.assertEqual(self.service.missing_fields(plan), [])
+
+    def test_missing_fields_meldet_fehlende_lieferantennummer(self) -> None:
+        """Ohne zugeordneten Lieferanten gibt es nichts zu pflegen."""
+        fehlend = self.service.missing_fields(make_plan())
+        self.assertTrue(any("Lieferantennummer" in f for f in fehlend))
 
     def test_create_or_update_blockiert_bei_fehlenden_feldern(self) -> None:
         plan = make_plan(name="")
@@ -324,11 +351,13 @@ class VendorMasterServiceTests(unittest.TestCase):
         self.assertEqual(result.state, ResultState.FAILED)
 
     def test_create_or_update_reicht_an_gateway_durch(self) -> None:
-        plan = make_plan(name="Durchgereicht GmbH")
+        plan = make_plan(existing_vendor_number="0000100234",
+                         name="Muster Dichtungstechnik GmbH",
+                         city="Durchgereicht")
         result = self.service.create_or_update(plan, make_context(self.gateway))
         self.assertEqual(result.state, ResultState.SUCCESS)
-        gelesen = self.gateway.vendors.read(result.document_number)
-        self.assertEqual(gelesen.name, "Durchgereicht GmbH")
+        gelesen = self.gateway.vendors.read("0000100234")
+        self.assertEqual(gelesen.city, "Durchgereicht")
 
 
 # ---------------------------------------------------------------------------
@@ -341,13 +370,13 @@ class VendorGuiDialogTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = _application()
 
-    def test_create_button_sichtbar_ohne_treffer(self) -> None:
-        dialog = VendorAssignmentDialog("Neuer Lieferant", "", [], "")
-        self.assertFalse(dialog.create_button.isHidden())
-        self.assertTrue(dialog.create_button.isEnabled())
+    def test_pflege_knopf_verborgen_ohne_treffer(self) -> None:
+        """Ohne vorhandenen Lieferanten gibt es nichts zu pflegen."""
+        dialog = VendorAssignmentDialog("Unbekannter Lieferant", "", [], "")
+        self.assertTrue(dialog.create_button.isHidden())
         dialog.deleteLater()
 
-    def test_create_button_versteckt_mit_treffer(self) -> None:
+    def test_pflege_knopf_sichtbar_mit_treffer(self) -> None:
         class _Match:
             vendor_number = "0000100234"
             name = "Muster Dichtungstechnik GmbH"
@@ -355,7 +384,8 @@ class VendorGuiDialogTests(unittest.TestCase):
             blocked = False
 
         dialog = VendorAssignmentDialog("Muster Dichtungstechnik GmbH", "", [_Match()], "")
-        self.assertTrue(dialog.create_button.isHidden())
+        self.assertFalse(dialog.create_button.isHidden())
+        self.assertTrue(dialog.create_button.isEnabled())
         dialog.deleteLater()
 
     def test_create_dialog_vorbelegung(self) -> None:

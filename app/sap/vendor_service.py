@@ -232,9 +232,13 @@ class SapVendorService(VendorServiceBase):
                 record.blocked = connection.read_text(element_id).strip() not in ("", "0")
 
     # ==================================================================
-    # Schreiben (XK01 Neuanlage / XK02 Aenderung)
+    # Schreiben -- ausschliesslich Aenderung (XK02)
     # ==================================================================
     def write(self, plan: VendorMasterPlan, context: WriteContext) -> ActionResult:
+        """Bestehenden Lieferantenstammsatz pflegen.
+
+        Eine Neuanlage findet hier bewusst NICHT statt (siehe ``_validate``).
+        """
         started = self._now_ms()
 
         problem = self._validate(plan)
@@ -242,38 +246,34 @@ class SapVendorService(VendorServiceBase):
             return self._result("vendor_master", ResultState.FAILED, problem,
                                 started_ms=started)
 
-        is_change = plan.is_change
-        transaction = (self.settings.transactions.vendor_change if is_change
-                       else self.settings.transactions.vendor_create)
-        old_value = ""
-        if is_change:
-            existing = self.read(plan.existing_vendor_number)
-            if existing.read_error:
-                return self._result("vendor_master", ResultState.FAILED,
-                                    f"SAP-Ist-Zustand nicht lesbar: {existing.read_error}",
-                                    started_ms=started)
-            if not existing.exists:
-                return self._result(
-                    "vendor_master", ResultState.FAILED,
-                    f"Lieferant {plan.existing_vendor_number} ist in SAP nicht "
-                    "auffindbar -- Aenderung abgebrochen.", started_ms=started)
-            # Bestehender Lieferant mit widersprechendem Namen wird NIE
-            # ueberschrieben -- ein falscher Treffer wuerde den Stammsatz des
-            # falschen Lieferanten veraendern.
-            if plan.name and existing.name and \
-                    plan.name.strip().upper() != existing.name.strip().upper():
-                return self._result(
-                    "vendor_master", ResultState.FAILED,
-                    f"Sicherheitsabbruch: Lieferant {plan.existing_vendor_number} heisst "
-                    f"in SAP '{existing.name}', der Plan nennt aber '{plan.name}'. "
-                    "Es wurde nichts geaendert.", started_ms=started)
-            old_value = existing.name or existing.summary().get("Name", "")
+        transaction = self.settings.transactions.vendor_change
+        existing = self.read(plan.existing_vendor_number)
+        if existing.read_error:
+            return self._result("vendor_master", ResultState.FAILED,
+                                f"SAP-Ist-Zustand nicht lesbar: {existing.read_error}",
+                                started_ms=started)
+        if not existing.exists:
+            return self._result(
+                "vendor_master", ResultState.FAILED,
+                f"Lieferant {plan.existing_vendor_number} ist in SAP nicht "
+                "auffindbar -- Aenderung abgebrochen.", started_ms=started)
+        # Bestehender Lieferant mit widersprechendem Namen wird NIE
+        # ueberschrieben -- ein falscher Treffer wuerde den Stammsatz des
+        # falschen Lieferanten veraendern.
+        if plan.name and existing.name and \
+                plan.name.strip().upper() != existing.name.strip().upper():
+            return self._result(
+                "vendor_master", ResultState.FAILED,
+                f"Sicherheitsabbruch: Lieferant {plan.existing_vendor_number} heisst "
+                f"in SAP '{existing.name}', der Plan nennt aber '{plan.name}'. "
+                "Es wurde nichts geaendert.", started_ms=started)
+        old_value = existing.name or existing.summary().get("Name", "")
         new_value = plan.name or "(kein Name)"
 
         if context.dry_run:
             return self._result(
                 "vendor_master", ResultState.SIMULATED,
-                f"{'aendern' if is_change else 'neu anlegen'} ({transaction})",
+                f"aendern ({transaction})",
                 transaction=transaction, old_value=old_value, new_value=new_value,
                 started_ms=started,
             )
@@ -298,16 +298,15 @@ class SapVendorService(VendorServiceBase):
 
             popup = connection.detect_popup()
             if popup is not None:
-                # XK01/XK02 zeigen je nach Customizing ein Popup zur Auswahl
-                # der Kontengruppe -- wird NIE automatisch bestaetigt.
+                # XK02 zeigt je nach Customizing ein Popup -- wird NIE
+                # automatisch bestaetigt.
                 raise SapPopupError(
-                    "Beim Einstieg in XK01/XK02 erschien ein unerwartetes Fenster "
-                    "(z. B. Kontoschema-Auswahl). Bitte in SAP pruefen.",
+                    "Beim Einstieg in XK02 erschien ein unerwartetes Fenster. "
+                    "Bitte in SAP pruefen.",
                     popup_text=popup.get("text", ""), title=popup.get("title", ""))
 
-            if is_change:
-                connection.set_text(registry.id_for("vendor_master", "vendor"),
-                                    plan.existing_vendor_number, wait=True)
+            connection.set_text(registry.id_for("vendor_master", "vendor"),
+                                plan.existing_vendor_number, wait=True)
             connection.set_text(registry.id_for("vendor_master", "purchasing_org"),
                                 plan.purchasing_org or self.settings.purchasing.purchasing_org)
             connection.send_vkey(0)
@@ -316,7 +315,7 @@ class SapVendorService(VendorServiceBase):
             popup = connection.detect_popup()
             if popup is not None:
                 raise SapPopupError(
-                    "Nach dem Einstieg in XK01/XK02 erschien ein unerwartetes Fenster.",
+                    "Nach dem Einstieg in XK02 erschien ein unerwartetes Fenster.",
                     popup_text=popup.get("text", ""), title=popup.get("title", ""))
 
             self._write_general_fields(plan, messages)
@@ -360,7 +359,7 @@ class SapVendorService(VendorServiceBase):
 
             return self._result(
                 "vendor_master", ResultState.SUCCESS,
-                f"Lieferant {'geaendert' if is_change else 'angelegt'}",
+                "Lieferantenstammsatz geaendert",
                 transaction=transaction, document_number=number, old_value=old_value,
                 new_value=new_value, started_ms=started, sap_messages=messages,
             )
@@ -436,10 +435,20 @@ class SapVendorService(VendorServiceBase):
 
     # -- Kleinkram -----------------------------------------------------
     def _validate(self, plan: VendorMasterPlan) -> str:
+        # GRUNDSATZLICH KEINE NEUANLAGE.
+        # Einen Lieferanten anzulegen ist ein kontrollierter Vorgang:
+        # Dublettenpruefung, Compliance, Bankdaten, Kontengruppe, Freigabe.
+        # Das gehoert nicht in ein Einkaufswerkzeug, das nebenbei Preise
+        # pflegt.  Dieses Werkzeug aendert nur, was es schon gibt.
+        if not plan.existing_vendor_number:
+            return ("Neuanlage von Lieferanten ist in diesem Werkzeug nicht "
+                    "vorgesehen. Bitte den Lieferanten zuerst im dafuer "
+                    "vorgesehenen Prozess in SAP anlegen lassen und ihn danach "
+                    "hier zuordnen.")
         if not plan.name:
-            return "Kein Name angegeben -- Lieferant kann nicht angelegt/geaendert werden."
+            return "Kein Name angegeben -- Lieferant kann nicht geaendert werden."
         if not plan.country:
-            return "Kein Land angegeben -- Lieferant kann nicht angelegt/geaendert werden."
+            return "Kein Land angegeben -- Lieferant kann nicht geaendert werden."
         return ""
 
     @staticmethod

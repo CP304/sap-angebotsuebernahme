@@ -649,40 +649,35 @@ class MockVendorService(_MockBase, VendorServiceBase):
             return self._result("vendor_master", ResultState.FAILED, problem,
                                 started_ms=started)
 
-        is_change = plan.is_change
-        transaction = (self.settings.transactions.vendor_change if is_change
-                       else self.settings.transactions.vendor_create)
-        old_value = ""
-        key = plan.existing_vendor_number
-
-        if is_change:
-            key, raw = self._find(plan.existing_vendor_number)
-            if raw is None:
-                return self._result(
-                    "vendor_master", ResultState.FAILED,
-                    f"Lieferant {plan.existing_vendor_number} ist in SAP nicht "
-                    "auffindbar -- Aenderung abgebrochen.", started_ms=started)
-            bestehender_name = raw.get("name", "")
-            if plan.name and bestehender_name and \
-                    plan.name.strip().upper() != bestehender_name.strip().upper():
-                return self._result(
-                    "vendor_master", ResultState.FAILED,
-                    f"Sicherheitsabbruch: Lieferant {plan.existing_vendor_number} heisst "
-                    f"in SAP '{bestehender_name}', der Plan nennt aber '{plan.name}'. "
-                    "Es wurde nichts geaendert.", started_ms=started)
-            old_value = bestehender_name
+        # Nur Aenderung -- eine Neuanlage findet in diesem Werkzeug bewusst
+        # nicht statt (siehe _validate).
+        transaction = self.settings.transactions.vendor_change
+        key, raw = self._find(plan.existing_vendor_number)
+        if raw is None:
+            return self._result(
+                "vendor_master", ResultState.FAILED,
+                f"Lieferant {plan.existing_vendor_number} ist in SAP nicht "
+                "auffindbar -- Aenderung abgebrochen.", started_ms=started)
+        bestehender_name = raw.get("name", "")
+        namen_weichen_ab = (
+            plan.name and bestehender_name
+            and plan.name.strip().upper() != bestehender_name.strip().upper())
+        if namen_weichen_ab:
+            return self._result(
+                "vendor_master", ResultState.FAILED,
+                f"Sicherheitsabbruch: Lieferant {plan.existing_vendor_number} heisst "
+                f"in SAP '{bestehender_name}', der Plan nennt aber '{plan.name}'. "
+                "Es wurde nichts geaendert.", started_ms=started)
+        old_value = bestehender_name
         new_value = plan.name or "(kein Name)"
 
         if context.dry_run:
             return self._result(
                 "vendor_master", ResultState.SIMULATED,
-                f"{'aendern' if is_change else 'neu anlegen'} ({transaction})",
+                f"aendern ({transaction})",
                 transaction=transaction, old_value=old_value, new_value=new_value,
                 started_ms=started,
             )
-
-        if not is_change:
-            key = self.system.next_number("vendor", "1")
 
         satz = dict(self.system.vendors.get(key, {}))
         for feld, wert in (
@@ -704,12 +699,12 @@ class MockVendorService(_MockBase, VendorServiceBase):
         self.system.save()
         plan.document_number = key
 
-        messages = [f"Lieferant {key} wurde {'geaendert' if is_change else 'angelegt'}"]
+        messages = [f"Lieferant {key} wurde geaendert"]
 
         if not key:
             return self._result("vendor_master", ResultState.FAILED,
                                 "SAP hat keine Lieferantennummer gemeldet -- es ist "
-                                "unklar, ob der Lieferant angelegt wurde.",
+                                "unklar, ob die Aenderung gesichert wurde.",
                                 transaction=transaction, started_ms=started)
 
         if self.settings.sap.verify_after_write:
@@ -728,16 +723,24 @@ class MockVendorService(_MockBase, VendorServiceBase):
 
         return self._result(
             "vendor_master", ResultState.SUCCESS,
-            f"Lieferant {'geaendert' if is_change else 'angelegt'}",
+            "Lieferantenstammsatz geaendert",
             transaction=transaction, document_number=key, old_value=old_value,
             new_value=new_value, started_ms=started, sap_messages=messages,
         )
 
     def _validate(self, plan: VendorMasterPlan) -> str:
+        # Dieselbe Regel wie im echten Service: keine Neuanlage.  Das
+        # Testsystem muss sich hier genauso verhalten, sonst faellt der
+        # Unterschied erst im Produktivsystem auf.
+        if not plan.existing_vendor_number:
+            return ("Neuanlage von Lieferanten ist in diesem Werkzeug nicht "
+                    "vorgesehen. Bitte den Lieferanten zuerst im dafuer "
+                    "vorgesehenen Prozess in SAP anlegen lassen und ihn danach "
+                    "hier zuordnen.")
         if not plan.name:
-            return "Kein Name angegeben -- Lieferant kann nicht angelegt/geaendert werden."
+            return "Kein Name angegeben -- Lieferant kann nicht geaendert werden."
         if not plan.country:
-            return "Kein Land angegeben -- Lieferant kann nicht angelegt/geaendert werden."
+            return "Kein Land angegeben -- Lieferant kann nicht geaendert werden."
         return ""
 
 

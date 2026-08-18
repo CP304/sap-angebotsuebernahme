@@ -200,7 +200,7 @@ def pruefe_lieferant_lesen():
 
 
 def pruefe_lieferant_stamm():
-    """Volle Lieferantenstamm-Pflege (XK01/XK02) -- nur wenn vorhanden."""
+    """Lieferantenstamm-Pflege (XK02) -- Neuanlage gibt es bewusst nicht."""
     settings, gateway, offer, *_ = _grundausstattung()
     if not hasattr(gateway.vendors, "write"):
         raise _NochNichtVorhanden(
@@ -208,7 +208,22 @@ def pruefe_lieferant_stamm():
             "vorhanden -- wird nachgereicht.")
     datensatz = gateway.vendors.read("100234")
     assert datensatz.exists, "Lieferant nicht lesbar"
-    return f"Lieferantenstamm gelesen: {datensatz.name}"
+
+    # Aenderung eines vorhandenen Lieferanten muss gehen ...
+    from app.models.sap_vendor import VendorMasterPlan
+    kontext = gateway.write_context()
+    plan = VendorMasterPlan(existing_vendor_number="100234", name=datensatz.name,
+                            country=datensatz.country or "DE", city="Pruefstadt")
+    geaendert = gateway.vendors.write(plan, kontext)
+    assert geaendert.ok, f"Aenderung fehlgeschlagen: {geaendert.message}"
+
+    # ... eine Neuanlage dagegen NICHT.
+    neuanlage = gateway.vendors.write(
+        VendorMasterPlan(name="Erfundener Lieferant GmbH", country="DE"), kontext)
+    assert not neuanlage.ok, "Neuanlage waere moeglich -- das darf nicht sein!"
+    assert "Neuanlage" in neuanlage.message
+
+    return f"gelesen: {datensatz.name}; Aenderung ok, Neuanlage korrekt abgelehnt"
 
 
 def pruefe_material():
@@ -311,7 +326,7 @@ def main() -> int:
     _pruefe("Mengenkontrakt + Bestellung mit Kontraktbezug (ME31K/ME21N)",
            pruefe_kontrakt_und_bestellung)
     _pruefe("Lieferant pruefen (XK03)", pruefe_lieferant_lesen)
-    _pruefe("Lieferantenstamm anlegen/lesen (XK01/XK02/XK03)", pruefe_lieferant_stamm)
+    _pruefe("Lieferantenstamm lesen/pflegen (XK02/XK03)", pruefe_lieferant_stamm)
     _pruefe("Material pruefen (MM03)", pruefe_material)
 
     print("\n=== Ablauf ===")
@@ -356,7 +371,8 @@ def main() -> int:
          "contract_header, contract_items, messages")
     print("  4. ME21N/ME22N     (Bestellung)    -> purchase_order, "
          "purchase_order_reference, messages")
-    print("  5. XK01/XK02/XK03  (Lieferant)     -> falls in dieser Version vorhanden")
+    print("  5. XK02/XK03       (Lieferant)     -> vendor_master, vendor_display")
+    print("     (XK01 wird nicht gebraucht -- Lieferanten werden hier nur gepflegt)")
     print("\nDanach in der Anwendung: Verwaltung -> SAP-Feld-IDs -> "
          "'Aufzeichnung (.vbs) einlesen'.")
 

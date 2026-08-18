@@ -1,4 +1,8 @@
-"""Abbild eines SAP-Lieferantenstammsatzes (XK01/XK02/XK03)."""
+"""Abbild eines SAP-Lieferantenstammsatzes (XK02/XK03).
+
+Gelesen wird ueber XK03, geaendert ueber XK02.  Eine Neuanlage
+(XK01) ist bewusst nicht vorgesehen.
+"""
 
 from __future__ import annotations
 
@@ -84,9 +88,17 @@ class SapVendorRecord:
 class VendorMasterPlan:
     """Werte, die fuer einen Lieferanten geschrieben werden sollen.
 
-    Alle Felder duerfen leer sein -- die Vorschau laesst den Anwender
-    ergaenzen, es wird NIE eine Adresse erfunden.  ``existing_vendor_number``
-    leer = Neuanlage (XK01), gesetzt = Aenderung (XK02).
+    Es geht ausschliesslich um die PFLEGE eines bereits vorhandenen
+    Lieferanten (XK02).  ``existing_vendor_number`` ist deshalb Pflicht --
+    ohne sie wird nichts geschrieben.
+
+    Eine Neuanlage findet in diesem Werkzeug bewusst nicht statt: Einen
+    Lieferanten anzulegen heisst Dublettenpruefung, Compliance, Bankdaten,
+    Kontengruppe und Freigabe.  Das gehoert in den dafuer vorgesehenen
+    Prozess, nicht in ein Werkzeug, das nebenbei Preise pflegt.
+
+    Alle uebrigen Felder duerfen leer sein -- leer heisst schlicht "nicht
+    aendern".  Es wird NIE eine Adresse erfunden.
     """
 
     existing_vendor_number: str = ""

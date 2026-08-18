@@ -39,19 +39,26 @@ class VendorMasterService:
     # (b) Entwurf aus dem Angebotskopf
     # ------------------------------------------------------------------
     def draft_from_offer(self, offer: Offer) -> VendorMasterPlan:
-        """Neuanlage-Entwurf, wenn der Lieferant nicht existiert.
+        """Pflege-Entwurf fuer einen BEREITS vorhandenen Lieferanten.
 
-        Es wird ausdruecklich NUR der Name aus dem Angebot uebernommen -- alle
-        weiteren Felder bleiben leer.  Eine Adresse zu erfinden (z. B. aus der
-        E-Mail-Signatur zu raten) waere ein Datenqualitaetsrisiko, das der
-        Anwender in der Vorschau selbst beheben muss.
+        Es wird ausdruecklich NUR uebernommen, was im Angebot steht -- alle
+        weiteren Felder bleiben leer und bedeuten "nicht aendern".  Eine
+        Adresse zu erfinden (etwa aus der E-Mail-Signatur zu raten) waere ein
+        Datenqualitaetsrisiko.
+
+        Ohne zugeordnete Lieferantennummer ist kein Plan moeglich: Neuanlage
+        findet in diesem Werkzeug nicht statt.
         """
         plan = VendorMasterPlan(
-            existing_vendor_number="",
+            existing_vendor_number=(offer.vendor_number or "").strip(),
             name=(offer.vendor_name or "").strip(),
             reference_offer=offer.offer_number,
         )
-        if not plan.name:
+        if not plan.existing_vendor_number:
+            plan.error = ("Diesem Angebot ist noch kein SAP-Lieferant zugeordnet. "
+                          "Lieferanten werden hier nur gepflegt, nicht angelegt -- "
+                          "bitte zuerst zuordnen.")
+        elif not plan.name:
             plan.error = "Kein Lieferantenname im Angebot erkannt -- bitte von Hand eintragen."
         return plan
 
@@ -62,6 +69,8 @@ class VendorMasterService:
     def missing_fields(plan: VendorMasterPlan) -> list[str]:
         """Welche Pflichtfelder fehlen noch? Leer = Plan darf geschrieben werden."""
         fehlend: list[str] = []
+        if not plan.existing_vendor_number:
+            fehlend.append("SAP-Lieferantennummer (Neuanlage ist nicht vorgesehen)")
         if not plan.name:
             fehlend.append("Name")
         if not plan.country:
@@ -69,7 +78,7 @@ class VendorMasterService:
         return fehlend
 
     # ------------------------------------------------------------------
-    # (c) Anlegen/Aendern
+    # (c) Pflegen (nur Aenderung, keine Neuanlage)
     # ------------------------------------------------------------------
     def create_or_update(self, plan: VendorMasterPlan, context: WriteContext) -> ActionResult:
         """Plan validieren und an ``gateway.vendors.write`` durchreichen."""

@@ -265,7 +265,7 @@ def ask_yes_no(parent, title: str, message: str, detail: str = "") -> bool:
 class VendorAssignmentDialog(QDialog):
     """SAP-Lieferant zu einem Angebotsnamen zuordnen."""
 
-    #: Sonder-Ergebniscode: Anwender moechte den Lieferanten in SAP anlegen
+    #: Sonder-Ergebniscode: Anwender moechte die Stammdaten pflegen (XK02)
     CREATE_REQUESTED = 2
 
     def __init__(self, vendor_name: str, email_domain: str, candidates: list,
@@ -329,14 +329,29 @@ class VendorAssignmentDialog(QDialog):
         self.apply_all_box.setChecked(True)
         layout.addWidget(self.apply_all_box)
 
-        # "Lieferant anlegen" ist nur sinnvoll, wenn wirklich kein Treffer
-        # gefunden wurde -- sonst wuerde man versehentlich einen Dublettensatz
-        # anlegen, obwohl der Lieferant schon existiert.
-        self.create_button = QPushButton("Lieferant in SAP anlegen ...")
-        self.create_button.setVisible(not self.candidates)
-        self.create_button.setEnabled(not self.candidates)
+        # Lieferanten werden hier NICHT angelegt.  Das ist ein kontrollierter
+        # Vorgang (Dublettenpruefung, Compliance, Bankdaten, Kontengruppe,
+        # Freigabe) und gehoert nicht in ein Werkzeug, das Preise pflegt.
+        # Gibt es keinen Treffer, ist der ehrliche Hinweis besser als eine
+        # Schaltflaeche, die still eine Dublette erzeugt.
+        self.create_button = QPushButton("Stammdaten dieses Lieferanten pflegen ...")
+        self.create_button.setToolTip(
+            "Aendert einen bereits vorhandenen Lieferanten (XK02). "
+            "Neue Lieferanten werden hier nicht angelegt.")
+        self.create_button.setVisible(bool(self.candidates))
+        self.create_button.setEnabled(bool(self.candidates))
         self.create_button.clicked.connect(self._request_create)
         layout.addWidget(self.create_button)
+
+        if not self.candidates:
+            hinweis = QLabel(
+                "Kein passender Lieferant gefunden. Neue Lieferanten werden in "
+                "diesem Werkzeug bewusst nicht angelegt — bitte im dafuer "
+                "vorgesehenen Prozess in SAP anlegen lassen und danach hier "
+                "zuordnen.")
+            hinweis.setWordWrap(True)
+            hinweis.setStyleSheet(f"color: {Colors.AMBER};")
+            layout.addWidget(hinweis)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                    | QDialogButtonBox.StandardButton.Cancel)
@@ -364,35 +379,39 @@ class VendorAssignmentDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
-# Lieferant in SAP anlegen (XK01)
+# Lieferantenstammdaten pflegen (XK02)
 # ---------------------------------------------------------------------------
 
 class VendorCreateDialog(QDialog):
-    """Einfache Erfassung der wichtigsten Felder fuer eine Neuanlage (XK01).
+    """Pflege der wichtigsten Stammdatenfelder eines VORHANDENEN Lieferanten.
 
     Es werden bewusst nur die im Alltag wirklich noetigen Felder abgefragt --
-    alles Weitere pflegt der Einkauf spaeter in SAP direkt nach.  Land und
+    alles Weitere pflegt der Einkauf in SAP direkt.  Land und
     Einkaufsorganisation sind mit den Vorgaben aus den Einstellungen
     vorbelegt, aber jederzeit aenderbar.
+
+    Eine Neuanlage ist hier nicht moeglich: Lieferanten anzulegen ist ein
+    kontrollierter Vorgang (Dublettenpruefung, Compliance, Bankdaten,
+    Kontengruppe, Freigabe) und gehoert nicht in dieses Werkzeug.
     """
 
     def __init__(self, vendor_name: str, settings, parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
-        self.setWindowTitle("Lieferant in SAP anlegen")
+        self.setWindowTitle("Lieferantenstammdaten pflegen")
         self.setMinimumWidth(480)
         self._build(vendor_name)
 
     def _build(self, vendor_name: str) -> None:
         layout = QVBoxLayout(self)
 
-        heading = QLabel("Neuer Lieferant -- wird in SAP angelegt (XK01)")
+        heading = QLabel("Stammdaten aendern -- wird in SAP gesichert (XK02)")
         heading.setObjectName("Heading")
         layout.addWidget(heading)
 
-        hint = QLabel("Es wird kein Lieferant erraten oder automatisch angelegt -- bitte "
-                      "die Angaben pruefen und ergaenzen. Der Lieferant wird erst nach "
-                      "Bestaetigung in SAP geschrieben.")
+        hint = QLabel("Leere Felder bleiben unveraendert. Es wird nichts erraten -- "
+                      "bitte die Angaben pruefen. Geschrieben wird erst nach "
+                      "ausdruecklicher Bestaetigung.")
         hint.setWordWrap(True)
         hint.setObjectName("SubHeading")
         layout.addWidget(hint)
@@ -423,7 +442,7 @@ class VendorCreateDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                    | QDialogButtonBox.StandardButton.Cancel)
         ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        ok.setText("In SAP anlegen (XK01)")
+        ok.setText("Aenderung in SAP sichern (XK02)")
         ok.setObjectName("Primary")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Abbrechen")
         buttons.accepted.connect(self._confirm)
@@ -438,8 +457,9 @@ class VendorCreateDialog(QDialog):
             QMessageBox.warning(self, "Angabe fehlt", "Bitte ein Land eintragen.")
             return
         confirm = QMessageBox.question(
-            self, "Lieferant anlegen",
-            f"Lieferant '{self.name_edit.text().strip()}' wirklich in SAP anlegen (XK01)?",
+            self, "Stammdaten pflegen",
+            f"Stammdaten von '{self.name_edit.text().strip()}' wirklich in SAP "
+            f"aendern (XK02)?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if confirm != QMessageBox.StandardButton.Yes:
             return
