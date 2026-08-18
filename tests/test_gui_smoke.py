@@ -104,6 +104,18 @@ class GuiSmokeTest(unittest.TestCase):
                          "Einstellungen")
         fenster.hide()
 
+    def test_01b2_diagnose_seite_vorhanden(self) -> None:
+        """Die Selbstdiagnose muss ohne Konsole erreichbar sein."""
+        self.window.open_admin("Diagnose")
+        fenster = self.window._admin_window
+        self.assertEqual(fenster.tabs.tabText(fenster.tabs.currentIndex()),
+                         "Diagnose")
+        bericht = self.window.diagnosis_view.report.toPlainText()
+        self.assertIn("Selbstdiagnose", bericht,
+                      "Die Umgebungspruefung muss beim Oeffnen schon dastehen")
+        self.assertIn("Texterkennung", bericht)
+        fenster.hide()
+
     def test_01c_ablauf_in_drei_schritten(self) -> None:
         """Die Werkzeugleiste fuehrt durch genau drei Schritte."""
         for button in (self.window.step1_button, self.window.step2_button,

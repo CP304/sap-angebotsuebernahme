@@ -446,6 +446,51 @@ class OfferImportService:
         logger.info("%s Kopf: %s", summary,
                     {k: str(v) for k, v in offer.header_summary().items() if v != "-"})
 
+        if not offer.positions:
+            self._archive_unrecognized(offer)
+
+    def _archive_unrecognized(self, offer: Offer) -> None:
+        """Fehlgeschlagene Angebote samt Protokoll ablegen.
+
+        Der Arbeits-PC hat keinen Zugang nach draussen.  Damit "nichts
+        erkannt" trotzdem verwertbar bleibt, landen Datei und
+        Erkennungsprotokoll in einem Ablageordner -- der laesst sich
+        gesammelt weitergeben.  Die Ablage darf den Import nie stoeren:
+        jeder Fehler hier wird nur protokolliert.
+        """
+        try:
+            import shutil
+            from datetime import datetime
+
+            ziel = self.settings.unrecognized_dir
+            ziel.mkdir(parents=True, exist_ok=True)
+            stempel = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+
+            kopiert: list[str] = []
+            for quelle in offer.source_files:
+                pfad = Path(quelle)
+                if not pfad.is_file():
+                    continue  # z. B. "Eingefuegter Text"
+                kopie = ziel / f"{stempel}_{pfad.name}"
+                shutil.copy2(pfad, kopie)
+                kopiert.append(kopie.name)
+
+            protokoll = ziel / f"{stempel}_protokoll.txt"
+            zeilen = [f"Quelle(n): {', '.join(offer.source_files) or '-'}",
+                      f"Zeitpunkt: {stempel}", "",
+                      "Befunde:"]
+            zeilen += [f"  ! {p.message}" for p in offer.issues]
+            zeilen += ["", "Erkennungsschritte:"]
+            zeilen += [f"  - {n}" for n in offer.extraction_notes]
+            protokoll.write_text("\n".join(zeilen), encoding="utf-8")
+
+            offer.add_note(
+                f"Zur Nachbesserung abgelegt unter: {ziel} "
+                f"({', '.join(kopiert) if kopiert else 'nur Protokoll'})")
+            logger.info("Nicht erkanntes Angebot abgelegt: %s", protokoll)
+        except Exception as exc:  # noqa: BLE001 - Ablage ist Beiwerk
+            logger.warning("Ablage nicht moeglich: %s", exc)
+
     def _add_issues(self, offer: Offer) -> None:
         if not offer.positions:
             offer.issues.add(Issue(

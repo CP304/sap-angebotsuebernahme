@@ -135,11 +135,15 @@ class MainWindow(QMainWindow):
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
 
+        from .diagnosis_view import DiagnosisView
+        self.diagnosis_view = DiagnosisView(self.settings)
+
         self._admin_pages = [
             ("Historie", self.history_view),
             ("Zuordnungen", self.mapping_view),
             ("SAP-Feld-IDs", self.selector_view),
             ("Einstellungen", self.settings_view),
+            ("Diagnose", self.diagnosis_view),
             ("Protokoll", self.log_view),
         ]
         self._admin_window: AdminWindow | None = None

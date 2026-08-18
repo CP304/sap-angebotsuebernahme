@@ -28,7 +28,8 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Iterable
 
 from ...config.settings import Settings
-from ...models.enums import FieldOrigin, SourceKind
+from ...models.enums import FieldOrigin, IssueSeverity, SourceKind
+from ...models.issue import Issue
 from ...models.offer_position import OfferPosition
 from ...utils.parsing import (
     detect_currency,
@@ -50,6 +51,7 @@ from .material_roles import (
 )
 from .price_parsing import (
     is_carryover_row,
+    is_on_request,
     is_page_noise_row,
     parse_price_text,
     price_unit_from_header,
@@ -120,6 +122,19 @@ _TIER_RE = re.compile(
 
 #: Materialnummer-Kandidat (konfigurierbar ueber TableExtractor)
 DEFAULT_MATERIAL_PATTERN = r"^(?:\d{6,18}|[A-Za-z0-9]{2,}(?:[-/.][A-Za-z0-9]+)+)$"
+
+#: Pseudofeld: eine Staffelspalte einer Mengen-Matrix ("ab 100 | ab 500 | ...")
+PSEUDO_TIER = "_tier"
+
+#: Spaltenueberschrift einer Mengen-Matrix: "ab 100", "ab 500 Stk", ">= 1000"
+_MATRIX_TIER_RE = re.compile(
+    r"^(?:ab|from|>=|≥)\s*(\d{1,3}(?:[.\s]\d{3})*|\d{1,7})\s*"
+    r"(?:stk\.?|st\.?|st(?:ue|ü)ck|pcs\.?|pc\.?|pieces|m|kg|l|set|paar)?\.?\s*$",
+    re.I,
+)
+
+#: Dekorierte Zwischenueberschrift ("-- Gruppe B --", "=== Dichtungen ===")
+_GROUP_DECOR_RE = re.compile(r"^\s*[-=~*#>]{2,}\s*\S.*$|^.*\S\s*[-=~*#<]{2,}\s*$")
 
 #: Klartext der beiden Artikelnummern-Rollen (fuer das Protokoll)
 _ROLE_LABEL = {
@@ -198,6 +213,9 @@ class TableAnalysis:
     #: Preiseinheit, die nur in der Spaltenueberschrift steht ("Preis EUR/100 St").
     #: Sie gilt dann fuer alle Zeilen dieser Tabelle.
     header_price_unit: int | None = None
+    #: Mengen-Matrix: Spaltenindex -> Ab-Menge ("ab 100 | ab 500 | ab 1000").
+    #: Jede dieser Spalten traegt Preise, die zu Staffelpositionen werden.
+    tier_columns: dict[int, Decimal] = field(default_factory=dict)
 
     @property
     def mapped_fields(self) -> set[str]:
@@ -211,7 +229,9 @@ class TableAnalysis:
             return False
         has_identity = bool(fields_found & {"material_number", "vendor_material_number",
                                             "description"})
-        has_value = bool(fields_found & {"price", "quantity"})
+        # Eine Mengen-Matrix traegt ihre Preise in den Staffelspalten -- das
+        # zaehlt genauso als Wertspalte wie eine gewoehnliche Preisspalte.
+        has_value = bool(fields_found & {"price", "quantity"}) or bool(self.tier_columns)
         return has_identity and has_value
 
 
@@ -545,6 +565,18 @@ class TableExtractor:
             values = [normalize_whitespace(r[index]) for r in rows if index < len(r)]
             decided = detect_day_first(values)
             if decided is None:
+                # Mehrdeutige Schraegstrich-Datumsangaben (03/04/2026 kann der
+                # 3. April oder der 4. Maerz sein): ohne Beweis wird nichts
+                # geraten -- die ganze Spalte gilt als unsicher.
+                if self.date_order == "auto" and any(
+                        "/" in v and (m := _NUMERIC_DATE.match(v))
+                        and int(m.group(1)) <= 12 and int(m.group(2)) <= 12
+                        for v in values):
+                    assignment.forced_origin = FieldOrigin.UNCERTAIN
+                    analysis.notes.append(
+                        f"Spalte {index + 1} ('{assignment.header or 'ohne Ueberschrift'}'): "
+                        "das Datumsformat ist mehrdeutig (MM/DD oder DD/MM) -- "
+                        "die Datumswerte werden als unsicher markiert, bitte pruefen.")
                 continue
             analysis.date_day_first[index] = decided
             analysis.notes.append(
@@ -797,8 +829,38 @@ class TableExtractor:
         headers = analysis.header_texts or [""] * width
         headers = headers + [""] * (width - len(headers))
 
+        assigned: dict[int, ColumnAssignment] = {}
+        used: dict[str, int] = {}
+
+        # Mengen-Matrix: mehrere Spaltenueberschriften der Form "ab 100" /
+        # "ab 500" / "ab 1000" sind keine gewoehnlichen Felder, sondern eine
+        # Staffel ueber die Spalten.  Erst ab ZWEI solchen Spalten wird das
+        # angenommen -- eine einzelne "ab 100" koennte alles Moegliche sein.
+        tier_candidates: dict[int, Decimal] = {}
+        for index in range(width):
+            text = normalize_whitespace(headers[index]) if index < len(headers) else ""
+            match = _MATRIX_TIER_RE.match(text)
+            if not match:
+                continue
+            quantity = parse_decimal(match.group(1))
+            if quantity is not None and quantity > 0:
+                tier_candidates[index] = quantity
+        if len(tier_candidates) >= 2:
+            for index, quantity in tier_candidates.items():
+                assigned[index] = ColumnAssignment(
+                    index, PSEUDO_TIER, normalize_whitespace(headers[index]),
+                    0.9, "Staffelspalte einer Mengen-Matrix")
+            analysis.tier_columns = dict(sorted(tier_candidates.items()))
+            analysis.notes.append(
+                f"Mengenstaffel als Matrix erkannt: {len(tier_candidates)} "
+                "Preisspalten mit Ab-Mengen ("
+                + ", ".join(f"ab {q}" for q in sorted(tier_candidates.values()))
+                + ") -- je Zeile entstehen Staffelpositionen.")
+
         candidates: dict[int, tuple[str, float, str]] = {}
         for index in range(width):
+            if index in assigned:
+                continue
             text = normalize_whitespace(headers[index]) if index < len(headers) else ""
             if not text:
                 continue
@@ -806,8 +868,6 @@ class TableExtractor:
             if field_name:
                 candidates[index] = (field_name, confidence, reason)
 
-        assigned: dict[int, ColumnAssignment] = {}
-        used: dict[str, int] = {}
         # Nach Konfidenz absteigend zuweisen, damit die beste Spalte gewinnt
         for index, (field_name, confidence, reason) in sorted(
                 candidates.items(), key=lambda kv: -kv[1][1]):
@@ -957,9 +1017,28 @@ class TableExtractor:
                 continue
             if analysis.header_row_index is not None and self._is_repeated_header(row, analysis):
                 continue
+            if self._is_group_heading(row, analysis):
+                notes.append(f"{label}: Zeile {row_index + 1} als Zwischenueberschrift "
+                             f"(Artikelgruppe) uebersprungen ('{raw_line[:50]}')")
+                continue
 
-            values, present = self._row_values(row, analysis)
+            values, present = self._row_values(row, analysis, row_index)
             if len(present) < minimum:
+                # Preisspannen- und "auf Anfrage"-Zeilen ohne weitere Felder
+                # duerfen nicht stillschweigend verschwinden: sie werden als
+                # (fast) leere Position mit Klartext-Befund erhalten.
+                if values.get("_price_range") or values.get("_on_request"):
+                    position = self._make_position(values, analysis, document, label,
+                                                   row_index, raw_line)
+                    for note in values.get("_notes", []):
+                        notes.append(f"{label}, Zeile {row_index + 1}: {note}")
+                    notes.append(
+                        f"{label}, Zeile {row_index + 1}: Zeile ohne ausreichende "
+                        "Feldbelegung, aber mit Preisspanne bzw. 'auf Anfrage' -- "
+                        "als Position ohne Preis uebernommen, bitte vervollstaendigen.")
+                    positions.append(position)
+                    row_cells[position.uid] = self._row_cell_map(row, analysis)
+                    continue
                 if positions and self._is_continuation(values, present):
                     self._append_continuation(positions[-1], row, analysis)
                     # In PDFs zerfaellt eine Staffelzeile ("ab 500 Stk 4,35 EUR")
@@ -979,6 +1058,9 @@ class TableExtractor:
             positions.append(position)
             row_cells[position.uid] = self._row_cell_map(row, analysis)
 
+            for tier in self._matrix_tier_positions(position, row, analysis,
+                                                    document, label, row_index):
+                positions.append(tier)
             for tier in self._tier_positions(position, row, analysis, document, label,
                                             row_index):
                 positions.append(tier)

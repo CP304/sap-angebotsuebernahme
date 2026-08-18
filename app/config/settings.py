@@ -657,6 +657,18 @@ class Settings:
         return self.home / "logs"
 
     @property
+    def unrecognized_dir(self) -> Path:
+        """Ablage fuer Angebote, aus denen nichts erkannt wurde.
+
+        Der Arbeits-PC hat keinen Zugang nach draussen.  Damit ein
+        Fehlschlag trotzdem etwas Verwertbares hinterlaesst, wird die Datei
+        samt Erkennungsprotokoll hier abgelegt -- der Ordner laesst sich
+        gesammelt weitergeben, und die Erkennung kann gezielt nachgehaertet
+        werden.
+        """
+        return self.home / "nicht_erkannt"
+
+    @property
     def selectors_file(self) -> Path:
         if self.selectors_path:
             return Path(self.selectors_path).expanduser()
