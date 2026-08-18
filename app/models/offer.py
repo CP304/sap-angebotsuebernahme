@@ -93,6 +93,10 @@ class Offer:
     field_origins: dict[str, FieldOrigin] = field(default_factory=dict)
     issues: IssueList = field(default_factory=IssueList)
     extraction_notes: list[str] = field(default_factory=list)
+    #: Kaufmaennische Klauseln aus dem Fliesstext (Legierungszuschlag,
+    #: Preisgleitklausel, Skonto ...).  Sie werden NIE in den Preis
+    #: eingerechnet -- siehe app/services/extraction/clauses.py.
+    clauses: list = field(default_factory=list)
 
     # ------------------------------------------------------------------
     def set_field(self, name: str, value, origin: FieldOrigin) -> None:

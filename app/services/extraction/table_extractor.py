@@ -631,6 +631,8 @@ class TableExtractor:
                 analysis.notes.append(
                     f"mehrzeilige Kopfzeile (Zeilen {header_index + 1}/{header_index + 2}) "
                     "zusammengefuehrt")
+            else:
+                self._reclaim_rows_above_header(analysis, header_index)
 
         self._assign_columns(analysis)
         self._resolve_material_columns(analysis)
@@ -857,10 +859,17 @@ class TableExtractor:
         limit = min(_HEADER_SEARCH_ROWS, max(block.row_count - 1, 1))
         for index in range(limit):
             row = block.rows[index]
+            # Eine Summenzeile ist nie eine Kopfzeile.  Ohne diese Sperre
+            # gewann in kopflosen Tabellen die Zeile "Gesamtsumme ... 326,00"
+            # das Rennen (das Wort steht im Aliaskatalog als Zeilensumme) --
+            # und mit ihr rutschte der Datenbeginn hinter das Tabellenende.
+            # Der Beleg ergab null Positionen.
+            if is_summary_row(row):
+                continue
             single_score, _ = self._score_header_row(row)
             candidate_score, candidate_texts, merged = single_score, list(row), False
 
-            if index + 1 < block.row_count:
+            if index + 1 < block.row_count and not is_summary_row(block.rows[index + 1]):
                 combined = [normalize_whitespace(f"{a} {b}")
                             for a, b in zip(row, block.rows[index + 1])]
                 if len(block.rows[index + 1]) > len(row):
@@ -882,6 +891,14 @@ class TableExtractor:
                     candidate_score = max(single_score, merged_score)
                     candidate_texts, merged = combined, True
 
+            # Eine Kopfzeile, unter der keine Datenzeile mehr steht, ist keine.
+            # Sonst wandert der Datenbeginn hinter das Tabellenende und der
+            # Beleg ergibt null Positionen -- ausgerechnet bei den kopflosen
+            # Tabellen, bei denen die Zuordnung ueber den Inhalt gut
+            # funktioniert haette.
+            if not self._has_data_below(block, index + (2 if merged else 1)):
+                continue
+
             if candidate_score > best_score:
                 best_index, best_texts = index, candidate_texts
                 best_merged, best_score = merged, candidate_score
@@ -889,6 +906,18 @@ class TableExtractor:
         if best_score < 1.6:      # entspricht ~2 sicher erkannten Spalten
             return None, [], False, best_score
         return best_index, best_texts, best_merged, best_score
+
+    @staticmethod
+    def _has_data_below(block: TableBlock, start: int) -> bool:
+        """Steht ab dieser Zeile ueberhaupt noch eine Position?"""
+        for index in range(start, block.row_count):
+            row = block.rows[index]
+            if not any(normalize_whitespace(cell) for cell in row):
+                continue
+            if is_summary_row(row):
+                continue
+            return True
+        return False
 
     def _is_header_continuation(self, row: list[str]) -> bool:
         """Ist diese Zeile die zweite Haelfte einer mehrzeiligen Kopfzeile?
@@ -1484,6 +1513,64 @@ class TableExtractor:
                    if a and _normalize_header(a) == _normalize_header(b))
         return same >= 2
 
+    def _reclaim_rows_above_header(self, analysis: TableAnalysis,
+                                   header_index: int) -> None:
+        """Positionen retten, die *ueber* der gefundenen Kopfzeile stehen.
+
+        Bei einem Seitenumbruch wiederholt der Lieferant die Ueberschrift.
+        Hat der Beleg gar keine Kopfzeile am Anfang, dann ist diese
+        Wiederholung mitten in der Tabelle die einzige Zeile, die wie ein Kopf
+        aussieht -- sie wird gefunden, und alles darueber (also die ersten
+        Positionen des Belegs) verschwindet stillschweigend.
+
+        Entschieden wird nur bei klarer Beweislage.  Als Beweis gilt eines
+        von zwei Dingen:
+
+        * dieselbe Kopfzeile steht weiter unten noch einmal, oder
+        * die Zeile direkt ueber der Kopfzeile ist genauso aufgebaut wie die
+          Zeile direkt darunter -- gleiche Zellen gefuellt, an denselben
+          Stellen Zahlen.  Zwei gleich gebaute Zeilen ober- und unterhalb
+          einer Ueberschrift sind zwei Positionen derselben Tabelle.
+
+        Ein Briefkopf ("Preisliste 2026", "Beispiel GmbH") hat nur eine
+        gefuellte Zelle und keine Zahlen an denselben Stellen -- er wird
+        dadurch nicht mit hineingezogen.
+        """
+        if header_index <= 0:
+            return
+        block = analysis.block
+        wiederholt = any(self._is_repeated_header(block.rows[index], analysis)
+                         for index in range(header_index + 1, block.row_count))
+        if not wiederholt and header_index + 1 < block.row_count:
+            oben = _row_signature(block.rows[header_index - 1])
+            unten = _row_signature(block.rows[header_index + 1])
+            wiederholt = bool(oben) and oben == unten
+        if not wiederholt:
+            return
+
+        breite = sum(1 for text in analysis.header_texts
+                     if normalize_whitespace(text))
+        mindestens = max(2, breite - 1)
+        start = header_index
+        for index in range(header_index - 1, -1, -1):
+            row = block.rows[index]
+            gefuellt = sum(1 for cell in row if normalize_whitespace(cell))
+            if gefuellt < mindestens:
+                break
+            if is_summary_row(row) or self._is_repeated_header(row, analysis):
+                break
+            start = index
+        if start >= header_index:
+            return
+
+        analysis.data_start = start
+        analysis.notes.append(
+            f"Die Ueberschriftszeile (Zeile {header_index + 1}) steht in dieser "
+            "Tabelle mehrfach -- der Beleg beginnt also ohne Kopfzeile und "
+            "wiederholt sie beim Seitenumbruch. Die "
+            f"{header_index - start} Zeile(n) darueber werden deshalb als "
+            "Positionen gelesen; bitte pruefen, ob das stimmt.")
+
     def _row_values(self, row: list[str], analysis: TableAnalysis,
                     row_index: int = -1) -> tuple[dict[str, Any], list[str]]:
         """Zellwerte einer Zeile in Felder wandeln."""
@@ -1556,7 +1643,15 @@ class TableExtractor:
                 # "100 Stk" / "12,85 EUR/St": Zahl und Einheit stehen in einer Zelle
                 parsed, unit = self._split_number_unit(raw)
                 if parsed is not None and unit:
-                    values.setdefault("_extra_uom", normalize_uom(unit))
+                    normiert = normalize_uom(unit)
+                    values.setdefault("_extra_uom", normiert)
+                    if field_name == "quantity":
+                        # Die Einheit klebt an der Menge ("500 ST").  Sie wird
+                        # weiter unten in die Mengeneinheit uebernommen, wenn
+                        # dort nichts steht -- und sie wird gemeldet, wenn dort
+                        # etwas ANDERES steht (siehe _make_position).
+                        values["_qty_uom"] = normiert
+                        values.setdefault("_raw", {})["_qty_uom"] = raw
             if parsed in (None, ""):
                 continue
             if field_name == "price":
@@ -1810,6 +1905,32 @@ class TableExtractor:
 # --------------------------------------------------------------------------
 # Hilfsfunktionen
 # --------------------------------------------------------------------------
+
+def _row_signature(row: list[str]) -> tuple[str, ...]:
+    """Grobe Bauform einer Zeile: je Zelle leer / Zahl / Text.
+
+    Damit lassen sich zwei Positionszeilen als "gleich gebaut" erkennen, ohne
+    ihre Werte zu vergleichen.  Zeilen mit weniger als drei gefuellten Zellen
+    oder ganz ohne Zahl liefern ``()`` -- sie sind als Beweis zu duenn
+    (ein Briefkopf faellt genau darunter).
+    """
+    zeichen: list[str] = []
+    gefuellt = zahlen = 0
+    for cell in row:
+        text = normalize_whitespace(cell)
+        if not text:
+            zeichen.append("-")
+            continue
+        gefuellt += 1
+        if _looks_like_number(text) and not re.search(r"[A-Za-z]{3}", text):
+            zahlen += 1
+            zeichen.append("9")
+        else:
+            zeichen.append("a")
+    if gefuellt < 3 or zahlen < 1:
+        return ()
+    return tuple(zeichen)
+
 
 def _normalize_header(text: object) -> str:
     """Ueberschrift vereinheitlichen: klein, ohne Sonderzeichen und Einheiten."""

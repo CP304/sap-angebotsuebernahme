@@ -17,6 +17,8 @@ from __future__ import annotations
 import csv
 import datetime as _dt
 import logging
+import re
+from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 
@@ -26,7 +28,13 @@ from .base import DocumentReader, RawDocument, TableBlock
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ExcelReader", "CsvReader", "XLS_HINT", "cell_to_text"]
+__all__ = ["ExcelReader", "CsvReader", "XLS_HINT", "cell_to_text",
+           "detect_delimiter", "repair_decimal_split_rows",
+           "AMBIGUOUS_COMMA_HINT"]
+
+AMBIGUOUS_COMMA_HINT = (
+    "Das Komma ist in dieser Datei zugleich Feldtrenner und Dezimalzeichen. "
+    "Das Trennzeichen ist damit nicht sicher bestimmbar")
 
 XLS_HINT = ("Das alte Excel-Format .xls kann nicht gelesen werden (Paket 'xlrd' "
             "fehlt).  Bitte die Datei in Excel als .xlsx speichern -- oder "
@@ -231,6 +239,23 @@ class CsvReader(DocumentReader):
             document.text = raw
             return document
 
+        if delimiter == ",":
+            rows, geheilt, offen = repair_decimal_split_rows(rows)
+            if geheilt:
+                document.add_warning(
+                    f"{AMBIGUOUS_COMMA_HINT}. In {geheilt} Zeile(n) wurden "
+                    "zerrissene Betraege wieder zusammengefuegt (z. B. '2' und "
+                    "'95' zu '2,95') -- bitte die Preise stichprobenartig "
+                    "pruefen.")
+            if offen:
+                document.add_warning(
+                    f"{AMBIGUOUS_COMMA_HINT}. In {offen} Zeile(n) laesst sich "
+                    "nicht eindeutig entscheiden, welche Kommas Feldtrenner "
+                    "und welche Dezimalzeichen sind -- diese Zeilen wurden "
+                    "unveraendert uebernommen und sind zu pruefen.")
+            document.meta["comma_repaired_rows"] = geheilt
+            document.meta["comma_ambiguous_rows"] = offen
+
         rows = [row for row in rows if any(cell for cell in row)]
         if rows:
             document.tables.append(
@@ -261,43 +286,210 @@ def _read_text_file(path: str) -> tuple[str | None, str, str]:
             "Kodierung konnte nicht sicher bestimmt werden -- Umlaute pruefen.")
 
 
-def detect_delimiter(sample: str) -> str:
-    """Trennzeichen einer CSV bestimmen (Sniffer mit robustem Fallback)."""
-    head = "\n".join(sample.splitlines()[:20])
-    if not head.strip():
-        return ";"
+# ---------------------------------------------------------------------------
+# Komma als Trenner UND als Dezimalzeichen
+# ---------------------------------------------------------------------------
+#
+# Eine deutsche Preisliste mit Komma als Feldtrenner ist in sich
+# widerspruechlich: "Dichtring,2,95" enthaelt drei Felder, gemeint sind zwei.
+# Das Trennzeichen selbst ist dabei richtig erkannt -- zerrissen wird die
+# *Zahl*.  Deshalb wird hier nicht am Trennzeichen gedreht, sondern die
+# Zerlegung bewertet: hat eine Zeile mehr Felder als die Tabelle breit ist,
+# und laesst sich der Ueberschuss durch genau *eine* moegliche Zusammenfassung
+# von Zahlenbruchstuecken aufloesen, dann wird sie zusammengefuegt.  Gibt es
+# mehrere Moeglichkeiten, wird NICHTS geraten -- es entsteht ein Befund.
+
+#: Zweite Haelfte eines zerrissenen Betrags: die Cent-Stellen.
+#:
+#: Verlangt werden GENAU ZWEI Ziffern ("95", "00", "50") -- oder ein bis vier
+#: Ziffern, wenn eine Waehrung oder Einheit dahintersteht ("5 EUR", "50 kg").
+#: Diese Enge ist Absicht: eine einzelne Ziffer wuerde jede Rabattspalte
+#: ("...,50,0,...") als zerrissenen Betrag deuten und die Nachbarspalte
+#: verschlucken, vier Ziffern jede zweite Mengenspalte.  Preise mit drei oder
+#: vier Nachkommastellen werden dadurch nicht mehr zusammengefuegt, sondern
+#: als nicht aufloesbar gemeldet -- lieber ein Befund als ein falscher Wert.
+#: Ein Punkt darf nicht vorkommen: "250.00" waere die englische Schreibweise
+#: und damit ein ganz anderer Fall.
+_DECIMAL_TAIL_RE = re.compile(
+    r"^(?:\d{2}|\d{1,4}\s*[A-Za-z%€$£][A-Za-z%/€$£]{0,9}\.?)$")
+
+#: Erste Haelfte: eine ganze Zahl, gern mit Punkt als Tausendertrennung
+#: ("2", "127", "1.250"), optional mit vorangestelltem Waehrungszeichen.
+_DECIMAL_HEAD_RE = re.compile(
+    r"^(?:[€$£]|EUR|USD|CHF|GBP)?\s*[+-]?\d{1,3}(?:\.\d{3})*$", re.I)
+
+
+def _decimal_junctions(fields: list[str]) -> list[int]:
+    """Stellen, an denen zwei Nachbarfelder ein zerrissener Betrag sein koennen.
+
+    Ein Index ``i`` bedeutet: ``fields[i]`` und ``fields[i + 1]`` ergaeben
+    zusammen mit einem Komma wieder eine Zahl ("127" + "00 EUR").
+    """
+    stellen: list[int] = []
+    for index in range(len(fields) - 1):
+        kopf = fields[index].strip()
+        rumpf = fields[index + 1].strip()
+        if _DECIMAL_HEAD_RE.match(kopf) and _DECIMAL_TAIL_RE.match(rumpf):
+            stellen.append(index)
+    return stellen
+
+
+def _merge_junctions(fields: list[str], stellen: list[int]) -> list[str]:
+    """Die genannten Stellen wieder mit einem Komma zusammenfuegen."""
+    zusammen = set(stellen)
+    out: list[str] = []
+    index = 0
+    while index < len(fields):
+        if index in zusammen and index + 1 < len(fields):
+            out.append(f"{fields[index].strip()},{fields[index + 1].strip()}")
+            index += 2
+        else:
+            out.append(fields[index])
+            index += 1
+    return out
+
+
+def repair_decimal_split_rows(
+        rows: list[list[str]]) -> tuple[list[list[str]], int, int]:
+    """Am Dezimalkomma zerrissene Zeilen heilen.
+
+    Rueckgabe: ``(Zeilen, geheilt, nicht_aufloesbar)``.
+
+    Massgeblich ist die Spaltenzahl, die sich ergibt, wenn man in jeder Zeile
+    alle Zahlenbruchstuecke zusammenfasst -- die haeufigste dieser Zahlen ist
+    die Breite der Tabelle.  Eine Zeile wird nur dann angefasst, wenn sie zu
+    *viele* Felder hat und der Ueberschuss genau den gefundenen Zusammenfass-
+    Stellen entspricht.  Stehen zwei moegliche Stellen direkt nebeneinander
+    ("1,1,1"), ist die Deutung nicht eindeutig -- dann bleibt die Zeile, wie
+    sie ist, und der Aufrufer meldet das.
+    """
+    inhalt = [row for row in rows if any(cell.strip() for cell in row)]
+    if len(inhalt) < 2:
+        return rows, 0, 0
+
+    breiten = [len(row) for row in inhalt]
+    if len(set(breiten)) == 1:
+        # Alle Zeilen gleich breit: es gibt keinen Ueberschuss, den man
+        # zuordnen koennte.  Hier zu raten hiesse, eine heile Tabelle
+        # kaputtzumachen.
+        return rows, 0, 0
+
+    stellen_je_zeile = {id(row): _decimal_junctions(row) for row in inhalt}
+    kandidaten = Counter(len(row) - len(stellen_je_zeile[id(row)])
+                         for row in inhalt)
+    ziel = kandidaten.most_common(1)[0][0]
+    if ziel < 2:
+        return rows, 0, 0
+
+    geheilt = 0
+    offen = 0
+    ergebnis: list[list[str]] = []
+    for row in rows:
+        stellen = stellen_je_zeile.get(id(row))
+        if stellen is None or len(row) <= ziel:
+            ergebnis.append(row)
+            continue
+        noetig = len(row) - ziel
+        benachbart = any(stelle + 1 in set(stellen) for stelle in stellen)
+        if len(stellen) == noetig and not benachbart:
+            ergebnis.append(_merge_junctions(row, stellen))
+            geheilt += 1
+        else:
+            ergebnis.append(row)
+            offen += 1
+    return ergebnis, geheilt, offen
+
+
+def _split_lines(lines: list[str], delimiter: str) -> list[list[str]]:
+    """Zeilen mit einem Kandidaten zerlegen -- mit Ruecksicht auf Anfuehrungszeichen.
+
+    Es wird bewusst der echte CSV-Leser benutzt und nicht ``str.count``:
+    ein Trennzeichen INNERHALB von Anfuehrungszeichen ("Dichtring, gross")
+    ist keins, und genau daran scheitert reines Zeichenzaehlen.
+    """
     try:
-        dialect = csv.Sniffer().sniff(head, delimiters="".join(_DELIMITERS))
+        return [row for row in csv.reader(lines, delimiter=delimiter)]
+    except csv.Error:
+        return [line.split(delimiter) for line in lines]
+
+
+def _table_score(lines: list[str], delimiter: str) -> tuple[float, int, int]:
+    """Wie sehr sieht die Datei mit diesem Trennzeichen nach Tabelle aus?
+
+    Rueckgabe: ``(Bewertung, Laenge des besten Blocks, Spaltenzahl)``.
+
+    Massstab ist der laengste *zusammenhaengende* Block von Zeilen mit
+    derselben Feldzahl.  Das ist der entscheidende Unterschied zum blossen
+    Zaehlen: eine Tabelle besteht aus gleichfoermigen Zeilen, Fliesstext nicht.
+    Die Spaltenzahl geht mit ein, damit ein Block aus sieben Spalten einen
+    Block aus zwei Spalten schlaegt -- deutsche Prosa unter der Tabelle
+    ("... innerhalb 14 Tagen, 30 Tage netto.") ergibt naemlich sehr wohl
+    mehrere aufeinanderfolgende Zeilen mit je zwei Komma-"Feldern".
+    """
+    rows = _split_lines(lines, delimiter)
+    bester_block, beste_breite = 0, 0
+    lauf_breite, lauf_laenge = 0, 0
+    for row in rows:
+        breite = len(row)
+        if breite < 2:
+            lauf_breite, lauf_laenge = 0, 0
+            continue
+        if breite == lauf_breite:
+            lauf_laenge += 1
+        else:
+            lauf_breite, lauf_laenge = breite, 1
+        if (lauf_laenge * (lauf_breite - 1)) > (bester_block * max(beste_breite - 1, 1)):
+            bester_block, beste_breite = lauf_laenge, lauf_breite
+    if bester_block < 2:
+        return 0.0, bester_block, beste_breite
+    return float(bester_block * (beste_breite - 1)), bester_block, beste_breite
+
+
+def delimiter_scores(sample: str) -> dict[str, float]:
+    """Bewertung aller Trennzeichen-Kandidaten (hoeher ist besser)."""
+    lines = [line for line in sample.splitlines()[:40] if line.strip()]
+    return {candidate: _table_score(lines, candidate)[0]
+            for candidate in _DELIMITERS}
+
+
+def detect_delimiter(sample: str) -> str:
+    """Trennzeichen einer CSV bestimmen.
+
+    Frueher wurde gezaehlt, wie oft ein Zeichen je Zeile vorkommt.  Das
+    verliert an zwei Stellen, die in echten Angeboten die Regel sind:
+
+    * Unter der Tabelle steht Fliesstext ("Zahlungsbedingungen: 2 % Skonto
+      bei Zahlung innerhalb 14 Tagen, 30 Tage netto.").  Solche Saetze
+      enthalten Kommas, aber keine Semikolons -- beim reinen Zaehlen gewann
+      dadurch das Komma, die Tabelle blieb ungetrennt und "2,95" zerfiel
+      obendrein.  Der Beleg ergab null Positionen.
+    * Ein Briefkopf ueber der Tabelle wirkte genauso.
+
+    Deshalb wird jetzt *probeweise zerlegt* und die Zerlegung bewertet: es
+    gewinnt das Zeichen, das den groessten zusammenhaengenden Block
+    gleichbreiter Zeilen ergibt.  Prosa bildet keinen solchen Block, ein
+    Briefkopf auch nicht -- eine Tabelle schon.
+    """
+    lines = [line for line in sample.splitlines()[:40] if line.strip()]
+    if not lines:
+        return ";"
+
+    best, best_score = "", 0.0
+    for candidate in _DELIMITERS:
+        score = _table_score(lines, candidate)[0]
+        if score > best_score:
+            best, best_score = candidate, score
+    if best:
+        return best
+
+    # Kein Kandidat bildet einen Block: es gibt hier keine Tabelle, die man
+    # verderben koennte.  Der Sniffer darf noch einmal schauen, sonst bleibt
+    # es beim in Deutschland ueblichen Semikolon.
+    try:
+        dialect = csv.Sniffer().sniff("\n".join(lines[:20]),
+                                      delimiters="".join(_DELIMITERS))
         if dialect.delimiter in _DELIMITERS:
             return dialect.delimiter
     except csv.Error:
-        logger.debug("CSV-Sniffer ohne Ergebnis, es wird gezaehlt")
-
-    # Fallback: das Zeichen, das in den meisten Zeilen gleich oft vorkommt.
-    #
-    # Wichtig sind hier NUR die Zeilen, in denen das Zeichen ueberhaupt
-    # vorkommt.  Die frueher benutzte Formel verglich gegen die *erste*
-    # Zeile -- und wenn die ein Briefkopf ohne Trennzeichen war ("Preisliste
-    # 2026"), gewann ausgerechnet das Zeichen, das nirgends steht: alle
-    # uebrigen Zeilen "stimmten" ja mit der Null der ersten Zeile ueberein.
-    # Bei deutschen Preislisten fiel damit die Wahl auf das Komma, worauf
-    # "2,95" zerfiel und die Tabelle ungetrennt blieb -- die Datei ergab
-    # null Positionen, ohne dass ein Trennzeichenproblem erkennbar war.
-    lines = [line for line in head.splitlines() if line.strip()]
-    best, best_score = ";", -1.0
-    for candidate in _DELIMITERS:
-        counts = [line.count(candidate) for line in lines
-                  if line.count(candidate) > 0]
-        if not counts:
-            continue
-        # Haeufigste Anzahl je Zeile: eine echte Tabelle hat in fast jeder
-        # Zeile gleich viele Trennzeichen.
-        haeufigste = max(set(counts), key=counts.count)
-        einheitlich = counts.count(haeufigste)
-        # Zeilen mit Treffer zaehlen doppelt, die Spaltenzahl schwach mit --
-        # so gewinnt ein Zeichen, das viele Zeilen gleichmaessig aufteilt,
-        # gegen eines, das nur in einer einzigen Zeile oft vorkommt.
-        score = einheitlich * 2 + haeufigste * 0.1
-        if score > best_score:
-            best, best_score = candidate, score
-    return best
+        logger.debug("CSV-Sniffer ohne Ergebnis, es bleibt beim Semikolon")
+    return ";"

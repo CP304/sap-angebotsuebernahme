@@ -47,6 +47,7 @@ from .extraction.position_kinds import (
     KIND_SUBTOTAL,
     apply_position_kinds,
 )
+from .extraction.clauses import clause_summary, find_clauses
 from .extraction.price_parsing import footer_price_unit
 from .extraction.profiles import (
     InMemoryProfileStore,
@@ -63,6 +64,9 @@ from .readers.base import RawDocument
 logger = logging.getLogger(__name__)
 
 __all__ = ["OfferImportService"]
+
+#: Zeilentrenner fuer mehrzeilige Befund-Erlaeuterungen
+_ZEILENUMBRUCH = chr(10)
 
 #: Ab wie vielen Tabellenpositionen wird auf die Freitextsuche verzichtet
 _FREETEXT_THRESHOLD = 1
@@ -467,6 +471,7 @@ class OfferImportService:
         # nicht in den Preisvergleich.  Nichts wird verworfen -- die Zeilen
         # bleiben erhalten und sind nur nicht vorausgewaehlt.
         apply_position_kinds(offer)
+        self._apply_clauses(offer)
 
         run_checks(offer)
         offer.renumber()
@@ -523,6 +528,42 @@ class OfferImportService:
             logger.info("Nicht erkanntes Angebot abgelegt: %s", protokoll)
         except Exception as exc:  # noqa: BLE001 - Ablage ist Beiwerk
             logger.warning("Ablage nicht moeglich: %s", exc)
+
+    def _apply_clauses(self, offer: Offer) -> None:
+        """Kaufmaennische Klauseln aus dem Fliesstext vermerken.
+
+        Sie werden ausdruecklich NICHT eingerechnet -- ein
+        Legierungszuschlag ist tagesabhaengig, ein Skonto haengt vom
+        Zahlungsverhalten ab.  Ein daraus gerechneter "effektiver Preis"
+        stuende in keinem Beleg und waere fuer niemanden nachvollziehbar.
+        Der Preis bleibt also, wie er dasteht; der Anwender erfaehrt nur,
+        dass er allein nicht die ganze Wahrheit ist.
+        """
+        klauseln = find_clauses(offer.raw_text or "")
+        if not klauseln:
+            return
+
+        offer.clauses = klauseln
+        for klausel in klauseln:
+            offer.add_note(f"{klausel.text()} -- \"{klausel.quote}\"")
+
+        preisrelevant = [k for k in klauseln if k.affects_price]
+        if preisrelevant:
+            offer.issues.add(Issue(
+                "price_clause",
+                clause_summary(klauseln),
+                severity=IssueSeverity.WARNING,
+                detail=_ZEILENUMBRUCH.join(
+                    f"{k.label}: {k.quote}" for k in klauseln)))
+        else:
+            offer.issues.add(Issue(
+                "commercial_terms",
+                clause_summary(klauseln),
+                severity=IssueSeverity.INFO,
+                detail=_ZEILENUMBRUCH.join(
+                    f"{k.label}: {k.quote}" for k in klauseln)))
+        logger.info("Klauseln vermerkt: %d (davon %d preisrelevant)",
+                    len(klauseln), len(preisrelevant))
 
     def _add_issues(self, offer: Offer) -> None:
         if not offer.positions:

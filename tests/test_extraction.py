@@ -1461,7 +1461,12 @@ class KreuzpruefungAufBeispielenTests(TempDirCase):
         self.assertTrue(offer.positions)
         for position in offer.positions:
             self.assertEqual(position.confidence_label(), "sicher")
-        self.assertEqual(self._codes(offer), set())
+        # "commercial_terms" ist ein Merkposten, kein Mangel: die
+        # Beispieldatei nennt Zahlungsbedingungen und einen Incoterm, und
+        # die gehoeren festgehalten.  Beanstandet wird hier alles, was der
+        # Anwender tatsaechlich pruefen muss -- also alles ausser diesem
+        # Vermerk.
+        self.assertEqual(self._codes(offer) - {"commercial_terms"}, set())
 
     def test_B25_lueckenlose_nummernfolge_bleibt_still(self) -> None:
         offer = self._import(self.beispiele.excel_mit_kopfzeile, "muster.xlsx")

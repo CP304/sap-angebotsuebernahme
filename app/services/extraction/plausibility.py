@@ -214,6 +214,16 @@ def _mark_uncertain(position: OfferPosition, *fields: str) -> None:
         position.field_origins[name] = FieldOrigin.UNCERTAIN
 
 
+#: Befund, den die Tabellenextraktion an eine Zeile ohne Preis haengt
+CODE_PRICE_ON_REQUEST = "price_on_request"
+
+
+def _is_on_request(position: OfferPosition) -> bool:
+    """Hat der Lieferant fuer diese Zeile ausdruecklich keinen Preis genannt?"""
+    return any(getattr(issue, "code", "") == CODE_PRICE_ON_REQUEST
+               for issue in position.issues)
+
+
 def _add_issue(position: OfferPosition, code: str, message: str,
                field_name: str = "", detail: str = "") -> None:
     position.issues.add(Issue(code, message, IssueSeverity.WARNING,
@@ -265,8 +275,15 @@ def check_line_total(position: OfferPosition) -> list[str]:
                    detail=f"Zeilensumme laut Beleg: {format_decimal(total)}")
         return notes
 
+    # "auf Anfrage" ist eine Aussage des Lieferanten, kein fehlender Wert.
+    # Aus einer danebenstehenden Zeilensumme trotzdem einen Preis auszurechnen
+    # hiesse, dem Beleg zu widersprechen -- und in der Praxis war die Summe in
+    # solchen Zeilen ohnehin meist ein Restwert oder ein Platzhalter.  Es
+    # bleibt deshalb bei "kein Preis"; der Befund dazu steht schon an der
+    # Position.
     # Preis fehlt, Menge und Zeilensumme liegen vor -> ausrechnen (nicht raten)
-    if position.price is None and position.quantity not in (None, 0):
+    if (position.price is None and position.quantity not in (None, 0)
+            and not _is_on_request(position)):
         quantity = Decimal(position.quantity)
         if quantity != 0:
             price = (total * unit / quantity).quantize(DERIVED_PRICE_DECIMALS)
