@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from ..models.offer_position import OfferPosition
 from ..models.results import BatchSummary
+from ..models.sap_vendor import VendorMasterPlan
 from .style import RESULT_COLOR, Colors, badge_style
 
 logger = logging.getLogger(__name__)
@@ -264,14 +265,18 @@ def ask_yes_no(parent, title: str, message: str, detail: str = "") -> bool:
 class VendorAssignmentDialog(QDialog):
     """SAP-Lieferant zu einem Angebotsnamen zuordnen."""
 
+    #: Sonder-Ergebniscode: Anwender moechte den Lieferanten in SAP anlegen
+    CREATE_REQUESTED = 2
+
     def __init__(self, vendor_name: str, email_domain: str, candidates: list,
-                 current_number: str = "", parent=None) -> None:
+                 current_number: str = "", parent=None, settings=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("SAP-Lieferant zuordnen")
         self.setMinimumWidth(560)
         self.vendor_name = vendor_name
         self.email_domain = email_domain
         self.candidates = candidates
+        self.settings = settings
         self._build(current_number)
 
     def _build(self, current_number: str) -> None:
@@ -324,6 +329,15 @@ class VendorAssignmentDialog(QDialog):
         self.apply_all_box.setChecked(True)
         layout.addWidget(self.apply_all_box)
 
+        # "Lieferant anlegen" ist nur sinnvoll, wenn wirklich kein Treffer
+        # gefunden wurde -- sonst wuerde man versehentlich einen Dublettensatz
+        # anlegen, obwohl der Lieferant schon existiert.
+        self.create_button = QPushButton("Lieferant in SAP anlegen ...")
+        self.create_button.setVisible(not self.candidates)
+        self.create_button.setEnabled(not self.candidates)
+        self.create_button.clicked.connect(self._request_create)
+        layout.addWidget(self.create_button)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                    | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Zuordnen")
@@ -332,6 +346,9 @@ class VendorAssignmentDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _request_create(self) -> None:
+        self.done(self.CREATE_REQUESTED)
 
     @property
     def vendor_number(self) -> str:
@@ -344,6 +361,102 @@ class VendorAssignmentDialog(QDialog):
     @property
     def apply_to_all(self) -> bool:
         return self.apply_all_box.isChecked()
+
+
+# ---------------------------------------------------------------------------
+# Lieferant in SAP anlegen (XK01)
+# ---------------------------------------------------------------------------
+
+class VendorCreateDialog(QDialog):
+    """Einfache Erfassung der wichtigsten Felder fuer eine Neuanlage (XK01).
+
+    Es werden bewusst nur die im Alltag wirklich noetigen Felder abgefragt --
+    alles Weitere pflegt der Einkauf spaeter in SAP direkt nach.  Land und
+    Einkaufsorganisation sind mit den Vorgaben aus den Einstellungen
+    vorbelegt, aber jederzeit aenderbar.
+    """
+
+    def __init__(self, vendor_name: str, settings, parent=None) -> None:
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("Lieferant in SAP anlegen")
+        self.setMinimumWidth(480)
+        self._build(vendor_name)
+
+    def _build(self, vendor_name: str) -> None:
+        layout = QVBoxLayout(self)
+
+        heading = QLabel("Neuer Lieferant -- wird in SAP angelegt (XK01)")
+        heading.setObjectName("Heading")
+        layout.addWidget(heading)
+
+        hint = QLabel("Es wird kein Lieferant erraten oder automatisch angelegt -- bitte "
+                      "die Angaben pruefen und ergaenzen. Der Lieferant wird erst nach "
+                      "Bestaetigung in SAP geschrieben.")
+        hint.setWordWrap(True)
+        hint.setObjectName("SubHeading")
+        layout.addWidget(hint)
+
+        purchasing = getattr(self.settings, "purchasing", None)
+
+        form = QFormLayout()
+        self.name_edit = QLineEdit(vendor_name or "")
+        form.addRow("Name*:", self.name_edit)
+        self.street_edit = QLineEdit()
+        form.addRow("Strasse:", self.street_edit)
+        self.postal_code_edit = QLineEdit()
+        form.addRow("PLZ:", self.postal_code_edit)
+        self.city_edit = QLineEdit()
+        form.addRow("Ort:", self.city_edit)
+        self.country_edit = QLineEdit(getattr(purchasing, "country", "") or "DE")
+        form.addRow("Land*:", self.country_edit)
+        self.language_edit = QLineEdit("DE")
+        form.addRow("Sprache:", self.language_edit)
+        self.purchasing_org_edit = QLineEdit(getattr(purchasing, "purchasing_org", "") or "")
+        form.addRow("Einkaufsorganisation:", self.purchasing_org_edit)
+        layout.addLayout(form)
+
+        required_hint = QLabel("* Pflichtfeld -- ohne Name und Land wird nicht gespeichert.")
+        required_hint.setObjectName("SubHeading")
+        layout.addWidget(required_hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        ok.setText("In SAP anlegen (XK01)")
+        ok.setObjectName("Primary")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Abbrechen")
+        buttons.accepted.connect(self._confirm)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _confirm(self) -> None:
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "Angabe fehlt", "Bitte einen Namen eintragen.")
+            return
+        if not self.country_edit.text().strip():
+            QMessageBox.warning(self, "Angabe fehlt", "Bitte ein Land eintragen.")
+            return
+        confirm = QMessageBox.question(
+            self, "Lieferant anlegen",
+            f"Lieferant '{self.name_edit.text().strip()}' wirklich in SAP anlegen (XK01)?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self.accept()
+
+    def plan(self) -> VendorMasterPlan:
+        """Der eingegebene Entwurf als :class:`VendorMasterPlan` (noch nicht geschrieben)."""
+        return VendorMasterPlan(
+            existing_vendor_number="",
+            name=self.name_edit.text().strip(),
+            street=self.street_edit.text().strip(),
+            postal_code=self.postal_code_edit.text().strip(),
+            city=self.city_edit.text().strip(),
+            country=self.country_edit.text().strip(),
+            language=self.language_edit.text().strip(),
+            purchasing_org=self.purchasing_org_edit.text().strip(),
+        )
 
 
 # ---------------------------------------------------------------------------

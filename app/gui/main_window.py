@@ -44,6 +44,7 @@ from ..models.offer import Offer
 from ..models.offer_position import OfferPosition
 from ..sap.gateway import SapGateway
 from ..services.queue_service import OfferQueue
+from ..services.vendor_master_service import VendorMasterService
 from ..utils.logging_setup import GuiLogHandler
 from ..utils.parsing import format_date
 from .dialogs import (
@@ -53,6 +54,7 @@ from .dialogs import (
     ResultDialog,
     SessionDialog,
     VendorAssignmentDialog,
+    VendorCreateDialog,
     ask_yes_no,
     show_error,
 )
@@ -1328,8 +1330,13 @@ class MainWindow(QMainWindow):
                 logger.debug("Kandidatensuche fehlgeschlagen: %s", exc)
 
         current = position.vendor_number if position else self.offer.vendor_number
-        dialog = VendorAssignmentDialog(name, domain, candidates, current, self)
-        if dialog.exec() != VendorAssignmentDialog.DialogCode.Accepted:
+        dialog = VendorAssignmentDialog(name, domain, candidates, current, self,
+                                        settings=self.settings)
+        result_code = dialog.exec()
+        if result_code == VendorAssignmentDialog.CREATE_REQUESTED:
+            self._create_vendor_in_sap(name)
+            return
+        if result_code != VendorAssignmentDialog.DialogCode.Accepted:
             return
         number = dialog.vendor_number
         if not number:
@@ -1357,6 +1364,46 @@ class MainWindow(QMainWindow):
         self._fill_header()
         self.details.refresh()
         self._update_counters()
+
+    def _create_vendor_in_sap(self, vendor_name: str) -> None:
+        """Neuanlage-Dialog oeffnen und -- nach Bestaetigung -- in SAP anlegen (XK01).
+
+        Es wird bewusst NICHT im Hintergrund geschrieben: der Dialog verlangt
+        eine eigene Bestaetigung, danach wird sofort (kein Dry Run, kein
+        Batch) genau dieser eine Lieferant angelegt.
+        """
+        if self.offer is None:
+            return
+        create_dialog = VendorCreateDialog(vendor_name, self.settings, self)
+        if create_dialog.exec() != VendorCreateDialog.DialogCode.Accepted:
+            return
+        plan = create_dialog.plan()
+        service = VendorMasterService(self.gateway)
+        context = self.gateway.write_context()
+        result = service.create_or_update(plan, context)
+        if not result.ok:
+            show_error(self, "Lieferant konnte nicht angelegt werden", result.message)
+            return
+
+        number = result.document_number
+        if not number:
+            show_error(self, "Lieferant konnte nicht angelegt werden",
+                       "SAP hat keine Lieferantennummer gemeldet.")
+            return
+
+        self._snapshot("Lieferant in SAP angelegt")
+        self.offer.set_field("vendor_number", number, FieldOrigin.MANUAL)
+        for item in self.offer.positions:
+            if not item.vendor_number:
+                item.vendor_number = number
+
+        self._revalidate()
+        self.table_model.refresh_all()
+        self._fill_header()
+        self.details.refresh()
+        self._update_counters()
+        QMessageBox.information(self, "Lieferant angelegt",
+                                f"Lieferant {number} wurde in SAP angelegt: {result.message}")
 
     # ==================================================================
     # Bearbeitung

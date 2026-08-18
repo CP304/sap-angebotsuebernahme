@@ -20,6 +20,7 @@ from ..models.offer_position import OfferPosition
 from ..models.results import ActionResult
 from ..models.sap_info_record import SapInfoRecord
 from ..models.sap_source_list import SapSourceList
+from ..models.sap_vendor import SapVendorRecord, VendorMasterPlan
 from .connection import SapGuiConnection
 from .selectors import SelectorRegistry
 
@@ -146,6 +147,14 @@ class VendorServiceBase(SapServiceBase, ABC):
     @abstractmethod
     def search_by_name(self, name: str, limit: int = 10) -> list[VendorMatch]:
         """Namenssuche -- liefert *Vorschlaege*, nie eine automatische Zuordnung."""
+
+    @abstractmethod
+    def read(self, vendor_number: str) -> SapVendorRecord:
+        """Vollstaendigen Lieferantensatz lesen (mehrere Sichten)."""
+
+    @abstractmethod
+    def write(self, plan: VendorMasterPlan, context: WriteContext) -> ActionResult:
+        """Lieferant anlegen (XK01) oder aendern (XK02)."""
 
 
 class ContractServiceBase(SapServiceBase, ABC):

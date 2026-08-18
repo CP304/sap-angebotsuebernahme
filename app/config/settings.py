@@ -171,6 +171,8 @@ class Transactions:
     purchase_order_display: str = "ME23N"
     material_display: str = "MM03"
     vendor_display: str = "XK03"
+    vendor_create: str = "XK01"
+    vendor_change: str = "XK02"
     vendor_list: str = "MKVZ"
 
 

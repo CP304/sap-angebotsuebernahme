@@ -80,6 +80,9 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("price_unit", "PE", 46, True, "int", "Preiseinheit",
                align=int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)),
     ColumnSpec("currency", "Whg", 48, True, "text"),
+    ColumnSpec("conditions", "Konditionen", 190, False, "conditions",
+               "Erkannte Zusatzkonditionen (Rabatt, Zuschlag, Fracht, Skonto) "
+               "-- Einzelheiten in der Detailansicht"),
     ColumnSpec("valid_from", "Gueltig ab", 88, True, "date"),
     ColumnSpec("do_info_record", "Infosatz", 108, True, "action",
                "Infosatz pflegen (ME11/ME12)"),
@@ -296,6 +299,8 @@ class OfferTableModel(QAbstractTableModel):
             return "  ".join(aktiv) if aktiv else "–"
         if spec.kind == "action":
             return self._action_text(position, key)
+        if spec.kind == "conditions":
+            return position.condition_display() if position.has_conditions else ""
         if key == "status":
             symbol = STATUS_STYLE.get(position.status, ("", "", "○"))[2]
             text = position.result_text or position.status.label

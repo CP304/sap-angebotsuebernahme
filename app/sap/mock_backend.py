@@ -32,6 +32,7 @@ from ..models.offer_position import OfferPosition
 from ..models.results import ActionResult
 from ..models.sap_info_record import SapCondition, SapInfoRecord
 from ..models.sap_source_list import SapSourceList, SourceListEntry
+from ..models.sap_vendor import SapVendorRecord, VendorMasterPlan
 from ..utils.parsing import (
     format_date,
     format_decimal,
@@ -47,6 +48,7 @@ from .info_record_service import (
     verify_info_record_write,
     verify_source_list_write,
 )
+from .vendor_service import verify_vendor_master_write
 from .interfaces import (
     ContractServiceBase,
     InfoRecordServiceBase,
@@ -592,6 +594,151 @@ class MockVendorService(_MockBase, VendorServiceBase):
         ]
         matches.sort(key=lambda m: m.score, reverse=True)
         return [m for m in matches if m.score > 0.2][:limit]
+
+    # ------------------------------------------------------------------
+    def _find(self, vendor_number: str) -> tuple[str, dict | None]:
+        """Lieferant unter ALPHA-Konvertierung finden -- liefert (Schluessel, Satz)."""
+        raw = self.system.vendors.get(vendor_number)
+        if raw is not None:
+            return vendor_number, raw
+        gesucht = normalize_vendor_number(vendor_number)
+        for number, candidate in self.system.vendors.items():
+            if normalize_vendor_number(number) == gesucht:
+                return number, candidate
+        return vendor_number, None
+
+    def read(self, vendor_number: str) -> SapVendorRecord:
+        record = SapVendorRecord(vendor_number=vendor_number)
+        if not vendor_number:
+            record.read_error = "Keine Lieferantennummer angegeben."
+            return record
+        key, raw = self._find(vendor_number)
+        record.read_at = datetime.now()
+        if raw is None:
+            record.exists = False
+            return record
+        record.vendor_number = key
+        record.exists = True
+        record.name = raw.get("name", "")
+        record.name2 = raw.get("name2", "")
+        record.street = raw.get("street", "")
+        record.postal_code = raw.get("postal_code", "")
+        record.city = raw.get("city", "")
+        record.country = raw.get("country", "")
+        record.region = raw.get("region", "")
+        record.language = raw.get("language", "")
+        record.search_term = raw.get("search_term", "")
+        record.telephone = raw.get("telephone", "")
+        record.email = raw.get("email", "")
+        record.purchasing_org = raw.get("purchasing_org", self.settings.purchasing.purchasing_org)
+        record.currency = raw.get("currency", "")
+        record.payment_terms = raw.get("payment_terms", "")
+        record.incoterm = raw.get("incoterm", "")
+        record.incoterm_location = raw.get("incoterm_location", "")
+        record.purchasing_group = raw.get("purchasing_group", "")
+        record.blocked = bool(raw.get("blocked"))
+        record.tax_number = raw.get("tax_number", "")
+        record.vat_id = raw.get("vat_id", "")
+        return record
+
+    def write(self, plan: VendorMasterPlan, context: WriteContext) -> ActionResult:
+        started = self._now_ms()
+
+        problem = self._validate(plan)
+        if problem:
+            return self._result("vendor_master", ResultState.FAILED, problem,
+                                started_ms=started)
+
+        is_change = plan.is_change
+        transaction = (self.settings.transactions.vendor_change if is_change
+                       else self.settings.transactions.vendor_create)
+        old_value = ""
+        key = plan.existing_vendor_number
+
+        if is_change:
+            key, raw = self._find(plan.existing_vendor_number)
+            if raw is None:
+                return self._result(
+                    "vendor_master", ResultState.FAILED,
+                    f"Lieferant {plan.existing_vendor_number} ist in SAP nicht "
+                    "auffindbar -- Aenderung abgebrochen.", started_ms=started)
+            bestehender_name = raw.get("name", "")
+            if plan.name and bestehender_name and \
+                    plan.name.strip().upper() != bestehender_name.strip().upper():
+                return self._result(
+                    "vendor_master", ResultState.FAILED,
+                    f"Sicherheitsabbruch: Lieferant {plan.existing_vendor_number} heisst "
+                    f"in SAP '{bestehender_name}', der Plan nennt aber '{plan.name}'. "
+                    "Es wurde nichts geaendert.", started_ms=started)
+            old_value = bestehender_name
+        new_value = plan.name or "(kein Name)"
+
+        if context.dry_run:
+            return self._result(
+                "vendor_master", ResultState.SIMULATED,
+                f"{'aendern' if is_change else 'neu anlegen'} ({transaction})",
+                transaction=transaction, old_value=old_value, new_value=new_value,
+                started_ms=started,
+            )
+
+        if not is_change:
+            key = self.system.next_number("vendor", "1")
+
+        satz = dict(self.system.vendors.get(key, {}))
+        for feld, wert in (
+            ("name", plan.name), ("name2", plan.name2), ("street", plan.street),
+            ("postal_code", plan.postal_code), ("city", plan.city),
+            ("country", plan.country), ("region", plan.region),
+            ("language", plan.language), ("search_term", plan.search_term),
+            ("telephone", plan.telephone), ("email", plan.email),
+            ("purchasing_org", plan.purchasing_org or self.settings.purchasing.purchasing_org),
+            ("currency", plan.currency), ("payment_terms", plan.payment_terms),
+            ("incoterm", plan.incoterm), ("incoterm_location", plan.incoterm_location),
+            ("purchasing_group", plan.purchasing_group),
+            ("tax_number", plan.tax_number), ("vat_id", plan.vat_id),
+        ):
+            if wert:
+                satz[feld] = wert
+        satz.setdefault("blocked", False)
+        self.system.vendors[key] = satz
+        self.system.save()
+        plan.document_number = key
+
+        messages = [f"Lieferant {key} wurde {'geaendert' if is_change else 'angelegt'}"]
+
+        if not key:
+            return self._result("vendor_master", ResultState.FAILED,
+                                "SAP hat keine Lieferantennummer gemeldet -- es ist "
+                                "unklar, ob der Lieferant angelegt wurde.",
+                                transaction=transaction, started_ms=started)
+
+        if self.settings.sap.verify_after_write:
+            geprueft = self.read(key)
+            in_ordnung, hinweise = verify_vendor_master_write(geprueft, plan)
+            messages.extend(hinweise)
+            if not in_ordnung:
+                if self.settings.sap.verify_failure_is_error:
+                    return self._result(
+                        "vendor_master", ResultState.FAILED, hinweise[0],
+                        transaction=transaction, document_number=key,
+                        old_value=old_value, new_value=new_value,
+                        started_ms=started, sap_messages=messages)
+                messages.append("Hinweis: Es wurde gesichert, die Ruecklese-Pruefung "
+                                "ist aber nicht sauber -- bitte nachsehen.")
+
+        return self._result(
+            "vendor_master", ResultState.SUCCESS,
+            f"Lieferant {'geaendert' if is_change else 'angelegt'}",
+            transaction=transaction, document_number=key, old_value=old_value,
+            new_value=new_value, started_ms=started, sap_messages=messages,
+        )
+
+    def _validate(self, plan: VendorMasterPlan) -> str:
+        if not plan.name:
+            return "Kein Name angegeben -- Lieferant kann nicht angelegt/geaendert werden."
+        if not plan.country:
+            return "Kein Land angegeben -- Lieferant kann nicht angelegt/geaendert werden."
+        return ""
 
 
 class MockContractService(_MockBase, ContractServiceBase):

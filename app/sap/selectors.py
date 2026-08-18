@@ -565,6 +565,61 @@ def default_screens() -> dict[str, Screen]:
         },
     )
 
+    # -- Lieferant anlegen/aendern (XK01/XK02) ----------------------------
+    screens["vendor_master"] = Screen(
+        key="vendor_master", title="Lieferant anlegen/aendern (XK01/XK02)",
+        transaction="XK01/XK02",
+        note=("TODO: kundenspezifische SAP-GUI-IDs pruefen -- ALLE Vorschlaege dieser "
+              "Maske sind ungeprueft.  XK01/XK02 zeigen je nach Customizing oft zuerst "
+              "ein Popup zur Auswahl des Kontoschemas (Kontengruppe) -- dieses Popup "
+              "wird von der Anwendung NIE automatisch bestaetigt, sondern fuehrt zu "
+              "einem SapPopupError.  Bitte den bei Ihnen ueblichen Weg (inkl. eines "
+              "eventuellen Kontoschema-Popups) einmal aufzeichnen."),
+        elements={
+            "vendor": _s("wnd[0]/usr/ctxtRF02K-LIFNR", "Lieferant"),
+            "company_code": _s("wnd[0]/usr/ctxtRF02K-BUKRS", "Buchungskreis", optional=True),
+            "purchasing_org": _s("wnd[0]/usr/ctxtRF02K-EKORG", "Einkaufsorganisation"),
+            "account_group": _s("wnd[0]/usr/ctxtRF02K-KTOKK", "Kontengruppe",
+                                optional=True),
+            # Anschrift (Allgemeine Daten)
+            "name": _s("wnd[0]/usr/subCOUNTRY_SCREEN:SAPLSZA1:0301/txtADDR1_DATA-NAME1",
+                       "Name"),
+            "name2": _s("wnd[0]/usr/subCOUNTRY_SCREEN:SAPLSZA1:0301/txtADDR1_DATA-NAME2",
+                        "Name 2 (Adresszusatz)", optional=True),
+            "search_term": _s("wnd[0]/usr/subCOUNTRY_SCREEN:SAPLSZA1:0301/"
+                              "txtADDR1_DATA-SORT1", "Suchbegriff", optional=True),
+            "street": _s("wnd[0]/usr/subCOUNTRY_SCREEN:SAPLSZA1:0301/"
+                         "txtADDR1_DATA-STREET", "Strasse", optional=True),
+            "postal_code": _s("wnd[0]/usr/subCOUNTRY_SCREEN:SAPLSZA1:0301/"
+                              "txtADDR1_DATA-POST_CODE1", "Postleitzahl", optional=True),
+            "city": _s("wnd[0]/usr/subCOUNTRY_SCREEN:SAPLSZA1:0301/txtADDR1_DATA-CITY1",
+                       "Ort", optional=True),
+            "country": _s("wnd[0]/usr/subCOUNTRY_SCREEN:SAPLSZA1:0301/"
+                          "ctxtADDR1_DATA-COUNTRY", "Land"),
+            "region": _s("wnd[0]/usr/subCOUNTRY_SCREEN:SAPLSZA1:0301/"
+                         "ctxtADDR1_DATA-REGION", "Region/Bundesland", optional=True),
+            "language": _s("wnd[0]/usr/subCOUNTRY_SCREEN:SAPLSZA1:0301/"
+                           "ctxtADDR1_DATA-LANGU", "Sprache", optional=True),
+            "telephone": _s("wnd[0]/usr/subCOUNTRY_SCREEN:SAPLSZA1:0301/"
+                            "txtADDR1_DATA-TEL_NUMBER", "Telefon", optional=True),
+            "email": _s("wnd[0]/usr/subCOUNTRY_SCREEN:SAPLSZA1:0301/"
+                        "txtSZA1_D0100-SMTP_ADDR", "E-Mail", optional=True),
+            "tax_number": _s("wnd[0]/usr/ctxtLFA1-STCD1", "Steuernummer", optional=True),
+            "vat_id": _s("wnd[0]/usr/ctxtLFA1-STCEG", "USt-IdNr.", optional=True),
+            # Einkaufsorganisationsdaten
+            "currency": _s("wnd[0]/usr/ctxtLFM1-WAERS", "Bestellwaehrung", optional=True),
+            "payment_terms": _s("wnd[0]/usr/ctxtLFM1-ZTERM", "Zahlungsbedingung",
+                                optional=True),
+            "incoterm": _s("wnd[0]/usr/ctxtLFM1-INCO1", "Incoterm", optional=True),
+            "incoterm_location": _s("wnd[0]/usr/ctxtLFM1-INCO2", "Incoterm-Ort",
+                                    optional=True),
+            "purchasing_group": _s("wnd[0]/usr/ctxtLFM1-EKGRP", "Einkaeufergruppe",
+                                   optional=True),
+            "blocked": _s("wnd[0]/usr/chkLFM1-SPERM", "Bestellsperre", "checkbox",
+                          optional=True),
+        },
+    )
+
     return screens
 
 
@@ -587,6 +642,7 @@ REQUIRED_SCREENS: dict[str, tuple[str, ...]] = {
     "purchase_order_from_contract": ("purchase_order", "purchase_order_reference", "messages"),
     "material_read": ("material_display",),
     "vendor_read": ("vendor_display",),
+    "vendor_master_write": ("vendor_master",),
 }
 
 

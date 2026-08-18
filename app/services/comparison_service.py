@@ -428,6 +428,20 @@ class ComparisonService:
                 f"Angebot in {conversion.currency}, Vergleich in "
                 f"{conversion.target_currency} – nach SAP wird der "
                 f"Originalbetrag in {conversion.currency} geschrieben.")
+
+        # Zusatzkonditionen: Rabatt, Zu-/Abschlag, Fracht, Skonto.  Nur
+        # anzeigen, wenn tatsaechlich welche erkannt wurden bzw. im
+        # Bestandssatz stehen -- sonst nur eine unnoetige Zeile.
+        angebot_konditionen = (position.condition_display(self.settings.conditions)
+                               if position.has_conditions else "")
+        sap_konditionen = (record.conditions_display(self.settings.conditions.gross_price)
+                          if record is not None and record.exists else "")
+        if angebot_konditionen or sap_konditionen:
+            zeile = angebot_konditionen or "keine erkannt"
+            if not self.settings.conditions.write_additional_conditions and angebot_konditionen:
+                zeile += "  ⚠ werden nicht geschrieben (Einstellungen)"
+            beschreibung["Konditionen (Angebot)"] = zeile
+            beschreibung["Konditionen (SAP heute)"] = sap_konditionen or "keine"
         return beschreibung
 
     def info_record_text(self, position: OfferPosition) -> str:
