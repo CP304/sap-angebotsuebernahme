@@ -889,16 +889,24 @@ class MainWindow(QMainWindow):
         angeboten -- und beide lernen fuer das naechste Mal mit.
         """
         offer = self.offer
+        ursache = self._empty_result_cause(offer)
         gruende = "\n".join(f"• {note}" for note in (offer.extraction_notes[:5]
                                                      if offer else []))
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle("Keine Positionen erkannt")
         box.setText("In diesem Angebot wurden keine Positionen gefunden.")
+
+        hinweis = ""
+        if ursache:
+            # Der Grund gehoert nach vorn, nicht hinter "Details".  Wer nicht
+            # weiss, dass sein PDF ein Scan ist, sucht sonst den Fehler bei
+            # sich -- und das Anlernen bringt ihn dort auch nicht weiter.
+            hinweis = f"Grund:\n{ursache}\n\n"
         box.setInformativeText(
-            "Das kommt bei ungewoehnlichen Angebotsformaten vor. Sie haben zwei "
-            "schnelle Wege – beide merkt sich die Anwendung fuer kuenftige Angebote "
-            "dieses Lieferanten:\n\n"
+            hinweis +
+            "Sie haben zwei schnelle Wege – beide merkt sich die Anwendung fuer "
+            "kuenftige Angebote dieses Lieferanten:\n\n"
             "• Tabelle einfuegen: Bereich in Excel kopieren, hier einfuegen, Spalten "
             "zuordnen\n"
             "• Grafisch anlernen: im PDF markieren, wo Positionen und Spalten stehen")
@@ -914,7 +922,14 @@ class MainWindow(QMainWindow):
         box.addButton("Spaeter", QMessageBox.ButtonRole.RejectRole)
         teach_button.setEnabled(self._teachable_pdf() is not None)
         if not teach_button.isEnabled():
-            teach_button.setToolTip("Grafisches Anlernen gibt es nur fuer PDF-Angebote.")
+            hat_pdf = any(str(p).lower().endswith(".pdf")
+                          for p in (offer.source_files if offer else []))
+            teach_button.setToolTip(
+                "Dieses PDF hat keine Textebene (Scan). Das Anlernen liest die "
+                "Woerter aus der Textebene und findet hier nichts. Bitte ein "
+                "Text-PDF anfordern oder die Tabelle einfuegen."
+                if hat_pdf else
+                "Grafisches Anlernen gibt es nur fuer PDF-Angebote.")
         box.exec()
 
         clicked = box.clickedButton()
@@ -925,14 +940,61 @@ class MainWindow(QMainWindow):
         elif clicked is manual_button:
             self._add_position()
 
+    #: Befunde, die *erklaeren*, warum nichts erkannt wurde -- im Unterschied
+    #: zu den Folgemeldungen ("Waehrung fehlt", "keine Position"), die nur
+    #: wiederholen, was der Anwender ohnehin sieht.
+    _URSACHEN_CODES = ("reader_warning", "reader_error", "file_error", "no_input")
+
+    def _empty_result_cause(self, offer: Offer | None) -> str:
+        """Den erklaerenden Befund heraussuchen, nicht die Folgemeldungen.
+
+        Ohne das steht im Leer-Dialog nur "keine Positionen gefunden" -- der
+        Anwender erfaehrt nicht, dass sein PDF ein Scan ohne Textebene ist,
+        und probiert dann das Anlernen, das genau daran ebenfalls scheitert.
+        """
+        if offer is None:
+            return ""
+        texte: list[str] = []
+        for problem in offer.issues:
+            if problem.code not in self._URSACHEN_CODES:
+                continue
+            text = (problem.message or "").strip()
+            if text and text not in texte:
+                texte.append(text)
+        return "\n\n".join(texte[:2])
+
     def _teachable_pdf(self) -> str | None:
-        """Pfad des PDFs, auf dem angelernt werden kann (falls vorhanden)."""
+        """Pfad des PDFs, auf dem angelernt werden kann (falls vorhanden).
+
+        Ein PDF ohne Textebene zaehlt hier ausdruecklich *nicht*: Das
+        Anlernen liest die Woerter aus der Textebene: Wo keine ist, liefert
+        auch das sorgfaeltigste Rechteck nichts.  Den Weg anzubieten waere
+        eine Einladung in eine Sackgasse.
+        """
         if self.offer is None:
             return None
         for path in self.offer.source_files:
             if str(path).lower().endswith(".pdf") and Path(path).is_file():
+                if not self._pdf_has_text(str(path)):
+                    continue
                 return str(path)
         return None
+
+    @staticmethod
+    def _pdf_has_text(path: str) -> bool:
+        """Hat das PDF eine Textebene?  Im Zweifel ja -- lieber anbieten."""
+        try:
+            import fitz  # noqa: PLC0415 - nur hier gebraucht
+
+            with fitz.open(path) as dokument:
+                for seite in dokument:
+                    if (seite.get_text() or "").strip():
+                        return True
+            return False
+        except Exception as exc:  # noqa: BLE001 - Pruefung darf nie stoppen
+            logger.info("Textebene von %s nicht pruefbar (%s) -- Anlernen bleibt "
+                        "angeboten.", path, exc)
+            return True
 
     def import_table_manually(self) -> None:
         """Tabelle einfuegen/laden und Spalten selbst zuordnen."""
