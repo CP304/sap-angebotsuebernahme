@@ -110,7 +110,7 @@ class MailAnhangCase(unittest.TestCase):
             inhalt: str = ANHANG_CSV, name: str = "preise.csv") -> str:
         message = EmailMessage()
         message["From"] = "T. Wagner <vertrieb@muster-dichtung.de>"
-        message["To"] = "einkauf@technotrans.de"
+        message["To"] = "einkauf@beispiel-gmbh.de"
         message["Subject"] = "Preisliste 2026"
         message["Date"] = "Mon, 17 Aug 2026 09:00:00 +0200"
         message.set_content(body)

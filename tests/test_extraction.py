@@ -881,7 +881,7 @@ class EmailTests(TempDirCase):
              attachment: tuple[str, bytes] | None = None) -> str:
         message = EmailMessage()
         message["From"] = "T. Wagner (Muster GmbH) <vertrieb@muster-dichtung.de>"
-        message["To"] = "einkauf@technotrans.de"
+        message["To"] = "einkauf@beispiel-gmbh.de"
         message["Subject"] = "Preisanpassung zum 01.09.2026"
         message["Date"] = "Mon, 17 Aug 2026 09:00:00 +0200"
         message.set_content(body)

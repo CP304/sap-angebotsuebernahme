@@ -73,7 +73,7 @@ ECHTE_KOPFZEILEN: list[tuple[str, list[str], list[str]]] = [
     (
         "Nr 17 -- englischer Kopf mit Incoterm-Preisspalte",
         ["Pos.", "Article / Drawing / Description", "Quantity (pcs)",
-         "DDP 48336 Sassenberg (EUR/ST)", "Subtotal (EUR)"],
+         "DDP 12345 Musterstadt (EUR/ST)", "Subtotal (EUR)"],
         ["10", "Bracket 12-4455-A", "500", "3,80", "1900,00"],
     ),
     (
@@ -254,7 +254,7 @@ class IncotermPreisspalteTest(unittest.TestCase):
     """Incoterm-Kuerzel plus Waehrung in Klammern = Preisspalte."""
 
     def test_ddp_mit_waehrung_und_einheit(self) -> None:
-        treffer = incoterm_price_header("DDP 48336 Sassenberg (EUR/ST)")
+        treffer = incoterm_price_header("DDP 12345 Musterstadt (EUR/ST)")
         self.assertIsNotNone(treffer)
         assert treffer is not None
         incoterm, currency, uom = treffer
@@ -283,7 +283,7 @@ class IncotermPreisspalteTest(unittest.TestCase):
     def test_incoterm_spalte_wird_als_preis_zugeordnet(self) -> None:
         _, header, row = ECHTE_KOPFZEILEN[2]
         felder = _felder(_analyse(header, row))
-        self.assertEqual(felder.get("price"), "DDP 48336 Sassenberg (EUR/ST)")
+        self.assertEqual(felder.get("price"), "DDP 12345 Musterstadt (EUR/ST)")
 
     def test_incoterm_wird_im_kopf_vermerkt(self) -> None:
         _, header, row = ECHTE_KOPFZEILEN[2]

@@ -186,7 +186,7 @@ _PRICE_PER_UOM_RE = re.compile(
 #: Bekannte Incoterm-Kuerzel (Incoterms 2010/2020 plus die alten Klassiker).
 #: Steht eines davon in einer Ueberschrift und zusaetzlich eine Waehrung in
 #: Klammern, dann ist diese Spalte der Preis -- so beschriften viele
-#: Lieferanten ihre Preisspalte ("DDP 48336 Sassenberg (EUR/ST)").
+#: Lieferanten ihre Preisspalte ("DDP 12345 Musterstadt (EUR/ST)").
 INCOTERMS = ("EXW", "FCA", "FAS", "FOB", "CFR", "CIF", "CPT", "CIP", "DAP",
              "DPU", "DDP", "DDU", "DAF", "DES", "DEQ", "DAT")
 
@@ -328,7 +328,7 @@ class TableAnalysis:
     #: Er gehoert zum Kopf des Angebots, nicht in die einzelne Position.
     incoterm: str = ""
     #: Waehrung/Mengeneinheit, die nur in der Preisueberschrift stehen
-    #: ("DDP 48336 Sassenberg (EUR/ST)") und fuer alle Zeilen gelten.
+    #: ("DDP 12345 Musterstadt (EUR/ST)") und fuer alle Zeilen gelten.
     header_currency: str = ""
     header_uom: str = ""
 
@@ -640,7 +640,7 @@ class TableExtractor:
         return analysis
 
     def _resolve_incoterm_column(self, analysis: TableAnalysis) -> None:
-        """Incoterm-Preisspalte auswerten ("DDP 48336 Sassenberg (EUR/ST)").
+        """Incoterm-Preisspalte auswerten ("DDP 12345 Musterstadt (EUR/ST)").
 
         Waehrung und Mengeneinheit aus der Ueberschrift gelten fuer die ganze
         Tabelle, der Incoterm selbst ist eine Kopfangabe des Angebots.  Die
@@ -1017,7 +1017,7 @@ class TableExtractor:
         if _PRICE_PER_UOM_RE.match(_normalize_header(text)):
             return ("price", 0.95,
                     f"Preis je Mengeneinheit ('{text}')")
-        # Incoterm-Preisspalte: "DDP 48336 Sassenberg (EUR/ST)"
+        # Incoterm-Preisspalte: "DDP 12345 Musterstadt (EUR/ST)"
         treffer = incoterm_price_header(text)
         if treffer is not None:
             incoterm, currency, uom = treffer

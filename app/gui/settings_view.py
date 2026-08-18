@@ -75,6 +75,21 @@ class SettingsView(QWidget):
         layout.addStretch(1)
 
         buttons = QHBoxLayout()
+        export_button = QPushButton("Exportieren ...")
+        export_button.setToolTip(
+            "Einstellungen in eine Datei schreiben, die Sie an Kollegen "
+            "weitergeben koennen. Rechnergebundenes (Pfade), Persoenliches "
+            "(zuletzt geoeffnete Dateien) und die Betriebsart gehen NICHT mit.")
+        export_button.clicked.connect(self.export_settings)
+        buttons.addWidget(export_button)
+
+        import_button = QPushButton("Importieren ...")
+        import_button.setToolTip(
+            "Einstellungen aus einer Datei uebernehmen. Was die Datei nicht "
+            "nennt, bleibt unveraendert.")
+        import_button.clicked.connect(self.import_settings)
+        buttons.addWidget(import_button)
+
         buttons.addStretch(1)
         reload_button = QPushButton("Verwerfen")
         reload_button.clicked.connect(self.load)
@@ -376,7 +391,76 @@ class SettingsView(QWidget):
             self._loading = False
         self._update_mode_hint()
 
-    def save(self) -> None:
+    # ------------------------------------------------------------------
+    # Weitergabe an Kollegen
+    # ------------------------------------------------------------------
+    def export_settings(self) -> None:
+        """Einstellungen in eine weitergebbare Datei schreiben."""
+        from ..services.settings_transfer import export_settings
+
+        # Erst den Bildschirminhalt uebernehmen -- sonst exportiert man den
+        # zuletzt gespeicherten Stand und wundert sich beim Kollegen.
+        if not self.save(quiet=True):
+            return
+
+        pfad, _filter = QFileDialog.getSaveFileName(
+            self, "Einstellungen exportieren", "einstellungen.json",
+            "Einstellungsdatei (*.json)")
+        if not pfad:
+            return
+        try:
+            ziel = export_settings(self.settings, pfad)
+        except OSError as fehler:
+            show_error(self, "Export fehlgeschlagen", str(fehler))
+            return
+
+        QMessageBox.information(
+            self, "Exportiert",
+            f"Die Einstellungen stehen in:\n{ziel}\n\n"
+            "Nicht enthalten sind Pfade, die Liste zuletzt geoeffneter "
+            "Dateien und die Betriebsart (Probelauf/Testsystem) -- die "
+            "stellt jeder selbst ein.")
+
+    def import_settings(self) -> None:
+        """Einstellungen aus einer Datei uebernehmen."""
+        from ..services.settings_transfer import import_settings
+
+        pfad, _filter = QFileDialog.getOpenFileName(
+            self, "Einstellungen importieren", "",
+            "Einstellungsdatei (*.json);;Alle Dateien (*)")
+        if not pfad:
+            return
+
+        if not ask_yes_no(
+                self, "Einstellungen uebernehmen?",
+                "Die Datei wird ueber Ihre jetzigen Einstellungen gelegt. "
+                "Was darin nicht vorkommt, bleibt unveraendert.\n\n"
+                "Die Betriebsart (Probelauf/Testsystem) wird NICHT "
+                "veraendert.\n\nFortfahren?"):
+            return
+
+        ergebnis = import_settings(self.settings, pfad)
+        if not ergebnis.ok:
+            show_error(self, "Import fehlgeschlagen",
+                       "\n".join(ergebnis.errors))
+            return
+
+        try:
+            self.settings.save()
+        except OSError as fehler:
+            show_error(self, "Speichern fehlgeschlagen", str(fehler))
+            return
+
+        self.load()
+        self.settingsSaved.emit()
+
+        hinweis = QMessageBox(self)
+        hinweis.setWindowTitle("Einstellungen uebernommen")
+        hinweis.setText(ergebnis.summary())
+        hinweis.setDetailedText(ergebnis.details())
+        hinweis.exec()
+
+    def save(self, quiet: bool = False) -> bool:
         s = self.settings
         try:
             s.use_mock_sap = self.mock_box.isChecked()
@@ -441,13 +525,15 @@ class SettingsView(QWidget):
             logger.exception("Einstellungen konnten nicht gespeichert werden")
             show_error(self, "Speichern fehlgeschlagen",
                        "Die Einstellungen konnten nicht gespeichert werden.", str(exc))
-            return
+            return False
 
-        QMessageBox.information(self, "Gespeichert",
-                                "Die Einstellungen wurden gespeichert.\n\n"
-                                "Aenderungen an Datenbank- und Logpfad wirken nach einem "
-                                "Neustart der Anwendung.")
+        if not quiet:
+            QMessageBox.information(self, "Gespeichert",
+                                    "Die Einstellungen wurden gespeichert.\n\n"
+                                    "Aenderungen an Datenbank- und Logpfad wirken nach einem "
+                                    "Neustart der Anwendung.")
         self.settingsSaved.emit()
+        return True
 
     # ------------------------------------------------------------------
     def _mode_toggled(self) -> None:
