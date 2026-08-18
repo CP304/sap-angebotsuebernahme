@@ -859,17 +859,10 @@ class TableExtractor:
         limit = min(_HEADER_SEARCH_ROWS, max(block.row_count - 1, 1))
         for index in range(limit):
             row = block.rows[index]
-            # Eine Summenzeile ist nie eine Kopfzeile.  Ohne diese Sperre
-            # gewann in kopflosen Tabellen die Zeile "Gesamtsumme ... 326,00"
-            # das Rennen (das Wort steht im Aliaskatalog als Zeilensumme) --
-            # und mit ihr rutschte der Datenbeginn hinter das Tabellenende.
-            # Der Beleg ergab null Positionen.
-            if is_summary_row(row):
-                continue
             single_score, _ = self._score_header_row(row)
             candidate_score, candidate_texts, merged = single_score, list(row), False
 
-            if index + 1 < block.row_count and not is_summary_row(block.rows[index + 1]):
+            if index + 1 < block.row_count:
                 combined = [normalize_whitespace(f"{a} {b}")
                             for a, b in zip(row, block.rows[index + 1])]
                 if len(block.rows[index + 1]) > len(row):
@@ -1760,6 +1753,22 @@ class TableExtractor:
         for name in values.get("_merged_fields", []):
             if getattr(position, name, "") not in (None, ""):
                 position.field_origins[name] = FieldOrigin.UNCERTAIN
+
+        # Die Menge brachte ihre Einheit mit ("500 ST"), die Tabelle hat aber
+        # eine eigene Mengeneinheiten-Spalte mit einem ANDEREN Wert.  Welche
+        # gilt, steht nirgends im Beleg -- also wird nicht geraten: die
+        # Spalte behaelt ihren Wert, und der Widerspruch wird gemeldet.
+        qty_uom = values.get("_qty_uom")
+        if qty_uom and position.uom and normalize_uom(position.uom) != qty_uom:
+            roh = values.get("_raw", {}).get("_qty_uom", "")
+            position.issues.add(Issue(
+                "uom_conflict",
+                f"Die Menge steht mit der Einheit '{qty_uom}' in der Zelle "
+                f"('{roh}'), die Mengeneinheiten-Spalte nennt aber "
+                f"'{position.uom}'. Es wurde nichts geraten -- bitte die "
+                "richtige Mengeneinheit pruefen.",
+                IssueSeverity.WARNING, field="uom", blocking=False))
+            position.field_origins["uom"] = FieldOrigin.UNCERTAIN
 
         # Werte, die aus einer gemeinsamen Zelle stammen ("100 Stk", "12,85 EUR")
         if values.get("_extra_uom") and not position.uom:

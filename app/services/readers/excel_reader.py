@@ -381,23 +381,58 @@ def repair_decimal_split_rows(
     if ziel < 2:
         return rows, 0, 0
 
+    # 1. Durchgang: alle Zeilen heilen, bei denen die Deutung eindeutig ist --
+    #    der Ueberschuss entspricht genau den gefundenen Stellen, und keine
+    #    zwei davon stossen aneinander.
+    entschieden: dict[int, list[int]] = {}
+    gelernt: Counter[int] = Counter()
+    for row in inhalt:
+        stellen = stellen_je_zeile[id(row)]
+        noetig = len(row) - ziel
+        if noetig <= 0:
+            continue
+        if len(stellen) == noetig and not _stossen_aneinander(stellen):
+            entschieden[id(row)] = stellen
+            gelernt.update(stellen)
+
+    # 2. Durchgang: die uebrigen Zeilen haben MEHR moegliche Stellen als
+    #    noetig ("0,12,40,..." -- sowohl "0,12" als auch "12,40" saehen aus
+    #    wie ein Betrag).  Statt zu raten wird verglichen: an welchen Stellen
+    #    lag der Betrag in den Zeilen, die eindeutig waren?  Eine Tabelle hat
+    #    ihre Preisspalte in jeder Zeile an derselben Stelle.  Nur wenn die
+    #    gelernten Stellen den Ueberschuss genau erklaeren, wird zusammen-
+    #    gefuegt -- sonst bleibt die Zeile unangetastet und wird gemeldet.
+    haeufig = {stelle for stelle, anzahl in gelernt.items()
+               if anzahl >= 2 or anzahl == len(entschieden)}
+    for row in inhalt:
+        if id(row) in entschieden:
+            continue
+        noetig = len(row) - ziel
+        if noetig <= 0:
+            continue
+        passend = sorted(set(stellen_je_zeile[id(row)]) & haeufig)
+        if len(passend) == noetig and not _stossen_aneinander(passend):
+            entschieden[id(row)] = passend
+
     geheilt = 0
     offen = 0
     ergebnis: list[list[str]] = []
     for row in rows:
-        stellen = stellen_je_zeile.get(id(row))
-        if stellen is None or len(row) <= ziel:
-            ergebnis.append(row)
-            continue
-        noetig = len(row) - ziel
-        benachbart = any(stelle + 1 in set(stellen) for stelle in stellen)
-        if len(stellen) == noetig and not benachbart:
+        stellen = entschieden.get(id(row))
+        if stellen is not None:
             ergebnis.append(_merge_junctions(row, stellen))
             geheilt += 1
-        else:
-            ergebnis.append(row)
+            continue
+        ergebnis.append(row)
+        if id(row) in stellen_je_zeile and len(row) > ziel:
             offen += 1
     return ergebnis, geheilt, offen
+
+
+def _stossen_aneinander(stellen: list[int]) -> bool:
+    """Zwei Zusammenfass-Stellen ueberlappen sich ("1,1,1") -- nicht eindeutig."""
+    vorhanden = set(stellen)
+    return any(stelle + 1 in vorhanden for stelle in stellen)
 
 
 def _split_lines(lines: list[str], delimiter: str) -> list[list[str]]:
