@@ -22,6 +22,7 @@ from .email_reader import (
     strip_signature,
 )
 from .excel_reader import CsvReader, ExcelReader
+from .image_reader import IMAGE_EXTENSIONS, ImageReader
 from .office_reader import OpenDocumentReader, RichTextReader, WordReader
 from .pdf_reader import PdfReader
 from .spreadsheet_reader import OdsReader
@@ -35,6 +36,7 @@ __all__ = [
     "PdfReader",
     "ExcelReader",
     "CsvReader",
+    "ImageReader",
     "EmailReader",
     "OpenDocumentReader",
     "OdsReader",
@@ -48,6 +50,7 @@ __all__ = [
     "strip_signature",
     "read_document",
     "SUPPORTED_EXTENSIONS",
+    "IMAGE_EXTENSIONS",
 ]
 
 #: Alle Endungen, die die Anwendung importieren kann
@@ -57,6 +60,8 @@ SUPPORTED_EXTENSIONS: tuple[str, ...] = (
     ".csv", ".tsv",
     ".eml", ".msg",
     ".txt", ".text", ".html", ".htm", ".md",
+    # Gescannte/fotografierte Angebote -- nur mit Texterkennung auswertbar
+    *IMAGE_EXTENSIONS,
 )
 
 
@@ -70,7 +75,7 @@ class ReaderRegistry:
         #: ZIP-Archive werden wie eine Mail mit Anhaengen behandelt -- der
         #: Inhalt laeuft ueber dieselbe Registry (siehe EmailReader).
         self.archive_reader = ArchiveReader(attachment_reader=self.read,
-                                            can_read=self.can_read)
+                                            can_read=self.can_read_in_archive)
         self.readers: list[DocumentReader] = [
             PdfReader(),
             ExcelReader(),
@@ -80,6 +85,7 @@ class ReaderRegistry:
             OpenDocumentReader(),
             OdsReader(),
             self.archive_reader,
+            ImageReader(),
             RichTextReader(),
             TextReader(),
         ]
@@ -95,6 +101,23 @@ class ReaderRegistry:
 
     def can_read(self, path: str) -> bool:
         return any(reader.can_read(path) for reader in self.readers)
+
+    def can_read_in_archive(self, path: str) -> bool:
+        """Wie :meth:`can_read`, aber ohne Bilddateien.
+
+        In einem ZIP-Archiv sind Bilder praktisch immer Beiwerk: Firmenlogo,
+        Produktfoto, Unterschriftengrafik.  Jedes davon durch die
+        Texterkennung zu schicken, kostet Sekunden je Datei und liefert
+        Buchstabensalat, den anschliessend jemand aussortieren muss.  Ein
+        *eingescanntes Angebot* kommt dagegen als einzelne Datei oder als
+        Mailanhang, nicht als Bild im Archiv.
+
+        Wer ein Bild aus einem Archiv wirklich auswerten will, entpackt es und
+        oeffnet es einzeln -- dann greift der :class:`ImageReader` regulaer.
+        """
+        if Path(path).suffix.lower() in IMAGE_EXTENSIONS:
+            return False
+        return self.can_read(path)
 
     def reader_for(self, path: str) -> DocumentReader | None:
         for reader in self.readers:

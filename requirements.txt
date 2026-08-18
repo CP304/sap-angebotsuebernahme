@@ -18,6 +18,24 @@ pywin32>=306; sys_platform == "win32"
 # gespeichert werden soll.
 xlrd>=2.0
 
+# --- Optional: Texterkennung (OCR) fuer gescannte Belege -----------------
+# Wird NUR gebraucht, wenn Angebote als Scan oder Foto hereinkommen.
+# Ohne diese Pakete laeuft alles unveraendert -- die Anwendung meldet dann
+# lediglich, dass das PDF keinen durchsuchbaren Text enthaelt.
+# Einzelheiten: docs/OCR.md
+#
+# Weg 1 -- Bordmittel von Windows (Windows.Media.Ocr).  Keine zusaetzliche
+# Programminstallation noetig, liefert aber KEINE Sicherheitswerte je Wort.
+# winsdk>=1.0; sys_platform == "win32"     # optional -- nur fuer OCR
+#
+# Weg 2 -- Tesseract.  ACHTUNG: Das Python-Paket allein genuegt NICHT.
+# Zusaetzlich muss das PROGRAMM Tesseract-OCR installiert sein (Windows:
+# Installationspaket der UB Mannheim) und 'tesseract.exe' im PATH liegen.
+# Dafuer liefert Tesseract je Wort eine Konfidenz -- nur damit kann die
+# Anwendung ehrlich sagen, welche Zelle unsicher erkannt wurde.
+# Deutsche Belege brauchen zusaetzlich das Sprachpaket "deu".
+# pytesseract>=0.3.10                      # optional -- nur fuer OCR
+
 # Hinweis: Outlook-Nachrichten (.msg) werden mit einem eigenen, in der
 # Standardbibliothek umgesetzten Leser verarbeitet -- dafuer ist keine
 # zusaetzliche Abhaengigkeit noetig.

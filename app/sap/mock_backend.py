@@ -230,7 +230,11 @@ class MockSapSystem:
         info("47110005", "0000100987", "4.35", unit=1, lead=21)
         info("48200110", "0000102100", "1245.00", lead=42, minqty="1")
         info("49900010", "0000100987", "6.80", unit=1, uom="M", lead=10, minqty="50")
-        # 47110004 und 48200111 haben bewusst KEINEN Infosatz -> ME11-Pfad
+        # 47110003 zusaetzlich auf reiner EKorg-Ebene (ohne Werk): damit ist
+        # der Erweiterungsfall abbildbar -- Infosatz da, Werkssicht fehlt.
+        info("48200111", "0000102100", "295.00", ekorg="1000", plant="")
+
+        # 47110004 und (werksbezogen) 48200111 haben bewusst KEINEN Infosatz -> ME11-Pfad
 
         self.source_lists = {
             self.sl_key("47110001", "1000"): [{
@@ -301,10 +305,22 @@ class MockInfoRecordService(_MockBase, InfoRecordServiceBase):
             MockSapSystem.ir_key(material_number, vendor_number, purchasing_org, plant)
         )
         if raw is None:
-            # Zweiter Versuch ohne Werk (werksunabhaengiger Infosatz)
-            raw = self.system.info_records.get(
+            # Zweiter Blick ohne Werk.  ACHTUNG: Ein Treffer hier bedeutet
+            # NICHT "Infosatz vorhanden".  Er bedeutet: Der Satz existiert auf
+            # Ebene der Einkaufsorganisation, aber die Sicht fuer unser Werk
+            # fehlt.  Das ist ein ERWEITERUNGSFALL -- wer ihn als "vorhanden"
+            # meldet, laesst ME12 auf eine nicht existierende Sicht los; wer
+            # ihn als "nicht vorhanden" meldet, laeuft mit ME11 in
+            # "Infosatz existiert bereits".
+            ohne_werk = self.system.info_records.get(
                 MockSapSystem.ir_key(material_number, vendor_number, purchasing_org, "")
             )
+            if ohne_werk is not None and plant:
+                record.exists = False
+                record.exists_without_plant = True
+                record.info_record_number = ohne_werk.get("info_record_number", "")
+                return record
+            raw = ohne_werk
         if raw is None:
             record.exists = False
             return record
@@ -342,26 +358,45 @@ class MockInfoRecordService(_MockBase, InfoRecordServiceBase):
         key = MockSapSystem.ir_key(position.material_number, position.vendor_number,
                                    position.purchasing_org, position.plant)
         existing = self.system.info_records.get(key)
-        transaction = (self.settings.transactions.info_record_change if existing
+
+        # Drei Faelle wie im Echtbetrieb: aendern, um die Werkssicht
+        # erweitern, oder neu anlegen.  Beim Erweitern behaelt der Satz
+        # seine bestehende Infosatznummer -- SAP vergibt keine zweite.
+        auf_ekorg_ebene = None
+        if existing is None and position.plant:
+            auf_ekorg_ebene = self.system.info_records.get(
+                MockSapSystem.ir_key(position.material_number, position.vendor_number,
+                                     position.purchasing_org, ""))
+        modus = "change" if existing else ("extend" if auf_ekorg_ebene else "create")
+        beschreibung = {"change": "aendern", "extend": "um Werkssicht erweitern",
+                        "create": "neu anlegen"}[modus]
+        transaction = (self.settings.transactions.info_record_change
+                       if modus == "change"
                        else self.settings.transactions.info_record_create)
         old_value = (f"{existing['price']} {existing.get('currency', '')} / "
-                     f"{existing.get('price_unit', 1)}" if existing else "kein Infosatz")
-        new_value = (f"{position.price} {position.currency} / {position.price_unit or 1}")
+                     f"{existing.get('price_unit', 1)}" if existing else
+                     ("Infosatz vorhanden, Werkssicht fehlt" if modus == "extend"
+                      else "kein Infosatz"))
+        new_value = f"{position.price} {position.currency} / {position.price_unit or 1}"
+
+        vorhandene_nummer = ((existing or auf_ekorg_ebene) or {}).get(
+            "info_record_number", "")
 
         if context.dry_run:
             return self._result(
                 "info_record", ResultState.SIMULATED,
-                f"{'aendern' if existing else 'neu anlegen'} ({transaction})",
+                f"{beschreibung} ({transaction})",
                 transaction=transaction, old_value=old_value, new_value=new_value,
-                document_number=existing.get("info_record_number", "") if existing else "",
+                document_number=vorhandene_nummer,
                 started_ms=started,
             )
 
-        number = (existing or {}).get("info_record_number") or \
-            self.system.next_number("info_record", "530000")
+        number = vorhandene_nummer or self.system.next_number("info_record", "530000")
 
-        messages: list[str] = [
-            f"Infosatz {number} wurde {'geaendert' if existing else 'angelegt'}"]
+        erledigt = {"change": "geaendert",
+                    "extend": f"um Werk {position.plant} erweitert",
+                    "create": "angelegt"}[modus]
+        messages: list[str] = [f"Infosatz {number} wurde {erledigt}"]
 
         # -- Zusatzkonditionen ---------------------------------------------
         # Dieselbe Planung wie im Echtbetrieb, damit sich Testsystem und

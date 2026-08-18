@@ -32,12 +32,14 @@ from ..models.offer import Offer
 from ..models.offer_position import OfferPosition
 from ..utils.parsing import normalize_uom
 from .extraction.condition_rules import attach_conditions
+from .extraction.confidence import apply_confidence
 from .extraction.email_merge import apply_email_header, apply_email_supplements
 from .extraction.freetext_extractor import FreetextExtractor
 from .extraction.header_rules import apply_header_matches, extract_header_fields, \
     label_value_text, missing_header_note
 from .extraction.learning import learn_from_corrections
 from .extraction.material_roles import compile_own_pattern, resolve_position_roles
+from .extraction.plausibility import run_checks
 from .extraction.profiles import (
     InMemoryProfileStore,
     VendorProfile,
@@ -429,7 +431,13 @@ class OfferImportService:
         for note in attach_conditions(offer, self.settings):
             offer.add_note(note)
 
+        # Kreuzpruefungen ueber die Redundanz im Beleg (Zeilensumme,
+        # Belegsumme, Positionsnummernfolge, Preisgroessenordnung).  Sie laufen
+        # vor ``renumber()``, weil selbst vergebene Nummern keine Aussage ueber
+        # Luecken zulassen -- und vor der Konfidenz, die ihre Befunde braucht.
+        run_checks(offer)
         offer.renumber()
+        apply_confidence(offer)
         self._add_issues(offer)
 
         summary = (f"Import abgeschlossen: {len(offer.positions)} Position(en), "

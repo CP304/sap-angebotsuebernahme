@@ -74,6 +74,13 @@ class OfferPosition:
     #: Dient allein der Nachvollziehbarkeit im Ergebnis.
     merged_scale_uids: list[int] = field(default_factory=list)
 
+    #: Zeilensumme/Positionswert laut Beleg ("Gesamt", "Betrag", "Total").
+    #: Sie wird NICHT nach SAP geschrieben, sondern dient allein der
+    #: Kreuzpruefung ``Menge x Preis / Preiseinheit`` (siehe
+    #: ``app.services.extraction.plausibility``).  Fehlt die Spalte im Angebot,
+    #: bleibt der Wert ``None`` -- dann findet auch keine Pruefung statt.
+    line_total: Decimal | None = None
+
     #: Erkannte Zusatzkonditionen (``ConditionCandidate`` aus
     #: ``app.services.extraction.condition_rules``): Rabatte, Zu- und
     #: Abschlaege, Frachtkosten, Skonto.  Sie werden bewusst NICHT in
@@ -113,6 +120,16 @@ class OfferPosition:
     sap_material_description: str = ""
 
     # -- Bewertung -------------------------------------------------------
+    #: Auf welchem Weg ist diese Position entstanden?  Siehe die Konstanten
+    #: ``PATH_*`` in ``app.services.extraction.confidence`` -- der Weg ist der
+    #: Ausgangswert der Konfidenz.
+    extraction_path: str = ""
+    #: Vertrauen in diese Position, 0.0 bis 1.0.  Wird von
+    #: ``app.services.extraction.confidence.compute_confidence`` berechnet und
+    #: ist bewusst nur eine Sortierhilfe -- keine Freigabe.
+    confidence: float = 0.0
+    #: Klartextbegruendungen zur Konfidenz; ohne sie waere die Zahl wertlos.
+    confidence_reasons: list[str] = field(default_factory=list)
     field_origins: dict[str, FieldOrigin] = field(default_factory=dict)
     issues: IssueList = field(default_factory=IssueList)
     info_record_action: InfoRecordAction = InfoRecordAction.NONE
@@ -140,6 +157,21 @@ class OfferPosition:
 
     def mark_manual(self, name: str) -> None:
         self.field_origins[name] = FieldOrigin.MANUAL
+
+    def confidence_label(self) -> str:
+        """Konfidenz als Wort: "sicher" / "pruefen" / "unsicher".
+
+        Die Schwellen liegen in ``app.services.extraction.confidence``; sie
+        werden erst hier importiert, damit das Datenmodell nicht von der
+        Erkennungsschicht abhaengt.
+        """
+        from ..services.extraction.confidence import LABEL_CHECK, LABEL_SURE
+
+        if self.confidence >= LABEL_SURE:
+            return "sicher"
+        if self.confidence >= LABEL_CHECK:
+            return "pruefen"
+        return "unsicher"
 
     @property
     def uncertain_fields(self) -> list[str]:

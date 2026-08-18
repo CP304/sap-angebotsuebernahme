@@ -372,6 +372,8 @@ class ExtractionSettings:
             ".rtf", ".zip", ".txt", ".html", ".htm",
             # Weitergeleitete Mail mit angehaengter Mail -- kommt vor
             ".eml", ".msg",
+            # Bilder: nur sinnvoll mit OCR, werden sonst sauber abgelehnt
+            ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp",
         ]
     )
     #: Maximale Anhangsgroesse in MB
@@ -418,6 +420,44 @@ class ExtractionSettings:
     #: Rasterbreite (PDF-Punkte) fuer die Haeufigkeitsanalyse der Spaltenstarts.
     #: Profil-Ueberschreibung: ``table_hints["x_bin"]``.
     pdf_x_bin: float = 4.0
+
+
+@dataclass
+class OcrSettings:
+    """Texterkennung fuer eingescannte Belege.
+
+    OCR ist die einzige Stelle der Anwendung, an der aus einem Bild ein Wert
+    wird -- und damit die heikelste.  Eine Erkennung liefert *immer* etwas,
+    auch Unsinn; eine ``8`` statt einer ``3`` im Preis ist teurer als eine gar
+    nicht erkannte Position.  Deshalb bleibt alles, was aus OCR stammt,
+    durchgaengig als unsicher gekennzeichnet, und es wird nichts "korrigiert":
+    ein verdaechtiges ``O`` wird gemeldet, nicht stillschweigend zur ``0``.
+
+    Beide Engines sind optionale Zusatzpakete.  Fehlen sie, aendert sich am
+    Verhalten der Anwendung nichts -- der Scan wird wie bisher gemeldet, nur
+    zusaetzlich mit dem Hinweis, wie sich das nachruesten laesst.
+    """
+
+    #: Texterkennung ueberhaupt verwenden, wenn eine Engine vorhanden ist
+    enabled: bool = True
+    #: Bei erkanntem Scan erst fragen.  OCR dauert (Sekunden je Seite), und
+    #: ungefragt Rechenzeit zu verbrauchen ist keine gute Bedienung.
+    ask_before_ocr: bool = True
+    #: Reihenfolge, in der die Engines probiert werden.
+    #: "windows" = Bordmittel (keine Installation, aber keine Konfidenzwerte),
+    #: "tesseract" = genauer und mit Konfidenz, braucht aber ein Programm.
+    backend_order: list[str] = field(default_factory=lambda: ["windows", "tesseract"])
+    #: Erkennungssprache (Kuerzel der Anwendung, z. B. "de")
+    language: str = "de"
+    #: Aufloesung, mit der PDF-Seiten zum Bild gerendert werden.
+    #: Unter 200 dpi wird OCR unbrauchbar, ueber 400 dpi nur noch langsamer.
+    dpi: int = 300
+    #: Ab hier gilt ein Wort als unsicher und wird gesondert ausgewiesen
+    min_confidence: float = 0.60
+    #: Schutz gegen 200-Seiten-Scans -- so viele Seiten werden hoechstens erkannt
+    max_pages: int = 20
+    #: Graustufen/Kontrast vor der Erkennung.  Hilft bei Fotos deutlich.
+    preprocess: bool = True
 
 
 @dataclass
@@ -535,6 +575,7 @@ class Settings:
     transactions: Transactions = field(default_factory=Transactions)
     sap: SapRuntime = field(default_factory=SapRuntime)
     extraction: ExtractionSettings = field(default_factory=ExtractionSettings)
+    ocr: OcrSettings = field(default_factory=OcrSettings)
     workflow: WorkflowDefaults = field(default_factory=WorkflowDefaults)
     ui: UiSettings = field(default_factory=UiSettings)
 

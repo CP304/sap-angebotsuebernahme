@@ -33,6 +33,7 @@ from ...utils.parsing import (
     parse_int,
 )
 from ..readers.base import RawDocument
+from .confidence import PATH_FREETEXT
 from .material_roles import find_labelled_material_matches
 from .table_extractor import parse_number
 
@@ -222,6 +223,10 @@ class FreetextExtractor:
         block_positions = self._extract_blocks(lines, used_lines, source_kind,
                                                source_label, notes)
         positions.extend(block_positions)
+
+        # Erkennungsweg festhalten -- er ist der Ausgangswert der Konfidenz.
+        for position in positions:
+            position.extraction_path = PATH_FREETEXT
 
         if positions:
             notes.append(f"{len(positions)} Position(en) aus Fliesstext abgeleitet -- "

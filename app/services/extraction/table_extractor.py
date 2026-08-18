@@ -41,11 +41,18 @@ from ...utils.parsing import (
     similarity,
 )
 from ..readers.base import RawDocument, TableBlock
+from .confidence import PATH_TABLE_HEADER, PATH_TABLE_NO_HEADER
 from .material_roles import (
     MATERIAL_FIELDS,
     compile_own_pattern,
     header_role,
     own_ratio,
+)
+from .price_parsing import (
+    is_carryover_row,
+    is_page_noise_row,
+    parse_price_text,
+    price_unit_from_header,
 )
 
 if TYPE_CHECKING:  # pragma: no cover -- nur fuer die Typpruefung
@@ -188,6 +195,9 @@ class TableAnalysis:
     #: Datumsreihenfolge je Spalte, aus dem Inhalt belegt
     #: (``True`` = Tag zuerst, ``False`` = Monat zuerst)
     date_day_first: dict[int, bool] = field(default_factory=dict)
+    #: Preiseinheit, die nur in der Spaltenueberschrift steht ("Preis EUR/100 St").
+    #: Sie gilt dann fuer alle Zeilen dieser Tabelle.
+    header_price_unit: int | None = None
 
     @property
     def mapped_fields(self) -> set[str]:
@@ -365,6 +375,21 @@ def _looks_like_currency(value: str) -> bool:
     return bool(text) and len(text) <= 5 and bool(detect_currency(text))
 
 
+def _looks_like_unit_note(value: str) -> bool:
+    """Ist die Zelle eine Einheitenangabe statt einer Ueberschrift?
+
+    Gemeint sind die typischen zweiten Kopfzeilen: "St", "EUR", "EUR/100 St".
+    """
+    text = normalize_whitespace(value)
+    if not text or len(text) > 20:
+        return False
+    if price_unit_from_header(text):
+        return True
+    if detect_currency(text) and not re.search(r"\d{3,}", text):
+        return True
+    return _looks_like_uom(text)
+
+
 def _looks_like_uom(value: str) -> bool:
     text = normalize_whitespace(value).upper().replace(".", "")
     if not text or len(text) > 8 or any(ch.isdigit() for ch in text):
@@ -475,7 +500,30 @@ class TableExtractor:
         self._assign_columns(analysis)
         self._resolve_material_columns(analysis)
         self._resolve_date_order(analysis)
+        self._resolve_header_price_unit(analysis)
         return analysis
+
+    def _resolve_header_price_unit(self, analysis: TableAnalysis) -> None:
+        """Bezugsmenge aus der Preisueberschrift ziehen ("Preis EUR/100 St").
+
+        Manche Lieferanten nennen die Preiseinheit nur einmal im Kopf.  Wird
+        sie uebersehen, ist jeder Preis dieser Tabelle um genau diesen Faktor
+        falsch -- ein Fehler, der in SAP erst bei der Rechnung auffaellt.
+        """
+        if "price_unit" in analysis.mapped_fields:
+            return              # eine eigene Spalte ist immer genauer
+        for assignment in analysis.columns.values():
+            if assignment.field != "price":
+                continue
+            einheit = price_unit_from_header(assignment.header)
+            if not einheit:
+                continue
+            analysis.header_price_unit = einheit
+            analysis.notes.append(
+                f"Die Preisspalte '{assignment.header}' nennt die Bezugsmenge "
+                f"{einheit} -- die Preiseinheit wird fuer alle Zeilen dieser "
+                "Tabelle auf diesen Wert gesetzt.")
+            return
 
     # ------------------------------------------------------------------
     # Datumsreihenfolge
@@ -650,7 +698,12 @@ class TableExtractor:
                 if merged_score > single_score + 0.4:
                     candidate_score, candidate_texts, merged = merged_score, combined, True
                 elif (self._is_header_continuation(block.rows[index + 1])
-                        and merged_score >= single_score - 0.5):
+                        and merged_score >= single_score * 0.6):
+                    # Beim Verschmelzen sinkt der Score fast immer ein wenig
+                    # ("Preis" trifft genauer als "Preis EUR/100 St").  Ist die
+                    # Folgezeile aber erkennbar eine Kopfzeilen-Fortsetzung --
+                    # nur Text, keine Zahl, keine Datumsangabe --, waere es
+                    # schlimmer, sie als Datenzeile zu lesen.
                     candidate_score = max(single_score, merged_score)
                     candidate_texts, merged = combined, True
 
@@ -677,7 +730,13 @@ class TableExtractor:
             if _looks_like_number(value) or _looks_like_date(value):
                 return False
         score, hits = self._score_header_row(texts)
-        return len(hits) >= 2 and score >= 1.2
+        if len(hits) >= 2 and score >= 1.2:
+            return True
+        # Sonderfall der zweiten Kopfzeile: sie enthaelt keine Feldnamen,
+        # sondern nur die Einheiten ("St", "EUR/100 St").  Genau diese Zeile
+        # traegt aber die Preiseinheit -- sie darf nicht verloren gehen.
+        annotations = sum(1 for value in filled if _looks_like_unit_note(value))
+        return annotations >= 2 and len(filled) - annotations <= 1
 
     def _score_header_row(self, row: list[str]) -> tuple[float, dict[int, tuple[str, float, str]]]:
         """Wie gut passt eine Zeile als Kopfzeile?"""
@@ -888,6 +947,14 @@ class TableExtractor:
                 notes.append(f"{label}: Zeile {row_index + 1} als Summenzeile "
                              f"uebersprungen ('{raw_line[:50]}')")
                 continue
+            if is_page_noise_row(row):
+                notes.append(f"{label}: Zeile {row_index + 1} als Fusszeile/"
+                             f"Seitenangabe uebersprungen ('{raw_line[:50]}')")
+                continue
+            if is_carryover_row(row):
+                notes.append(f"{label}: Zeile {row_index + 1} als Uebertrag "
+                             f"uebersprungen ('{raw_line[:50]}')")
+                continue
             if analysis.header_row_index is not None and self._is_repeated_header(row, analysis):
                 continue
 
@@ -907,6 +974,8 @@ class TableExtractor:
 
             position = self._make_position(values, analysis, document, label,
                                            row_index, raw_line)
+            for note in values.get("_notes", []):
+                notes.append(f"{label}, Zeile {row_index + 1}: {note}")
             positions.append(position)
             row_cells[position.uid] = self._row_cell_map(row, analysis)
 
@@ -945,8 +1014,38 @@ class TableExtractor:
             if not raw:
                 continue
             field_name = assignment.field
-            if field_name == PSEUDO_IGNORE or field_name == PSEUDO_TOTAL:
+            if field_name == PSEUDO_IGNORE:
                 continue
+            if field_name == PSEUDO_TOTAL:
+                # Die Zeilensumme gehoert nicht nach SAP -- sie ist aber der
+                # beste Zeuge dafuer, ob Menge und Preis richtig gelesen
+                # wurden (siehe plausibility.check_line_total).
+                gesamt = parse_number(raw, self.decimal_style)
+                if gesamt is not None:
+                    values.setdefault("_line_total", gesamt)
+                continue
+            if field_name == "price":
+                info = parse_price_text(raw, self.decimal_style)
+                if info.is_range:
+                    # Zwei Preise, keiner davon "der" Preis: nichts uebernehmen.
+                    values["_price_range"] = True
+                    values.setdefault("_notes", []).extend(info.notes)
+                    continue
+                if info.price is not None and info.price_unit and info.price_unit > 1:
+                    values["price"] = info.price
+                    values["_extra_price_unit"] = info.price_unit
+                    values.setdefault("_raw", {})["price"] = raw
+                    present.append("price")
+                    if info.currency:
+                        values.setdefault("_extra_currency", info.currency)
+                    if info.uom:
+                        values.setdefault("_extra_uom", info.uom)
+                    values.setdefault("_notes", []).append(
+                        f"Preisangabe '{raw}' gelesen als "
+                        f"{info.price} je {info.price_unit} "
+                        f"{info.uom or 'Einheiten'} -- die Preiseinheit wurde "
+                        "mit uebernommen.")
+                    continue
             if field_name == PSEUDO_ALT_PRICE:
                 values.setdefault("remarks_extra", []).append(
                     f"{assignment.header or 'weitere Preisspalte'}: {raw}")
@@ -1015,12 +1114,29 @@ class TableExtractor:
         position.source_kind = document.source_kind
         position.source_hint = f"{label}, Zeile {row_index + 1}"
         position.raw_text = raw_line
+        position.extraction_path = (PATH_TABLE_HEADER
+                                    if analysis.header_row_index is not None
+                                    else PATH_TABLE_NO_HEADER)
 
         for index, assignment in analysis.columns.items():
             field_name = assignment.field
             if field_name.startswith("_") or field_name not in values:
                 continue
             position.set_field(field_name, values[field_name], assignment.origin)
+
+        # Zeilensumme des Belegs (nur fuer die Kreuzpruefung, nie fuer SAP)
+        if values.get("_line_total") is not None:
+            position.line_total = values["_line_total"]
+
+        # Preiseinheit aus der Preiszelle ("12,85 EUR/100 St") -- eine eigene
+        # Spalte "Preiseinheit" hat immer Vorrang.
+        einheit = values.get("_extra_price_unit") or analysis.header_price_unit
+        if einheit and not position.price_unit:
+            position.set_field("price_unit", int(einheit), FieldOrigin.EXTRACTED)
+
+        # Preisspanne: es gibt keinen gueltigen Preis -- also bleibt er leer.
+        if values.get("_price_range") and position.price is None:
+            position.set_field("price", None, FieldOrigin.UNCERTAIN)
 
         # Werte, die aus einer gemeinsamen Zelle stammen ("100 Stk", "12,85 EUR")
         if values.get("_extra_uom") and not position.uom:
@@ -1265,6 +1381,9 @@ def _copy_position(source: OfferPosition) -> OfferPosition:
                  "min_order_qty", "lead_time_days", "valid_from", "remarks"):
         setattr(clone, name, getattr(source, name))
     clone.field_origins = dict(source.field_origins)
+    # ``line_total`` wird bewusst NICHT kopiert: die Zeilensumme des Belegs
+    # gehoert zur Ursprungszeile, nicht zur abgeleiteten Staffelstufe.
+    clone.extraction_path = source.extraction_path
     clone.source_kind = source.source_kind
     clone.source_hint = source.source_hint
     clone.raw_text = source.raw_text

@@ -11,6 +11,15 @@ from .email_merge import (
     mail_segments,
     report_unmatched,
 )
+from .confidence import (
+    BASE_CONFIDENCE,
+    PATH_FREETEXT,
+    PATH_MANUAL,
+    PATH_TABLE_HEADER,
+    PATH_TABLE_NO_HEADER,
+    apply_confidence,
+    compute_confidence,
+)
 from .freetext_extractor import FreetextExtractor, FreetextResult
 from .header_rules import (
     HEADER_RULES,
@@ -35,6 +44,26 @@ from .material_roles import (
 )
 from .learning import LearningConfig, LearningReport, describe_learning, forget_rule, \
     learn_from_corrections, suggest_exclude_keyword
+from .plausibility import (
+    CODE_DOCUMENT_TOTAL_MISMATCH,
+    CODE_LINE_TOTAL_MISMATCH,
+    CODE_POSITION_GAP,
+    CODE_PRICE_OUTLIER,
+    check_document_total,
+    check_line_totals,
+    check_position_numbers,
+    check_price_outliers,
+    expected_line_total,
+    find_document_total,
+    position_value,
+    run_checks,
+)
+from .price_parsing import (
+    PriceInfo,
+    is_carryover_row,
+    is_page_noise_row,
+    parse_price_text,
+)
 from .profiles import (
     InMemoryProfileStore,
     JsonProfileStore,
@@ -58,6 +87,29 @@ from .table_extractor import (
 )
 
 __all__ = [
+    "BASE_CONFIDENCE",
+    "CODE_DOCUMENT_TOTAL_MISMATCH",
+    "CODE_LINE_TOTAL_MISMATCH",
+    "CODE_POSITION_GAP",
+    "CODE_PRICE_OUTLIER",
+    "PATH_FREETEXT",
+    "PATH_MANUAL",
+    "PATH_TABLE_HEADER",
+    "PATH_TABLE_NO_HEADER",
+    "PriceInfo",
+    "apply_confidence",
+    "check_document_total",
+    "check_line_totals",
+    "check_position_numbers",
+    "check_price_outliers",
+    "compute_confidence",
+    "expected_line_total",
+    "find_document_total",
+    "is_carryover_row",
+    "is_page_noise_row",
+    "parse_price_text",
+    "position_value",
+    "run_checks",
     "MAIL_SOURCE_MARK",
     "UNMATCHED_ISSUE_CODE",
     "apply_email_header",

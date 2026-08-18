@@ -75,6 +75,13 @@ class SapInfoRecord:
     incoterm_location: str = ""
     net_price_flag: bool = False
 
+    #: Der Infosatz existiert zwar fuer Material/Lieferant/Einkaufsorganisation,
+    #: aber NICHT fuer das gesuchte Werk.  Klassischer SAP-Fall: die
+    #: allgemeinen Daten (EINA) und die EKorg-Daten (EINE) sind da, die
+    #: werksspezifische Sicht fehlt.  Dann wird der Satz *erweitert*, nicht
+    #: neu angelegt -- und ME11 laeuft sonst in "Infosatz existiert bereits".
+    exists_without_plant: bool = False
+
     # Meta
     read_at: datetime | None = None
     read_error: str = ""
@@ -83,6 +90,25 @@ class SapInfoRecord:
     @property
     def was_read(self) -> bool:
         return self.read_at is not None
+
+    @property
+    def needs_plant_extension(self) -> bool:
+        """Muss der vorhandene Satz um die Werkssicht erweitert werden?"""
+        return self.exists_without_plant and not self.exists
+
+    @property
+    def write_mode(self) -> str:
+        """Was ist zu tun?  ``change`` | ``extend`` | ``create``.
+
+        Genau diese drei Faelle gibt es -- und "extend" ist der, den man
+        leicht uebersieht: Der Infosatz ist da, nur die Sicht fuer das
+        eigene Werk fehlt.
+        """
+        if self.exists:
+            return "change"
+        if self.exists_without_plant:
+            return "extend"
+        return "create"
 
     @property
     def is_valid_on(self) -> bool:

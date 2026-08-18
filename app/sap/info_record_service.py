@@ -514,8 +514,22 @@ class SapInfoRecordService(InfoRecordServiceBase):
                 if any(hint in status.text.lower() for hint in _NOT_FOUND_HINTS):
                     record.exists = False
                     record.read_at = datetime.now()
-                    logger.info("Kein Infosatz fuer %s/%s: %s", material_number,
-                                vendor_number, status.text)
+                    logger.info("Kein Infosatz fuer %s/%s (EKorg %s, Werk %s): %s",
+                                material_number, vendor_number, purchasing_org,
+                                plant or "-", status.text)
+                    # Zweiter Blick ohne Werk: Sehr haeufig existiert der
+                    # Infosatz auf Ebene Einkaufsorganisation, nur die
+                    # werksspezifische Sicht fehlt.  Dann ist es eine
+                    # ERWEITERUNG, keine Neuanlage -- und ME11 wuerde sonst
+                    # mit "Infosatz existiert bereits" scheitern.
+                    if plant:
+                        record.exists_without_plant = self._exists_without_plant(
+                            material_number, vendor_number, purchasing_org)
+                        if record.exists_without_plant:
+                            logger.info(
+                                "Infosatz %s/%s existiert auf EKorg-Ebene %s, "
+                                "aber nicht fuer Werk %s -- Erweiterung noetig.",
+                                material_number, vendor_number, purchasing_org, plant)
                     return record
                 raise SapBusinessError(status.text, status.message_id, status.number)
 
@@ -562,15 +576,27 @@ class SapInfoRecordService(InfoRecordServiceBase):
                                 f"SAP-Ist-Zustand nicht lesbar: {existing.read_error}",
                                 started_ms=started)
 
-        transaction = (self.settings.transactions.info_record_change if existing.exists
+        # Drei Faelle, nicht zwei:
+        #   change  -- Infosatz fuer genau diesen Schluessel vorhanden -> ME12
+        #   extend  -- vorhanden, aber ohne die Sicht fuer unser Werk -> ME11
+        #              legt die fehlende Sicht an und haengt sie an den
+        #              bestehenden Satz (gleiche Infosatznummer)
+        #   create  -- gar nichts vorhanden -> ME11
+        modus = existing.write_mode
+        transaction = (self.settings.transactions.info_record_change
+                       if modus == "change"
                        else self.settings.transactions.info_record_create)
-        old_value = existing.price_display() if existing.exists else "kein Infosatz"
+        beschreibung = {"change": "aendern", "extend": "um Werkssicht erweitern",
+                        "create": "neu anlegen"}[modus]
+        old_value = (existing.price_display() if existing.exists
+                     else ("Infosatz vorhanden, Werkssicht fehlt" if modus == "extend"
+                           else "kein Infosatz"))
         new_value = self._new_value_text(position, context)
 
         if context.dry_run:
             return self._result(
                 "info_record", ResultState.SIMULATED,
-                f"{'aendern' if existing.exists else 'neu anlegen'} ({transaction})",
+                f"{beschreibung} ({transaction})",
                 transaction=transaction, old_value=old_value, new_value=new_value,
                 document_number=existing.info_record_number, started_ms=started,
             )
@@ -597,6 +623,21 @@ class SapInfoRecordService(InfoRecordServiceBase):
             self._fill_initial_screen(position.material_number, position.vendor_number,
                                       position.purchasing_org, position.plant)
             connection.send_vkey(0)
+
+            # Sicherheitsnetz: SAP hat das letzte Wort.  Meldet es beim
+            # Anlegen "existiert bereits" oder beim Aendern "existiert
+            # nicht", war unsere Voreinschaetzung falsch (etwa weil
+            # jemand anders zwischenzeitlich gepflegt hat).  Dann wird
+            # einmalig auf die richtige Transaktion umgeschaltet, statt
+            # den Vorgang scheitern zu lassen.
+            transaction, umschaltung = self._switch_transaction_if_needed(
+                transaction, position)
+            if umschaltung:
+                messages.append(umschaltung)
+                beschreibung = ("aendern" if transaction ==
+                                self.settings.transactions.info_record_change
+                                else "neu anlegen")
+
             connection.raise_on_error_status("Einstieg Infosatz")
             self._verify_context(position)
 
@@ -643,7 +684,7 @@ class SapInfoRecordService(InfoRecordServiceBase):
 
             return self._result(
                 "info_record", ResultState.SUCCESS,
-                f"Infosatz {'geaendert' if existing.exists else 'angelegt'}",
+                f"Infosatz {'geaendert' if transaction == self.settings.transactions.info_record_change else ('um Werkssicht erweitert' if modus == 'extend' else 'angelegt')}",
                 transaction=transaction, document_number=number, old_value=old_value,
                 new_value=new_value, started_ms=started, sap_messages=messages,
             )
@@ -924,6 +965,77 @@ class SapInfoRecordService(InfoRecordServiceBase):
                             f"{position.scale_display()}")
 
     # -- Lesehilfen ----------------------------------------------------
+    def _switch_transaction_if_needed(self, transaction: str,
+                                      position: OfferPosition) -> tuple[str, str]:
+        """Auf die richtige Transaktion umschalten, wenn SAP widerspricht.
+
+        Liefert (Transaktion, Hinweistext).  Ist nichts zu tun, bleibt der
+        Hinweistext leer.
+        """
+        connection = self.connection
+        status = connection.read_status()
+        if not status.is_error:
+            return transaction, ""
+
+        text = status.text.lower()
+        anlegen = self.settings.transactions.info_record_create
+        aendern = self.settings.transactions.info_record_change
+
+        bereits_vorhanden = any(hinweis in text for hinweis in
+                                ("bereits vorhanden", "existiert bereits",
+                                 "already exists", "bereits angelegt"))
+        nicht_vorhanden = any(hinweis in text for hinweis in _NOT_FOUND_HINTS)
+
+        if transaction == anlegen and bereits_vorhanden:
+            connection.ensure_transaction(aendern)
+            self._fill_initial_screen(position.material_number, position.vendor_number,
+                                      position.purchasing_org, position.plant)
+            connection.send_vkey(0)
+            logger.info("SAP meldet 'existiert bereits' -- Umschaltung von %s auf %s",
+                        anlegen, aendern)
+            return aendern, (f"SAP meldete beim Anlegen 'existiert bereits' -- es wurde "
+                             f"auf {aendern} umgeschaltet und geaendert.")
+
+        if transaction == aendern and nicht_vorhanden:
+            connection.ensure_transaction(anlegen)
+            self._fill_initial_screen(position.material_number, position.vendor_number,
+                                      position.purchasing_org, position.plant)
+            connection.send_vkey(0)
+            logger.info("SAP meldet 'existiert nicht' -- Umschaltung von %s auf %s",
+                        aendern, anlegen)
+            return anlegen, (f"SAP meldete beim Aendern 'existiert nicht' -- es wurde "
+                             f"auf {anlegen} umgeschaltet und neu angelegt.")
+
+        return transaction, ""
+
+    def _exists_without_plant(self, material_number: str, vendor_number: str,
+                              purchasing_org: str) -> bool:
+        """Gibt es den Infosatz ohne Werksangabe (reine EKorg-Sicht)?
+
+        Wird nur aufgerufen, wenn die Suche MIT Werk nichts gefunden hat.
+        Schlaegt der Versuch fehl, wird bewusst ``False`` geliefert: Im
+        Zweifel lieber der normale Anlagepfad, der bei einem tatsaechlich
+        vorhandenen Satz ohnehin von SAP abgefangen wird.
+        """
+        connection = self.connection
+        if connection is None:
+            return False
+        try:
+            connection.ensure_transaction(
+                self.settings.transactions.info_record_display)
+            self._fill_initial_screen(material_number, vendor_number,
+                                      purchasing_org, "")
+            connection.send_vkey(0)
+            status = connection.read_status()
+            if status.is_error:
+                return False
+            if connection.detect_popup() is not None:
+                return False
+            return True
+        except SapError as exc:
+            logger.debug("Pruefung auf EKorg-Infosatz fehlgeschlagen: %s", exc)
+            return False
+
     def _read_general_screen(self, record: SapInfoRecord) -> None:
         connection = self.connection
         registry = self.selectors

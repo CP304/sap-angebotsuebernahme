@@ -29,8 +29,17 @@ eine Spalte so und nicht anders geschnitten wurde.
 Zusaetzlich wird ``page.find_tables()`` versucht (existiert erst ab neueren
 PyMuPDF-Versionen, deshalb defensiv gekapselt).
 
-Gescannte PDFs ohne Textebene werden erkannt und **klar gemeldet** -- es wird
-nichts geraten und keine OCR vorgetaeuscht.
+Gescannte PDFs ohne Textebene werden erkannt.  Ist eine Texterkennung
+verfuegbar (siehe ``app/services/ocr``), wird die Seite gerendert, erkannt und
+durch **dieselbe** Tabellenrekonstruktion geschickt -- der entstehende Block
+traegt dann ``origin="pdf-ocr"``, damit ueberall nachvollziehbar bleibt, dass
+die Werte aus einer Erkennung stammen und nicht aus dem Dokument.  Ist keine
+Erkennung verfuegbar, bleibt es bei der bisherigen klaren Meldung; geraten wird
+nach wie vor nichts.
+
+Die Entscheidung faellt **je Seite**: Ein Angebot, dessen erste Seite ein
+Text-PDF und dessen zweite Seite ein eingeklebter Scan ist, wird auf Seite 1
+regulaer gelesen und nur auf Seite 2 erkannt.
 """
 
 from __future__ import annotations
@@ -42,6 +51,15 @@ from pathlib import Path
 
 from ...config.settings import ExtractionSettings
 from ...models.enums import SourceKind
+from ..ocr import (
+    NO_BACKEND_HINT,
+    best_backend,
+    cell_confidences,
+    confidence_percent,
+    ocr_settings_of,
+    ocr_warning,
+    uncertain_cells,
+)
 from .base import DocumentReader, RawDocument, TableBlock
 
 logger = logging.getLogger(__name__)
@@ -54,12 +72,39 @@ __all__ = [
     "tolerances_for",
     "make_ruling",
     "make_word",
+    "render_page_png",
+    "ocr_words_to_words",
+    "ocr_page_into_document",
     "SCAN_WARNING",
+    "SCAN_WARNING_WITH_HINT",
+    "OCR_ORIGIN",
+    "OCR_ASK_HINT",
 ]
 
 SCAN_WARNING = ("PDF enthaelt keinen durchsuchbaren Text (vermutlich ein Scan). "
                 "OCR ist nicht eingebaut -- bitte ein Text-PDF anfordern oder die "
                 "Positionen manuell erfassen.")
+
+#: Dieselbe Meldung, aber mit dem konkreten Installationshinweis.  Sie wird
+#: verwendet, sobald feststeht, dass eine Erkennung *grundsaetzlich* helfen
+#: wuerde, auf diesem Rechner aber keine installiert ist.
+SCAN_WARNING_WITH_HINT = (
+    "PDF enthaelt keinen durchsuchbaren Text (vermutlich ein Scan).  Eine "
+    "Texterkennung koennte hier helfen, ist aber nicht installiert.\n"
+    + NO_BACKEND_HINT
+    + "\nAlternativ ein Text-PDF anfordern oder die Positionen manuell erfassen."
+)
+
+#: Hinweis, wenn OCR moeglich waere, der Anwender aber erst zustimmen soll
+OCR_ASK_HINT = (
+    "PDF enthaelt keinen durchsuchbaren Text (vermutlich ein Scan).  Eine "
+    "Texterkennung ist verfuegbar, wurde aber nicht gestartet -- sie dauert "
+    "einige Sekunden je Seite und muss deshalb bestaetigt werden "
+    "(Einstellung 'ask_before_ocr')."
+)
+
+#: Herkunftskennzeichen aller aus einer Texterkennung gewonnenen Bloecke
+OCR_ORIGIN = "pdf-ocr"
 
 #: Ab wie vielen Zeichen je Seite gilt eine Seite als "hat Text"
 _MIN_CHARS_PER_PAGE = 40
@@ -146,7 +191,9 @@ class PdfReader(DocumentReader):
 
     def __init__(self, y_tolerance_factor: float | None = None,
                  x_bin: float | None = None, settings: object | None = None,
-                 profile: object | None = None) -> None:
+                 profile: object | None = None, ocr_settings: object | None = None,
+                 ocr_backend: object | None = None,
+                 ocr_confirmed: bool | None = None) -> None:
         default_y, default_x = tolerances_for(settings, profile)
         #: Anteil der Zeilenhoehe, bis zu dem Woerter noch als eine Zeile gelten
         self.y_tolerance_factor = _positive(y_tolerance_factor, default_y)
@@ -162,6 +209,39 @@ class PdfReader(DocumentReader):
         hints = getattr(profile, "table_hints", None) or {}
         if isinstance(hints, dict) and "use_lattice" in hints:
             self.use_lattice = bool(hints["use_lattice"])
+
+        # -- Texterkennung ------------------------------------------------
+        #: Einstellungen der Texterkennung (auch aus einer Gesamtkonfiguration)
+        self.ocr_settings = ocr_settings_of(ocr_settings if ocr_settings is not None
+                                            else settings)
+        #: Fest vorgegebenes Backend (Tests, oder wenn die Oberflaeche eines
+        #: ausgewaehlt hat).  ``None`` = beim Lesen selbst suchen.
+        self.ocr_backend = ocr_backend
+        #: Hat der Anwender der Erkennung zugestimmt?  Bei
+        #: ``ask_before_ocr`` bleibt OCR ohne ein ``True`` bewusst aus.
+        self.ocr_confirmed = ocr_confirmed
+
+    # ------------------------------------------------------------------
+    def resolve_ocr_backend(self):
+        """Das zu verwendende Backend bestimmen (oder ``None``).
+
+        Reihenfolge: fest vorgegebenes Backend, sonst das erste verfuegbare
+        gemaess Einstellungen.  Liefert ``None``, wenn OCR abgeschaltet ist
+        oder nichts installiert ist -- der Aufrufer muss nichts weiter pruefen.
+        """
+        if self.ocr_backend is not None:
+            if not bool(getattr(self.ocr_settings, "enabled", True)):
+                return None
+            return self.ocr_backend
+        return best_backend(self.ocr_settings)
+
+    def _ocr_allowed(self) -> bool:
+        """Darf ohne Rueckfrage erkannt werden?"""
+        if self.ocr_confirmed is True:
+            return True
+        if self.ocr_confirmed is False:
+            return False
+        return not bool(getattr(self.ocr_settings, "ask_before_ocr", True))
 
     # ------------------------------------------------------------------
     def read(self, path: str) -> RawDocument:
@@ -209,6 +289,14 @@ class PdfReader(DocumentReader):
         document.meta.update({k: v for k, v in meta.items() if v})
         document.meta["page_count"] = handle.page_count
 
+        # Texterkennung nur einmal je Dokument aufloesen -- die
+        # Verfuegbarkeitspruefung kostet Zeit.
+        backend = self.resolve_ocr_backend()
+        allowed = self._ocr_allowed()
+        ocr_pages = 0
+        max_pages = max(0, int(getattr(self.ocr_settings, "max_pages", 20) or 0))
+        scan_pages: list[int] = []
+
         for index in range(handle.page_count):
             page_number = index + 1
             try:
@@ -232,6 +320,24 @@ class PdfReader(DocumentReader):
 
             for block in self._native_tables(page, page_number, document):
                 document.tables.append(block)
+
+            # -- Seite ohne Textebene: hier greift die Texterkennung --------
+            if len(text.strip()) >= _MIN_CHARS_PER_PAGE:
+                continue
+            scan_pages.append(page_number)
+            if backend is None or not allowed:
+                continue
+            if ocr_pages >= max_pages:
+                document.add_warning(
+                    f"Texterkennung wurde nach {max_pages} Seiten abgebrochen "
+                    f"(Einstellung 'max_pages').  Seite {page_number} und "
+                    f"folgende wurden nicht erkannt.")
+                continue
+            ocr_pages += 1
+            self._ocr_page(page, page_number, document, backend)
+
+        if scan_pages:
+            document.meta["scan_pages"] = list(scan_pages)
 
     # ------------------------------------------------------------------
     def _page_words(self, page, page_number: int, document: RawDocument) -> list[_Word]:
@@ -304,13 +410,73 @@ class PdfReader(DocumentReader):
         return blocks
 
     # ------------------------------------------------------------------
+    def _ocr_page(self, page, page_number: int, document: RawDocument,
+                  backend) -> None:
+        """Eine Seite rendern, erkennen und wie ein Text-PDF auswerten."""
+        dpi = _dpi_of(self.ocr_settings)
+        preprocess = bool(getattr(self.ocr_settings, "preprocess", True))
+        try:
+            image = render_page_png(page, dpi=dpi, preprocess=preprocess)
+        except Exception as exc:  # noqa: BLE001 -- Renderfehler nie durchlassen
+            document.add_warning(
+                f"Seite {page_number} konnte fuer die Texterkennung nicht "
+                f"gerendert werden: {exc}")
+            logger.warning("Rendern der Seite %d fehlgeschlagen: %s",
+                           page_number, exc, exc_info=True)
+            return
+        if not image:
+            document.add_warning(
+                f"Seite {page_number} lieferte kein Bild fuer die Texterkennung.")
+            return
+
+        language = str(getattr(self.ocr_settings, "language", "de") or "de")
+        try:
+            result = backend.recognize(image, language)
+        except Exception as exc:  # noqa: BLE001 -- fremder Code, doppelter Boden
+            document.add_warning(
+                f"Texterkennung auf Seite {page_number} fehlgeschlagen: {exc}")
+            logger.warning("OCR auf Seite %d fehlgeschlagen: %s",
+                           page_number, exc, exc_info=True)
+            return
+
+        ocr_page_into_document(
+            document, result, page_number,
+            ocr_settings=self.ocr_settings,
+            y_tolerance_factor=self.y_tolerance_factor,
+            x_bin=self.x_bin,
+            scale=72.0 / float(dpi),
+            origin=OCR_ORIGIN,
+        )
+
+    # ------------------------------------------------------------------
     def _check_for_scan(self, document: RawDocument) -> None:
+        """Scan melden -- je nachdem, ob die Erkennung gegriffen hat.
+
+        Drei Faelle, drei verschiedene Meldungen.  Es waere falsch, hier
+        pauschal zu warnen: Wurde erkannt, ist die Warnung eine *andere*
+        (naemlich die ueber die Unsicherheit des Erkannten).
+        """
         pages = document.pages or [""]
         chars = sum(len(p.strip()) for p in pages)
-        if chars < _MIN_CHARS_PER_PAGE * len(pages):
+        if chars >= _MIN_CHARS_PER_PAGE * len(pages) and not document.meta.get("scan_pages"):
+            return
+
+        document.meta["scanned"] = True
+        ocr_meta = document.meta.get("ocr") or {}
+        if ocr_meta.get("pages"):
+            # Erkannt -- die Unsicherheitswarnung steht bereits im Dokument
+            logger.info("PDF ohne Textebene, Texterkennung hat gegriffen: %s",
+                        document.source_path)
+            return
+
+        backend = self.resolve_ocr_backend()
+        if backend is not None and not self._ocr_allowed():
+            document.add_warning(OCR_ASK_HINT)
+        elif backend is None:
+            document.add_warning(SCAN_WARNING_WITH_HINT)
+        else:
             document.add_warning(SCAN_WARNING)
-            document.meta["scanned"] = True
-            logger.info("PDF wirkt wie ein Scan ohne Textebene: %s", document.source_path)
+        logger.info("PDF wirkt wie ein Scan ohne Textebene: %s", document.source_path)
 
 
 # ---------------------------------------------------------------------------
@@ -590,3 +756,172 @@ def make_ruling(position: float, start: float, end: float) -> _Ruling:
 def make_word(x0: float, y0: float, x1: float, y1: float, text: str) -> _Word:
     """Hilfsfunktion fuer Tests: ein Wort mit Koordinaten erzeugen."""
     return _Word(x0, y0, x1, y1, text)
+
+
+# ---------------------------------------------------------------------------
+# Texterkennung (OCR)
+#
+# Bewusst als freie Funktionen: Der Bildleser (image_reader.py) verwendet
+# genau dieselben Bausteine.  Es gibt nur EINE Tabellenrekonstruktion --
+# ob die Woerter aus der Textebene eines PDFs oder aus einer Erkennung
+# stammen, aendert daran nichts.
+# ---------------------------------------------------------------------------
+
+#: Unterhalb dieser Aufloesung wird OCR unbrauchbar, oberhalb nur langsamer
+_MIN_DPI = 72
+_MAX_DPI = 600
+
+
+def _dpi_of(ocr_settings: object | None) -> int:
+    """Renderaufloesung aus den Einstellungen -- auf sinnvolle Werte begrenzt."""
+    try:
+        dpi = int(getattr(ocr_settings, "dpi", 300) or 300)
+    except (TypeError, ValueError):
+        dpi = 300
+    return max(_MIN_DPI, min(_MAX_DPI, dpi))
+
+
+def render_page_png(page, dpi: int = 300, preprocess: bool = True) -> bytes:
+    """Eine PyMuPDF-Seite als PNG-Bytes rendern.
+
+    ``preprocess`` rendert in Graustufen.  Das ist keine Kosmetik: Farbrauschen
+    aus einem Fotoscan kostet die Erkennung sonst spuerbar Genauigkeit -- und
+    die Datenmenge sinkt nebenbei auf ein Drittel.
+    """
+    import fitz  # PyMuPDF
+
+    kwargs: dict = {"dpi": int(dpi)}
+    if preprocess:
+        kwargs["colorspace"] = fitz.csGRAY
+    try:
+        pixmap = page.get_pixmap(**kwargs)
+    except TypeError:
+        # Aeltere PyMuPDF-Versionen kennen 'dpi' noch nicht -- ueber die
+        # Matrix skalieren (72 dpi ist die Grundaufloesung eines PDFs).
+        matrix = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+        pixmap = page.get_pixmap(matrix=matrix)
+    return bytes(pixmap.tobytes("png"))
+
+
+def ocr_words_to_words(ocr_words, scale: float = 1.0) -> list[_Word]:
+    """Erkannte Woerter in die interne Wortstruktur des Layoutverfahrens ueberfuehren.
+
+    ``scale`` rechnet Bildpixel in PDF-Punkte um (``72 / dpi``).  Damit gelten
+    fuer erkannte Seiten dieselben Toleranzen wie fuer echte Text-PDFs -- sonst
+    muesste die Zeilen- und Spaltenerkennung zweimal gepflegt werden.
+    """
+    factor = float(scale) if scale and scale > 0 else 1.0
+    words: list[_Word] = []
+    for word in ocr_words or []:
+        text = str(getattr(word, "text", "") or "").strip()
+        if not text:
+            continue
+        x0 = float(getattr(word, "x0", 0.0)) * factor
+        y0 = float(getattr(word, "y0", 0.0)) * factor
+        x1 = float(getattr(word, "x1", 0.0)) * factor
+        y1 = float(getattr(word, "y1", 0.0)) * factor
+        if x1 < x0:
+            x0, x1 = x1, x0
+        if y1 < y0:
+            y0, y1 = y1, y0
+        if y1 - y0 < 1.0:
+            # Ohne brauchbare Hoehe funktioniert das Zeilen-Clustering nicht
+            y1 = y0 + 1.0
+        words.append(_Word(x0, y0, x1, y1, text))
+    return words
+
+
+def ocr_page_into_document(document: RawDocument, result, page_number: int,
+                           ocr_settings: object | None = None,
+                           y_tolerance_factor: float = 0.6, x_bin: float = 4.0,
+                           scale: float = 1.0,
+                           origin: str = OCR_ORIGIN) -> bool:
+    """Ein Erkennungsergebnis in ein :class:`RawDocument` einarbeiten.
+
+    Erledigt alles, was zur Ehrlichkeit gehoert:
+
+    * Seitentext setzen (bisher war die Seite leer)
+    * Tabelle ueber dieselbe Layoutanalyse rekonstruieren, ``origin`` setzen
+    * Konfidenz je Zelle als *parallele Matrix* in ``meta["ocr"]`` ablegen --
+      der :class:`TableBlock` selbst bleibt unveraendert, damit andere Module
+      nichts anpassen muessen
+    * unsichere Zellen und Ziffernverdachtsfaelle auflisten
+    * eine deutliche Warnung setzen
+
+    Rueckgabe: ``True``, wenn ein Tabellenblock entstanden ist.
+    """
+    min_confidence = _min_confidence_of(ocr_settings)
+    text = str(getattr(result, "text", "") or "")
+    warnings = list(getattr(result, "warnings", None) or [])
+    ocr_words = list(getattr(result, "words", None) or [])
+    backend_name = str(getattr(result, "backend_name", "") or "")
+    mean_confidence = getattr(result, "mean_confidence", None)
+
+    # -- Seitentext hinterlegen ----------------------------------------
+    if text:
+        while len(document.pages) < page_number:
+            document.pages.append("")
+        document.pages[page_number - 1] = text
+
+    # -- Tabelle ueber die vorhandene Layoutanalyse ---------------------
+    blocks = words_to_tables(ocr_words_to_words(ocr_words, scale), page_number,
+                             y_tolerance_factor=y_tolerance_factor, x_bin=x_bin)
+    findings: list[dict] = []
+    matrices: list[dict] = []
+    for block in blocks:
+        block.origin = origin
+        block.title = (f"Texterkennung, mittlere Sicherheit "
+                       f"{confidence_percent(mean_confidence)}")
+        matrix = cell_confidences(block.rows, ocr_words)
+        matrices.append({"page": page_number, "origin": origin, "rows": matrix})
+        findings.extend(uncertain_cells(block.rows, matrix, min_confidence,
+                                        page=page_number))
+        document.tables.append(block)
+
+    # -- Buchfuehrung in den Metadaten ---------------------------------
+    low_words = [w for w in ocr_words
+                 if getattr(w, "confidence", None) is not None
+                 and w.confidence < min_confidence]
+    meta = document.meta.setdefault("ocr", {})
+    meta.setdefault("backend", backend_name)
+    meta.setdefault("min_confidence", min_confidence)
+    meta.setdefault("pages", [])
+    meta.setdefault("cell_confidence", [])
+    meta.setdefault("uncertain_cells", [])
+    meta["pages"].append({
+        "page": page_number,
+        "backend": backend_name,
+        "mean_confidence": mean_confidence,
+        "word_count": len(ocr_words),
+        "low_confidence_words": len(low_words),
+        "tables": len(blocks),
+    })
+    meta["cell_confidence"].extend(matrices)
+    meta["uncertain_cells"].extend(findings)
+
+    # -- Warnungen ------------------------------------------------------
+    for note in warnings:
+        document.add_warning(f"Texterkennung Seite {page_number}: {note}")
+    if ocr_words or text:
+        document.add_warning(ocr_warning(mean_confidence, backend_name,
+                                         len(low_words)))
+    else:
+        document.add_warning(
+            f"Die Texterkennung hat auf Seite {page_number} nichts gefunden.  "
+            f"Die Vorlage ist vermutlich zu schwach aufgeloest, zu dunkel oder "
+            f"zu schief eingescannt.")
+    for finding in findings:
+        document.add_warning(
+            f"Unsicher erkannt (Seite {finding['page']}, Zeile "
+            f"{finding['row'] + 1}, Spalte {finding['column'] + 1}): "
+            f"{finding['hinweis']}")
+    return bool(blocks)
+
+
+def _min_confidence_of(ocr_settings: object | None) -> float:
+    """Schwelle fuer "unsicher" -- unbrauchbare Angaben ergeben 0.60."""
+    try:
+        value = float(getattr(ocr_settings, "min_confidence", 0.60))
+    except (TypeError, ValueError):
+        return 0.60
+    return value if 0.0 <= value <= 1.0 else 0.60
