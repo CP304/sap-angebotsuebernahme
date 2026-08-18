@@ -1,0 +1,10 @@
+Kabelwerk Nord GmbH
+Angebot Nr. ANG-2026-8080 vom 18.08.2026
+
+Pos;Material;Bezeichnung;Menge;Preis
+10;47110001;Litze 1,5 qmm verzinnt;5000;42,50
+20;47110002;Litze 2,5 qmm verzinnt;3000;61,80
+
+Alle Preise netto in EUR.
+Preise je 100 Stueck.
+zzgl. 3% Kupferzuschlag auf alle Positionen.

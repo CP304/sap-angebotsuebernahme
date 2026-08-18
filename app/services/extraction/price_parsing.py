@@ -28,6 +28,8 @@ __all__ = [
     "PriceInfo",
     "parse_price_text",
     "price_unit_from_header",
+    "footer_price_unit",
+    "is_on_request",
     "is_page_noise_row",
     "is_carryover_row",
 ]
@@ -248,6 +250,53 @@ def price_unit_from_header(text: object) -> int | None:
     except ValueError:
         return None
     return wert if 1 < wert <= MAX_PRICE_UNIT else None
+
+
+#: Preisangabe im Fusstext unterhalb der Tabelle: "Preise je 100 Stueck",
+#: "Alle Preise pro 1000 Stk", "prices per 100 pcs".  Sie gilt dann fuer alle
+#: Positionen ohne eigene Preiseinheit.
+_FOOTER_PRICE_UNIT_RE = re.compile(
+    rf"(?:alle\s+)?preise?\s+(?:verstehen\s+sich\s+)?(?:gelten\s+)?"
+    rf"(?:je|pro|per)\s+(?P<unit_de>\d{{1,5}})(?!\d)\s*(?:{_UNIT_WORDS})\b"
+    rf"|(?:all\s+)?prices?\s+(?:are\s+)?(?:quoted\s+)?(?:per|for)\s+"
+    rf"(?P<unit_en>\d{{1,5}})(?!\d)\s*(?:{_UNIT_WORDS})\b",
+    re.I,
+)
+
+
+def footer_price_unit(text: object) -> int | None:
+    """Preiseinheit aus einer Fusstext-Aussage lesen ("Preise je 100 Stueck").
+
+    Steht die Bezugsmenge nur unterhalb der Tabelle, waere sonst jeder Preis
+    um genau diesen Faktor falsch.  Ohne ausdrueckliche Zahl > 1 wird nichts
+    angenommen.
+    """
+    if not text:
+        return None
+    treffer = _FOOTER_PRICE_UNIT_RE.search(str(text))
+    if not treffer:
+        return None
+    roh = treffer.group("unit_de") or treffer.group("unit_en")
+    try:
+        wert = int(roh)
+    except (TypeError, ValueError):
+        return None
+    return wert if 1 < wert <= MAX_PRICE_UNIT else None
+
+
+#: "auf Anfrage"/"a.A."/"on request": es gibt keinen Preis -- und es darf
+#: niemals einer erfunden werden.  Die Position bleibt trotzdem erhalten.
+_ON_REQUEST_RE = re.compile(
+    r"^\s*(?:preis\s+)?(?:auf\s+anfrage|a\.\s*a\.|on\s+request|upon\s+request|"
+    r"price\s+on\s+application|p\.\s*o\.\s*a\.?|nach\s+vereinbarung|"
+    r"nach\s+absprache)\s*!?\s*$",
+    re.I,
+)
+
+
+def is_on_request(raw: object) -> bool:
+    """Ist diese Preisangabe ein "auf Anfrage"-Vermerk (kein Zahlenwert)?"""
+    return bool(_ON_REQUEST_RE.match(normalize_whitespace(raw)))
 
 
 # --------------------------------------------------------------------------

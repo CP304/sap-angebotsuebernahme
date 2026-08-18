@@ -66,6 +66,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "PdfReader",
+    "find_column_split",
     "words_to_tables",
     "lattice_tables",
     "page_rulings",
@@ -306,6 +307,19 @@ class PdfReader(DocumentReader):
                 document.pages.append("")
                 continue
 
+            # Quer gedrehte Seiten (rotation 90/270): PyMuPDF liefert die
+            # Wortkoordinaten bereits im AUFGERICHTETEN Anzeigeraum -- die
+            # Tabellenrekonstruktion arbeitet also auf der normalisierten
+            # Seite.  Die Drehung wird trotzdem gemeldet, damit der Anwender
+            # weiss, warum das Ergebnis besonders zu pruefen ist.
+            rotation = int(getattr(page, "rotation", 0) or 0)
+            if rotation in (90, 180, 270):
+                document.meta.setdefault("rotated_pages", []).append(page_number)
+                document.add_warning(
+                    f"Seite {page_number} ist um {rotation} Grad gedreht "
+                    "gespeichert und wurde fuer die Auswertung aufgerichtet -- "
+                    "bitte das Ergebnis pruefen.")
+
             try:
                 text = page.get_text("text") or ""
             except Exception as exc:  # noqa: BLE001
@@ -361,6 +375,27 @@ class PdfReader(DocumentReader):
     def _page_tables(self, page, words: list[_Word], page_number: int,
                      document: RawDocument) -> list[TableBlock]:
         """Erst das Linienverfahren, sonst das Koordinaten-Clustering."""
+        # Zweispaltiges Seitenlayout (zwei Angebotsbloecke nebeneinander):
+        # wird es erkannt, werden die Spalten getrennt ausgewertet und der
+        # Anwender bekommt einen klaren Befund.
+        split = find_column_split(words)
+        if split is not None:
+            blocks: list[TableBlock] = []
+            for part, name in ((
+                    [w for w in words if w.x1 <= split], "linke Spalte"), (
+                    [w for w in words if w.x0 >= split], "rechte Spalte")):
+                for block in words_to_tables(part, page_number,
+                                             y_tolerance_factor=self.y_tolerance_factor,
+                                             x_bin=self.x_bin):
+                    block.title = f"{name} (zweispaltiges Layout)"
+                    blocks.append(block)
+            document.add_warning(
+                f"Seite {page_number}: zweispaltiges Layout erkannt (zwei "
+                "Angebotsbloecke nebeneinander).  Die Spalten wurden getrennt "
+                "ausgewertet -- bitte das Ergebnis pruefen.")
+            document.meta.setdefault("two_column_pages", []).append(page_number)
+            if blocks:
+                return blocks
         if self.use_lattice:
             verticals, horizontals = self._page_rulings(page, page_number, document)
             blocks = lattice_tables(words, verticals, horizontals, page_number,
@@ -556,6 +591,69 @@ def _row_from_line(line: list[_Word], starts: list[float], x_bin: float) -> list
                 break
         cells[index].append(word.text)
     return [" ".join(cell).strip() for cell in cells]
+
+
+#: Kopfbegriffe, die in einem Angebotsblock vorkommen.  Tauchen mehrere davon
+#: LINKS UND RECHTS eines breiten Leerstreifens auf, stehen zwei vollstaendige
+#: Bloecke nebeneinander -- eine gewoehnliche Tabelle nennt "Preis" nur einmal.
+_TWO_COLUMN_KEYWORDS = ("pos", "material", "artikel", "bezeichnung", "menge",
+                        "preis", "price", "qty", "item", "description")
+
+#: So breit muss der Leerstreifen zwischen zwei Layoutspalten mindestens sein
+_MIN_COLUMN_GAP = 30.0
+
+
+def find_column_split(words: list[_Word]) -> float | None:
+    """Trennlinie eines zweispaltigen Seitenlayouts finden (oder ``None``).
+
+    Bewusst streng, damit gewoehnliche Tabellen nie faelschlich zerschnitten
+    werden:  Es muss einen durchgehend leeren senkrechten Streifen im mittleren
+    Seitenbereich geben, beide Haelften muessen substanziellen Inhalt tragen,
+    und mindestens zwei typische Spaltenkopf-Begriffe ("Pos", "Preis", ...)
+    muessen auf BEIDEN Seiten auftauchen.
+    """
+    if len(words) < 16:
+        return None
+    x_min = min(w.x0 for w in words)
+    x_max = max(w.x1 for w in words)
+    span = x_max - x_min
+    if span < 250:
+        return None
+
+    # Belegte x-Bereiche ueber die ganze Seite zusammenfassen
+    intervals: list[tuple[float, float]] = []
+    for x0, x1 in sorted((w.x0, w.x1) for w in words):
+        if intervals and x0 <= intervals[-1][1] + 1.0:
+            intervals[-1] = (intervals[-1][0], max(intervals[-1][1], x1))
+        else:
+            intervals.append((x0, x1))
+
+    best: tuple[float, float] | None = None       # (Luecke, Mitte)
+    for (_, left_end), (right_start, _) in zip(intervals, intervals[1:]):
+        gap = right_start - left_end
+        center = (left_end + right_start) / 2.0
+        if gap < _MIN_COLUMN_GAP:
+            continue
+        if not (x_min + span * 0.25 <= center <= x_min + span * 0.75):
+            continue
+        if best is None or gap > best[0]:
+            best = (gap, center)
+    if best is None:
+        return None
+    split = best[1]
+
+    left = [w for w in words if w.x1 <= split]
+    right = [w for w in words if w.x0 >= split]
+    if len(left) < 8 or len(right) < 8:
+        return None
+
+    def _keywords(part: list[_Word]) -> set[str]:
+        text = " ".join(w.text.lower() for w in part)
+        return {k for k in _TWO_COLUMN_KEYWORDS if k in text}
+
+    if len(_keywords(left) & _keywords(right)) < 2:
+        return None
+    return split
 
 
 def words_to_tables(words: list[_Word], page: int, y_tolerance_factor: float = 0.6,

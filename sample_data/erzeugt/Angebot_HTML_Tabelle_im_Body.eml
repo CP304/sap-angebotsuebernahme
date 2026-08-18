@@ -1,0 +1,33 @@
+From: Vertrieb <vertrieb@muster-dichtungstechnik.de>
+To: einkauf@unsere-firma.de
+Subject: Angebot HT-2026-3311 (Tabelle im Mailtext)
+Date: Tue, 18 Aug 2026 10:00:00 +0200
+MIME-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="===============6684386875658826757=="
+
+--===============6684386875658826757==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Bitte HTML-Ansicht verwenden.
+
+--===============6684386875658826757==
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+MIME-Version: 1.0
+
+<html><body>
+<p>Guten Tag,</p>
+<p>unser Angebot HT-2026-3311 vom 18.08.2026, Waehrung EUR:</p>
+<table border="1">
+  <tr><th colspan="2">Artikel</th><th>Menge</th><th>ME</th><th>Preis</th></tr>
+  <tr><td>47110001</td><td>Dichtring NBR 40x52x7</td><td>500</td><td>St</td>
+      <td>12,85</td></tr>
+  <tr><td>47110005</td><td>Kugellager 6204-2RS</td><td>1.000</td><td>St</td>
+      <td>4,55</td></tr>
+</table>
+<p>Zahlungsziel 30 Tage netto.</p>
+</body></html>
+
+--===============6684386875658826757==--

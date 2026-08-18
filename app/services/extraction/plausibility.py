@@ -339,8 +339,27 @@ def check_document_total(offer: Offer, text: str | None = None) -> list[str]:
     if not werte:
         return []
     if ohne_wert:
-        note = (f"Belegsumme {format_decimal(beleg_summe)} konnte nicht geprueft "
-                f"werden: bei {ohne_wert} Position(en) fehlt Menge oder Preis.")
+        # Fehlt bei einzelnen Positionen der Preis (z. B. "auf Anfrage"), kann
+        # die Belegsumme nicht exakt bestaetigt werden.  Die uebrigen
+        # Positionen werden trotzdem geprueft: uebersteigt ihre Teilsumme die
+        # Belegsumme bereits, ist sicher etwas falsch gelesen worden.
+        teilsumme = sum(werte, Decimal(0))
+        if teilsumme > beleg_summe + _tolerance(beleg_summe):
+            note = (f"Teilpruefung der Belegsumme: schon die {len(werte)} "
+                    f"Position(en) mit Preis summieren sich auf "
+                    f"{format_decimal(teilsumme)} und liegen damit UEBER der "
+                    f"Belegsumme {format_decimal(beleg_summe)} ('{label}') -- "
+                    f"bitte Mengen und Preise pruefen ({ohne_wert} Position(en) "
+                    "ohne Preis blieben unberuecksichtigt).")
+            offer.issues.add(Issue(CODE_DOCUMENT_TOTAL_MISMATCH, note,
+                                   IssueSeverity.WARNING, blocking=False,
+                                   detail=f"Beschriftung im Beleg: {label}"))
+        else:
+            note = (f"Belegsumme {format_decimal(beleg_summe)} nur teilweise "
+                    f"geprueft: {ohne_wert} Position(en) ohne Menge oder Preis "
+                    f"(z. B. 'auf Anfrage'). Die uebrigen {len(werte)} "
+                    f"Position(en) summieren sich auf {format_decimal(teilsumme)} "
+                    "und liegen nicht ueber der Belegsumme -- kein Widerspruch.")
         offer.add_note(note)
         return [note]
 

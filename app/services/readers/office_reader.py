@@ -166,12 +166,26 @@ class WordReader(DocumentReader):
 
     def _table(self, tabelle, index: int) -> TableBlock | None:
         zeilen: list[list[str]] = []
+        verbunden: set[tuple[int, int]] = set()
         for zeile in tabelle.findall(f"{_W}tr"):
             zellen: list[str] = []
             for zelle in zeile.findall(f"{_W}tc"):
                 absaetze = [self._paragraph_text(a) for a in zelle.findall(f"{_W}p")]
-                zellen.append(_clean(" ".join(absaetze)))
-                # Verbundene Zellen: der Inhalt gilt fuer alle Spalten
+                text = _clean(" ".join(absaetze))
+                # Senkrecht verbundene Zellen (vMerge ohne val="restart"):
+                # der Wert der Vorzeile gilt weiter (z. B. eine Materialnummer
+                # fuer mehrere Variantenzeilen).  Er wird uebernommen und die
+                # Zelle vermerkt -- die Extraktion markiert sie als unsicher.
+                vmerge = zelle.find(f"{_W}tcPr/{_W}vMerge")
+                if vmerge is not None and not text:
+                    val = (vmerge.get(f"{_W}val") or "continue").lower()
+                    spalte = len(zellen)
+                    if val != "restart" and zeilen and spalte < len(zeilen[-1]):
+                        text = zeilen[-1][spalte]
+                        if text:
+                            verbunden.add((len(zeilen), spalte))
+                zellen.append(text)
+                # Waagerecht verbundene Zellen: der Inhalt gilt fuer alle Spalten
                 span = zelle.find(f"{_W}tcPr/{_W}gridSpan")
                 if span is not None:
                     try:
@@ -188,7 +202,7 @@ class WordReader(DocumentReader):
         breite = max(len(z) for z in zeilen)
         zeilen = [z + [""] * (breite - len(z)) for z in zeilen]
         return TableBlock(rows=zeilen, page=0, origin="word-table",
-                          header_row_index=None)
+                          header_row_index=None, merged_cells=verbunden)
 
 
 # ---------------------------------------------------------------------------

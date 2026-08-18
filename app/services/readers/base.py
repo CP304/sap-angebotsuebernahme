@@ -50,6 +50,10 @@ class TableBlock:
     header_row_index: int | None = None
     #: Frei belegbare Zusatzinfo (Blattname, Seitentitel, ...)
     title: str = ""
+    #: Zellen (Zeile, Spalte), deren Wert aus einer *verbundenen* Zelle
+    #: uebernommen wurde (Excel merged cells, Word vMerge).  Die Extraktion
+    #: markiert solche Werte grundsaetzlich als unsicher.
+    merged_cells: set[tuple[int, int]] = field(default_factory=set)
 
     # ------------------------------------------------------------------
     @property
@@ -72,16 +76,22 @@ class TableBlock:
         width = max((len(r) for r in rows), default=0)
         rows = [r + [""] * (width - len(r)) for r in rows]
         keep = [i for i in range(width) if any(r[i] for r in rows)]
+        column_map = {old: new for new, old in enumerate(keep)}
         rows = [[r[i] for i in keep] for r in rows]
         header = self.header_row_index
         cleaned: list[list[str]] = []
+        row_map: dict[int, int] = {}
         for index, row in enumerate(rows):
             if any(cell for cell in row):
+                row_map[index] = len(cleaned)
                 cleaned.append(row)
             elif header is not None and index < header:
                 header -= 1
+        merged = {(row_map[r], column_map[c]) for r, c in self.merged_cells
+                  if r in row_map and c in column_map}
         return TableBlock(rows=cleaned, page=self.page, origin=self.origin,
-                          header_row_index=header, title=self.title)
+                          header_row_index=header, title=self.title,
+                          merged_cells=merged)
 
     def as_text(self) -> str:
         return "\n".join(" | ".join(row) for row in self.rows)

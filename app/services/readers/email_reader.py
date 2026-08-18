@@ -102,6 +102,7 @@ class HtmlTableParser(HTMLParser):
         self._table_stack: list[list[list[str]]] = []
         self._row_stack: list[list[str]] = []
         self._cell: list[str] | None = None
+        self._cell_span = 1
         self._skip_depth = 0
 
     # -- HTMLParser-Schnittstelle ---------------------------------------
@@ -118,6 +119,14 @@ class HtmlTableParser(HTMLParser):
                 self._flush_row()
         elif tag in ("td", "th"):
             self._cell = []
+            # colspan beachten: sonst verschieben sich alle Folgespalten
+            self._cell_span = 1
+            for name, value in attrs or ():
+                if str(name).lower() == "colspan":
+                    try:
+                        self._cell_span = max(1, min(int(str(value)), 20))
+                    except (TypeError, ValueError):
+                        self._cell_span = 1
         elif tag == "li":
             self.text_parts.append("\n- ")
         elif tag in self._BLOCK_TAGS:
@@ -132,8 +141,11 @@ class HtmlTableParser(HTMLParser):
             if self._cell is not None and self._row_stack:
                 cell_text = re.sub(r"\s+", " ", "".join(self._cell)).strip()
                 self._row_stack[-1].append(cell_text)
+                if self._cell_span > 1:
+                    self._row_stack[-1].extend([""] * (self._cell_span - 1))
                 self.text_parts.append(cell_text + "\t")
             self._cell = None
+            self._cell_span = 1
         elif tag == "tr":
             self._flush_row()
             self.text_parts.append("\n")

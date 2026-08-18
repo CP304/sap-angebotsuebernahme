@@ -822,6 +822,266 @@ def zip_sammlung(pfad: Path, *quellen: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Die "merkwuerdigen" Angebote -- Sonderfaelle, an denen Importe scheitern
+# ---------------------------------------------------------------------------
+
+def excel_staffel_matrix(pfad: Path) -> None:
+    """Staffelpreise als MATRIX: Mengen als Spaltenueberschriften.
+
+    "ab 100 | ab 500 | ab 1000" -- eine Zeile je Material, die Preise stehen
+    in der Matrix.  Muss zu Positionen mit Mengenstaffeln werden.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    mappe = Workbook()
+    blatt = mappe.active
+    blatt.title = "Staffelpreise"
+
+    blatt["A1"] = "Muster Dichtungstechnik GmbH"
+    blatt["A1"].font = Font(bold=True)
+    blatt["A2"] = "Angebot Nr.: ANG-2026-6600"
+    blatt["A3"] = f"Datum: {_datum(HEUTE)}"
+    blatt["A4"] = "Waehrung: EUR"
+
+    kopf = ["Materialnummer", "Bezeichnung", "ab 100", "ab 500", "ab 1000"]
+    for spalte, text in enumerate(kopf, start=1):
+        blatt.cell(row=6, column=spalte, value=text).font = Font(bold=True)
+
+    zeilen = [
+        ("47110001", "Dichtring NBR 40x52x7", "13,20", "12,85", "12,40"),
+        ("47110002", "O-Ring Viton 25x3", "0,95", "0,89", "0,84"),
+        ("47110005", "Kugellager 6204-2RS", "4,75", "4,35", "4,10"),
+    ]
+    for index, zeile in enumerate(zeilen, start=7):
+        for spalte, wert in enumerate(zeile, start=1):
+            blatt.cell(row=index, column=spalte, value=wert)
+    mappe.save(pfad)
+
+
+def csv_zwischenueberschriften(pfad: Path) -> None:
+    """Preisliste mit Artikelgruppen-Zeilen zwischen den Positionen."""
+    with pfad.open("w", encoding="utf-8-sig", newline="") as datei:
+        schreiber = csv.writer(datei, delimiter=";")
+        schreiber.writerow(["Pos", "Material", "Bezeichnung", "Menge", "ME", "Preis"])
+        schreiber.writerow(["Dichtungen:", "", "", "", "", ""])
+        schreiber.writerow([10, "47110001", "Dichtring NBR 40x52x7", "500", "St", "12,85"])
+        schreiber.writerow([20, "47110002", "O-Ring Viton 25x3", "200", "St", "8,90"])
+        schreiber.writerow(["-- Gruppe B: Lager --", "", "", "", "", ""])
+        schreiber.writerow([30, "47110005", "Kugellager 6204-2RS", "1000", "St", "4,55"])
+
+
+def text_fusstext_preisangaben(pfad: Path) -> None:
+    """Preisangaben unterhalb der Tabelle: Waehrung, Preiseinheit, Zuschlag."""
+    inhalt = (
+        "Kabelwerk Nord GmbH\n"
+        f"Angebot Nr. ANG-2026-8080 vom {_datum(HEUTE)}\n"
+        "\n"
+        "Pos;Material;Bezeichnung;Menge;Preis\n"
+        "10;47110001;Litze 1,5 qmm verzinnt;5000;42,50\n"
+        "20;47110002;Litze 2,5 qmm verzinnt;3000;61,80\n"
+        "\n"
+        "Alle Preise netto in EUR.\n"
+        "Preise je 100 Stueck.\n"
+        "zzgl. 3% Kupferzuschlag auf alle Positionen.\n"
+    )
+    pfad.write_text(inhalt, encoding="utf-8")
+
+
+def word_verbundene_zellen(pfad: Path) -> None:
+    """Word-Tabelle mit senkrecht verbundenen Zellen (vMerge).
+
+    Die Materialnummer steht nur in der ersten Variantenzeile; die
+    Folgezeilen teilen sich die verbundene Zelle.  Der Import muss die Nummer
+    uebernehmen (als UNCERTAIN), statt die Zeilen zu verwerfen.
+    """
+    import zipfile
+
+    def zelle(text: str, vmerge: str = "") -> str:
+        eigenschaften = ""
+        if vmerge == "restart":
+            eigenschaften = '<w:tcPr><w:vMerge w:val="restart"/></w:tcPr>'
+        elif vmerge == "continue":
+            eigenschaften = "<w:tcPr><w:vMerge/></w:tcPr>"
+        return (f"<w:tc>{eigenschaften}<w:p><w:r>"
+                f'<w:t xml:space="preserve">{text}</w:t></w:r></w:p></w:tc>')
+
+    def zeile(*zellen: str) -> str:
+        return "<w:tr>" + "".join(zellen) + "</w:tr>"
+
+    koerper = (
+        _docx_absatz("Schmidt &amp; Partner Werkstoffe KG")
+        + _docx_absatz("Angebot Nr. ANG-2026-9911 vom " + _datum(HEUTE))
+        + _docx_absatz("Waehrung: EUR")
+        + "<w:tbl>"
+        + zeile(zelle("Materialnummer"), zelle("Bezeichnung"), zelle("Menge"),
+                zelle("ME"), zelle("Preis"))
+        + zeile(zelle("47110001", "restart"), zelle("Dichtring NBR 40x52x7"),
+                zelle("500"), zelle("St"), zelle("12,85"))
+        + zeile(zelle("", "continue"), zelle("Dichtring NBR 40x52x7 (FKM)"),
+                zelle("500"), zelle("St"), zelle("14,20"))
+        + zeile(zelle("", "continue"), zelle("Dichtring NBR 40x52x7 (EPDM)"),
+                zelle("500"), zelle("St"), zelle("13,60"))
+        + zeile(zelle("47110005", "restart"), zelle("Kugellager 6204-2RS"),
+                zelle("1.000"), zelle("St"), zelle("4,55"))
+        + zeile(zelle("", "continue"), zelle("Kugellager 6204-2RS-C3"),
+                zelle("1.000"), zelle("St"), zelle("4,80"))
+        + "</w:tbl>"
+    )
+    dokument = (f'<?xml version="1.0" encoding="UTF-8"?>'
+                f'<w:document xmlns:w="{_W_NS}"><w:body>{koerper}</w:body></w:document>')
+    beziehungen = (
+        '<?xml version="1.0" encoding="UTF-8"?><Relationships '
+        'xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/'
+        'officeDocument/2006/relationships/officeDocument" '
+        'Target="word/document.xml"/></Relationships>')
+    typen = (
+        '<?xml version="1.0" encoding="UTF-8"?><Types '
+        'xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Default Extension="rels" ContentType="application/vnd.'
+        'openxmlformats-package.relationships+xml"/></Types>')
+    with zipfile.ZipFile(pfad, "w", zipfile.ZIP_DEFLATED) as archiv:
+        archiv.writestr("[Content_Types].xml", typen)
+        archiv.writestr("_rels/.rels", beziehungen)
+        archiv.writestr("word/document.xml", dokument)
+
+
+_HTML_NUR_BODY = f"""<html><body>
+<p>Guten Tag,</p>
+<p>unser Angebot HT-2026-3311 vom {_datum(HEUTE)}, Waehrung EUR:</p>
+<table border="1">
+  <tr><th colspan="2">Artikel</th><th>Menge</th><th>ME</th><th>Preis</th></tr>
+  <tr><td>47110001</td><td>Dichtring NBR 40x52x7</td><td>500</td><td>St</td>
+      <td>12,85</td></tr>
+  <tr><td>47110005</td><td>Kugellager 6204-2RS</td><td>1.000</td><td>St</td>
+      <td>4,55</td></tr>
+</table>
+<p>Zahlungsziel 30 Tage netto.</p>
+</body></html>"""
+
+
+def mail_html_tabelle(pfad: Path) -> None:
+    """HTML-Mail: die Angebotstabelle steht direkt im Body, kein Anhang."""
+    nachricht = EmailMessage()
+    nachricht["From"] = "Vertrieb <vertrieb@muster-dichtungstechnik.de>"
+    nachricht["To"] = "einkauf@unsere-firma.de"
+    nachricht["Subject"] = "Angebot HT-2026-3311 (Tabelle im Mailtext)"
+    nachricht["Date"] = HEUTE.strftime("%a, %d %b %Y 10:00:00 +0200")
+    nachricht.set_content("Bitte HTML-Ansicht verwenden.")
+    nachricht.add_alternative(_HTML_NUR_BODY, subtype="html")
+    pfad.write_bytes(nachricht.as_bytes())
+
+
+def pdf_gedrehte_seite(pfad: Path) -> None:
+    """PDF, dessen Seite um 90 Grad gedreht gespeichert wurde."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        print("  PyMuPDF fehlt - PDF-Beispiel wird uebersprungen.")
+        return
+    dokument = fitz.open()
+    seite = dokument.new_page()
+    seite.insert_text((50, 60), "Pumpen Weber GmbH", fontsize=14, fontname="hebo")
+    seite.insert_text((50, 84), f"Angebot Nr. AG-2026-7070 vom {_datum(HEUTE)}",
+                      fontsize=10, fontname="helv")
+    seite.insert_text((50, 100), "Waehrung: EUR", fontsize=10, fontname="helv")
+    spalten = (50, 110, 190, 350, 400, 460)
+    for x, text in zip(spalten, ("Pos", "Material", "Bezeichnung", "Menge",
+                                 "ME", "Preis")):
+        seite.insert_text((x, 140), text, fontsize=10, fontname="hebo")
+    zeilen = (
+        ("10", "48200110", "Kreiselpumpe KP-40", "12", "ST", "1.298,00"),
+        ("20", "48200111", "Gleitringdichtung KP-40", "40", "ST", "289,00"),
+    )
+    y = 160
+    for zeile in zeilen:
+        for x, text in zip(spalten, zeile):
+            seite.insert_text((x, y), text, fontsize=10, fontname="helv")
+        y += 18
+    seite.set_rotation(90)
+    dokument.save(pfad)
+    dokument.close()
+
+
+def csv_englisch_gemischt(pfad: Path) -> None:
+    """Englischer Beleg mit mehrdeutigem Datumsformat (MM/DD vs DD/MM)."""
+    with pfad.open("w", encoding="utf-8", newline="") as datei:
+        schreiber = csv.writer(datei, delimiter=";")
+        schreiber.writerow(["Item", "Material", "Description", "Qty", "Unit",
+                            "Unit price", "Valid from"])
+        schreiber.writerow([10, "47110001", "Sealing ring NBR 40x52x7", "500",
+                            "pcs", "12.85", "03/04/2026"])
+        schreiber.writerow([20, "47110005", "Ball bearing 6204-2RS", "1,000",
+                            "pcs", "4.55", "05/06/2026"])
+
+
+def csv_auf_anfrage_mit_summe(pfad: Path) -> None:
+    """"auf Anfrage"-Position plus Belegsumme (Teilpruefung noetig)."""
+    inhalt = (
+        "Pos;Material;Bezeichnung;Menge;ME;Preis\n"
+        "10;47110001;Dichtring NBR 40x52x7;500;St;12,85\n"
+        "20;47110002;O-Ring Viton 25x3;200;St;8,90\n"
+        "30;48200111;Gleitringdichtung KP-40;40;St;auf Anfrage\n"
+        "\n"
+        f"Angebot Nr. ANG-2026-4040 vom {_datum(HEUTE)}, Waehrung EUR\n"
+        "Gesamtsumme: 8.205,00 EUR\n"
+    )
+    pfad.write_text(inhalt, encoding="utf-8-sig")
+
+
+def pdf_zweispaltig(pfad: Path) -> None:
+    """Zwei Angebotsbloecke NEBENEINANDER auf einer Seite."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        print("  PyMuPDF fehlt - PDF-Beispiel wird uebersprungen.")
+        return
+    dokument = fitz.open()
+    seite = dokument.new_page()
+    seite.insert_text((50, 60), "Nordtec Industriebedarf AG -- Kurzangebote",
+                      fontsize=13, fontname="hebo")
+    seite.insert_text((50, 80), f"AG-2026-2200 vom {_datum(HEUTE)}, Waehrung EUR",
+                      fontsize=10, fontname="helv")
+
+    def block(x0: float, zeilen) -> None:
+        spalten = (x0, x0 + 60, x0 + 130, x0 + 175)
+        for x, text in zip(spalten, ("Pos", "Material", "Menge", "Preis")):
+            seite.insert_text((x, 120), text, fontsize=9, fontname="hebo")
+        y = 138
+        for zeile in zeilen:
+            for x, text in zip(spalten, zeile):
+                seite.insert_text((x, y), text, fontsize=9, fontname="helv")
+            y += 16
+
+    block(50, (
+        ("10", "47110001", "500", "12,85"),
+        ("20", "47110002", "200", "8,90"),
+        ("30", "47110003", "100", "18,95"),
+        ("40", "47110004", "800", "3,40"),
+    ))
+    block(330, (
+        ("10", "47110005", "1000", "4,55"),
+        ("20", "49900010", "500", "6,95"),
+        ("30", "48200111", "40", "289,00"),
+        ("40", "49900011", "1500", "0,42"),
+    ))
+    dokument.save(pfad)
+    dokument.close()
+
+
+def text_preisspanne_ohne_kopf(pfad: Path) -> None:
+    """Preisspannen-Zeilen OHNE Kopfzeile -- durften bisher nicht verschwinden."""
+    inhalt = (
+        "47110001;Dichtring NBR 40x52x7;12,00 - 14,00 EUR\n"
+        "47110002;O-Ring Viton 25x3;8,50 - 9,20 EUR\n"
+        "47110005;Kugellager 6204-2RS;4,55 EUR\n"
+    )
+    pfad.write_text(inhalt, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 
 def main() -> int:
     ZIEL.mkdir(parents=True, exist_ok=True)
@@ -845,6 +1105,17 @@ def main() -> int:
         ("Angebot_Staffelpreise_zwei_Seiten.pdf", pdf_staffelpreise_zwei_seiten),
         ("Quotation_vertauschte_Spalten.xlsx", excel_vertauschte_spalten),
         ("Preisliste_Nordtec.ods", ods_preisliste),
+        # -- die "merkwuerdigen" Angebote --------------------------------
+        ("Angebot_Staffel_Matrix.xlsx", excel_staffel_matrix),
+        ("Preisliste_Zwischenueberschriften.csv", csv_zwischenueberschriften),
+        ("Angebot_Fusstext_Preisangaben.txt", text_fusstext_preisangaben),
+        ("Angebot_verbundene_Zellen.docx", word_verbundene_zellen),
+        ("Angebot_HTML_Tabelle_im_Body.eml", mail_html_tabelle),
+        ("Angebot_gedrehte_Seite.pdf", pdf_gedrehte_seite),
+        ("Quotation_englisch_gemischt.csv", csv_englisch_gemischt),
+        ("Angebot_auf_Anfrage_mit_Summe.csv", csv_auf_anfrage_mit_summe),
+        ("Angebot_zweispaltig.pdf", pdf_zweispaltig),
+        ("Preisspannen_ohne_Kopfzeile.txt", text_preisspanne_ohne_kopf),
     ]
     # Hinweis: Die Windows-Konsole nutzt cp1252 -- deshalb bewusst nur ASCII
     # ausgeben, sonst bricht die Ausgabe mit einem UnicodeEncodeError ab.

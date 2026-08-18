@@ -312,14 +312,27 @@ class BelegsummeTest(unittest.TestCase):
         offer = angebot(p, text="Gesamtsumme: 1.100,00 EUR")
         self.assertEqual(check_document_total(offer), [])
 
-    def test_position_ohne_wert_verhindert_die_pruefung(self):
+    def test_position_ohne_wert_fuehrt_zur_teilpruefung(self):
+        # Frueher wurde die Pruefung komplett uebersprungen -- jetzt werden
+        # die uebrigen Positionen trotzdem gegen die Belegsumme gehalten.
         offer = angebot(position(nummer="10", menge="10", preis="100,00"),
                         position(nummer="20", menge=None, preis=None),
                         text="Gesamtsumme: 1.000,00 EUR")
         notizen = check_document_total(offer)
         self.assertEqual(len(notizen), 1)
-        self.assertIn("konnte nicht geprueft werden", notizen[0])
+        self.assertIn("teilweise geprueft", notizen[0])
         self.assertNotIn(CODE_DOCUMENT_TOTAL_MISMATCH, codes(offer))
+
+    def test_teilsumme_ueber_belegsumme_ist_ein_befund(self):
+        # Schon die Positionen MIT Preis uebersteigen die Belegsumme -- das
+        # muss trotz fehlender Preise als Widerspruch gemeldet werden.
+        offer = angebot(position(nummer="10", menge="10", preis="200,00"),
+                        position(nummer="20", menge=None, preis=None),
+                        text="Gesamtsumme: 1.000,00 EUR")
+        notizen = check_document_total(offer)
+        self.assertEqual(len(notizen), 1)
+        self.assertIn("UEBER", notizen[0])
+        self.assertIn(CODE_DOCUMENT_TOTAL_MISMATCH, codes(offer))
 
     def test_staffelzeilen_zaehlen_nicht_doppelt(self):
         staffel = position(nummer="10", menge="500", preis="10,00")

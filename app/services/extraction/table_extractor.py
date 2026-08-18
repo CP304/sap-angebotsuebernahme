@@ -1076,6 +1076,95 @@ class TableExtractor:
     def _is_skipped(self, raw_line: str) -> bool:
         return any(pattern.search(raw_line) for pattern in self._skip_patterns)
 
+    def _is_group_heading(self, row: list[str], analysis: TableAnalysis) -> bool:
+        """Zwischenueberschriften ("Dichtungen", "-- Gruppe B --") erkennen.
+
+        Solche Artikelgruppen-Zeilen duerfen weder Positionen werden noch an
+        die Vorposition angehaengt werden.  Erkannt wird bewusst nur, was klar
+        ist: genau EINE gefuellte Zelle, keine Zahl, kein Datum -- und die
+        Zelle ist entweder erkennbar dekoriert ("--", "==", endet auf ":")
+        oder sie steht NICHT in der Beschreibungsspalte (dort waere es eine
+        gewoehnliche Fortsetzungszeile).
+        """
+        texts = [normalize_whitespace(cell) for cell in row]
+        filled = [(index, text) for index, text in enumerate(texts) if text]
+        if len(filled) != 1:
+            return False
+        index, text = filled[0]
+        if len(text) > 60 or _looks_like_number(text) or _looks_like_date(text):
+            return False
+        if re.search(r"\d[.,]\d", text):
+            return False
+        decorated = bool(_GROUP_DECOR_RE.match(text)) or text.endswith(":")
+        if decorated and not any(ch.isdigit() for ch in text):
+            return True
+        assignment = analysis.columns.get(index)
+        if assignment is not None and assignment.field in ("description", "remarks"):
+            return False        # Fortsetzung eines Beschreibungstextes
+        if any(ch.isdigit() for ch in text):
+            return False
+        if self.material_re.match(text.replace(" ", "")):
+            return False
+        return True
+
+    def _matrix_tier_positions(self, base: OfferPosition, row: list[str],
+                               analysis: TableAnalysis, document: RawDocument,
+                               label: str, row_index: int) -> list[OfferPosition]:
+        """Staffelpreise aus den Matrixspalten ("ab 100 | ab 500 | ...") bilden.
+
+        Die erste Staffelstufe wird -- falls die Zeile keinen eigenen Preis
+        traegt -- zur Grundposition; jede weitere Stufe wird eine eigene
+        Position mit dem Vermerk "Staffelpreis" (so behandeln die
+        Kreuzpruefungen sie korrekt als dieselbe Ware).
+        """
+        if not analysis.tier_columns:
+            return []
+        stufen: list[tuple[Decimal, Decimal, str, str]] = []
+        for index, quantity in sorted(analysis.tier_columns.items()):
+            raw = row[index] if index < len(row) else ""
+            if not normalize_whitespace(raw):
+                continue
+            info = parse_price_text(raw, self.decimal_style)
+            if info.price is None:
+                continue
+            stufen.append((quantity, info.price, info.currency, raw))
+        if not stufen:
+            return []
+
+        out: list[OfferPosition] = []
+        rest = stufen
+        if base.price is None:
+            quantity, price, currency, raw = stufen[0]
+            base.set_field("price", price, FieldOrigin.EXTRACTED)
+            base.set_field("min_order_qty", quantity, FieldOrigin.EXTRACTED)
+            if currency and not base.currency:
+                base.set_field("currency", currency, FieldOrigin.EXTRACTED)
+            base.set_field("remarks",
+                           _join_remark(base.remarks,
+                                        f"Mengenstaffel (Matrix), Grundstufe ab "
+                                        f"{quantity}"),
+                           FieldOrigin.EXTRACTED)
+            rest = stufen[1:]
+        for quantity, price, currency, raw in rest:
+            tier = _copy_position(base)
+            tier.source_kind = document.source_kind
+            tier.source_hint = f"{label}, Zeile {row_index + 1} (Staffel ab {quantity})"
+            tier.raw_text = f"ab {quantity}: {raw}"
+            tier.set_field("quantity", quantity, FieldOrigin.EXTRACTED)
+            tier.set_field("price", price, FieldOrigin.EXTRACTED)
+            tier.set_field("min_order_qty", quantity, FieldOrigin.EXTRACTED)
+            if currency and not tier.currency:
+                tier.set_field("currency", currency, FieldOrigin.EXTRACTED)
+            tier.set_field("remarks",
+                           _join_remark(base.remarks,
+                                        f"Staffelpreis: ab {quantity} = {price}"),
+                           FieldOrigin.EXTRACTED)
+            out.append(tier)
+        if out:
+            logger.debug("%d Matrix-Staffelstufen zu Position %s erkannt",
+                         len(out), base.display_name)
+        return out
+
     def _is_repeated_header(self, row: list[str], analysis: TableAnalysis) -> bool:
         """Wiederholte Kopfzeile (Seitenumbruch im PDF) erkennen."""
         if not analysis.header_texts:
@@ -1084,11 +1173,12 @@ class TableExtractor:
                    if a and _normalize_header(a) == _normalize_header(b))
         return same >= 2
 
-    def _row_values(self, row: list[str],
-                    analysis: TableAnalysis) -> tuple[dict[str, Any], list[str]]:
+    def _row_values(self, row: list[str], analysis: TableAnalysis,
+                    row_index: int = -1) -> tuple[dict[str, Any], list[str]]:
         """Zellwerte einer Zeile in Felder wandeln."""
         values: dict[str, Any] = {}
         present: list[str] = []
+        merged_cells = getattr(analysis.block, "merged_cells", None) or set()
         for index, assignment in analysis.columns.items():
             if index >= len(row):
                 continue
@@ -1096,7 +1186,23 @@ class TableExtractor:
             if not raw:
                 continue
             field_name = assignment.field
-            if field_name == PSEUDO_IGNORE:
+            if field_name in (PSEUDO_IGNORE, PSEUDO_TIER):
+                continue
+            if (field_name in ("material_number", "vendor_material_number")
+                    and row_index >= 0 and (row_index, index) in merged_cells):
+                # Der Wert stammt aus einer verbundenen Zelle einer Vorzeile
+                # (Variantenzeilen unter einer Materialnummer).  Er wird
+                # uebernommen, aber grundsaetzlich als unsicher markiert.
+                values.setdefault("_merged_fields", []).append(field_name)
+                values.setdefault("_notes", []).append(
+                    f"{field_name}: Wert '{raw}' stammt aus einer verbundenen "
+                    "Zelle (gilt fuer mehrere Zeilen) -- als unsicher uebernommen.")
+            if field_name == "price" and is_on_request(raw):
+                # "auf Anfrage"/"a.A."/"on request": die Position bleibt
+                # erhalten, der Preis bleibt bewusst leer (Befund folgt).
+                values["_on_request"] = True
+                values.setdefault("_raw", {})["price"] = raw
+                present.append("price")
                 continue
             if field_name == PSEUDO_TOTAL:
                 # Die Zeilensumme gehoert nicht nach SAP -- sie ist aber der
@@ -1219,6 +1325,29 @@ class TableExtractor:
         # Preisspanne: es gibt keinen gueltigen Preis -- also bleibt er leer.
         if values.get("_price_range") and position.price is None:
             position.set_field("price", None, FieldOrigin.UNCERTAIN)
+            position.issues.add(Issue(
+                "price_range",
+                "Der Beleg nennt eine Preisspanne statt eines Preises -- es "
+                "wurde bewusst kein Wert uebernommen, bitte den gueltigen "
+                "Preis eintragen.",
+                IssueSeverity.WARNING, field="price", blocking=False))
+
+        # "auf Anfrage": Position erhalten, Preis fehlt -- mit Klartext-Befund.
+        if values.get("_on_request") and position.price is None:
+            position.set_field("price", None, FieldOrigin.MISSING)
+            position.issues.add(Issue(
+                "price_on_request",
+                "Preis laut Beleg 'auf Anfrage' -- die Position wurde ohne "
+                "Preis uebernommen, bitte beim Lieferanten erfragen.",
+                IssueSeverity.WARNING, field="price", blocking=False))
+            position.set_field("remarks",
+                               _join_remark(position.remarks, "Preis auf Anfrage"),
+                               FieldOrigin.EXTRACTED)
+
+        # Werte aus verbundenen Zellen sind grundsaetzlich unsicher.
+        for name in values.get("_merged_fields", []):
+            if getattr(position, name, "") not in (None, ""):
+                position.field_origins[name] = FieldOrigin.UNCERTAIN
 
         # Werte, die aus einer gemeinsamen Zelle stammen ("100 Stk", "12,85 EUR")
         if values.get("_extra_uom") and not position.uom:
@@ -1444,6 +1573,13 @@ def _column_profile(values: list[str], material_re: re.Pattern[str]) -> dict[str
         return profile
     if decimals / total >= 0.6:
         profile["price"] = decimals / total
+    else:
+        # Preisspalten, deren Zellen keine nackten Zahlen sind: "4,55 EUR",
+        # "12,00 - 14,00 EUR" (Preisspanne).  Ohne diese Erkennung fiele eine
+        # kopflose Preisliste mit Spannen komplett unter den Tisch.
+        pricey = sum(1 for v in values if _looks_like_price_text(v))
+        if pricey / total >= 0.6:
+            profile["price"] = 0.55 + 0.2 * (pricey / total)
     if numbers / total >= 0.8 and decimals / total < 0.6:
         profile["quantity"] = 0.6 * (numbers / total)
         if integers / total >= 0.8:
@@ -1453,6 +1589,21 @@ def _column_profile(values: list[str], material_re: re.Pattern[str]) -> dict[str
     if texts / total >= 0.6:
         profile["description"] = 0.6 + 0.2 * (texts / total)
     return profile
+
+
+def _looks_like_price_text(value: str) -> bool:
+    """Preisangabe mit Beiwerk ("4,55 EUR", "12,00 - 14,00 EUR")?
+
+    Nackte Ganzzahlen zaehlen bewusst NICHT -- sonst wuerde jede Mengenspalte
+    zur Preisspalte.  Verlangt wird eine Spanne, eine Waehrung, eine
+    Preiseinheit oder Nachkommastellen.
+    """
+    info = parse_price_text(value)
+    if info.is_range:
+        return True
+    if not info.usable:
+        return False
+    return bool(info.currency) or bool(info.price_unit) or _has_decimals(value)
 
 
 def _copy_position(source: OfferPosition) -> OfferPosition:

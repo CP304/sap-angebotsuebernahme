@@ -118,18 +118,22 @@ class ExcelReader(DocumentReader):
         document.meta["sheet_names"] = list(workbook.sheetnames)
         for sheet in workbook.worksheets:
             try:
-                rows = self._read_sheet(sheet)
+                rows, merged = self._read_sheet(sheet)
             except Exception as exc:  # noqa: BLE001
                 document.add_warning(f"Arbeitsblatt '{sheet.title}' nicht lesbar: {exc}")
                 continue
             if not rows:
                 continue
-            block = TableBlock(rows=rows, page=0, origin="excel", title=str(sheet.title))
+            block = TableBlock(rows=rows, page=0, origin="excel", title=str(sheet.title),
+                               merged_cells=merged)
             document.tables.append(block)
             document.pages.append(block.as_text())
 
-    def _read_sheet(self, sheet) -> list[list[str]]:
-        """Ein Arbeitsblatt als Textmatrix; verbundene Zellen aufgeloest."""
+    def _read_sheet(self, sheet) -> tuple[list[list[str]], set[tuple[int, int]]]:
+        """Ein Arbeitsblatt als Textmatrix; verbundene Zellen aufgeloest.
+
+        Rueckgabe: (Zeilen, Koordinaten der aus Verbuenden gefuellten Zellen).
+        """
         rows: list[list[str]] = []
         for index, row in enumerate(sheet.iter_rows(values_only=True)):
             if index >= _MAX_ROWS:
@@ -137,19 +141,24 @@ class ExcelReader(DocumentReader):
                                sheet.title, _MAX_ROWS)
                 break
             rows.append([cell_to_text(value) for value in row])
-        self._fill_merged(sheet, rows)
+        merged = self._fill_merged(sheet, rows)
         # Leere Zeilen am Ende entfernen
         while rows and not any(cell for cell in rows[-1]):
             rows.pop()
-        return rows
+        return rows, merged
 
     @staticmethod
-    def _fill_merged(sheet, rows: list[list[str]]) -> None:
-        """Wert einer verbundenen Zelle in alle beteiligten Zellen kopieren."""
+    def _fill_merged(sheet, rows: list[list[str]]) -> set[tuple[int, int]]:
+        """Wert einer verbundenen Zelle in alle beteiligten Zellen kopieren.
+
+        Rueckgabe: die (Zeile, Spalte)-Koordinaten aller Zellen, die dabei
+        *gefuellt* wurden -- die Extraktion markiert deren Werte als unsicher.
+        """
+        filled: set[tuple[int, int]] = set()
         try:
             ranges = list(sheet.merged_cells.ranges)
         except Exception:  # noqa: BLE001 -- read_only-Modus kennt das nicht
-            return
+            return filled
         for cell_range in ranges:
             try:
                 min_row, min_col = cell_range.min_row, cell_range.min_col
@@ -167,8 +176,11 @@ class ExcelReader(DocumentReader):
                     for c in range(min_col - 1, min(max_col, len(row))):
                         if not row[c]:
                             row[c] = value
+                            if (r, c) != (min_row - 1, min_col - 1):
+                                filled.add((r, c))
             except Exception:  # noqa: BLE001
                 continue
+        return filled
 
     # ------------------------------------------------------------------
     def _read_legacy(self, path: str, document: RawDocument) -> RawDocument:

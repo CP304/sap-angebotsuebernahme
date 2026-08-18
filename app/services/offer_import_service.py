@@ -40,6 +40,7 @@ from .extraction.header_rules import apply_header_matches, extract_header_fields
 from .extraction.learning import learn_from_corrections
 from .extraction.material_roles import compile_own_pattern, resolve_position_roles
 from .extraction.plausibility import run_checks
+from .extraction.price_parsing import footer_price_unit
 from .extraction.profiles import (
     InMemoryProfileStore,
     VendorProfile,
@@ -397,6 +398,23 @@ class OfferImportService:
             if len(currencies) == 1:
                 offer.set_field("currency", currencies.pop(), FieldOrigin.EXTRACTED)
                 offer.add_note("Waehrung aus den Positionen uebernommen.")
+
+        # Preiseinheit aus dem Fusstext ("Preise je 100 Stueck"): sie gilt fuer
+        # alle Positionen, die keine eigene Preiseinheit tragen -- und zwar
+        # BEVOR der Standardwert (Preiseinheit 1) gesetzt wird.
+        footer_unit = footer_price_unit(offer.raw_text or "")
+        if footer_unit:
+            applied = 0
+            for position in offer.positions:
+                if position.price is not None and not position.price_unit:
+                    position.set_field("price_unit", int(footer_unit),
+                                       FieldOrigin.EXTRACTED)
+                    applied += 1
+            if applied:
+                offer.add_note(
+                    f"Preisangabe im Fusstext: 'Preise je {footer_unit} ...' -- "
+                    f"die Preiseinheit {footer_unit} wurde auf {applied} "
+                    "Position(en) ohne eigene Angabe uebernommen.")
 
         inherited = 0
         for position in offer.positions:
