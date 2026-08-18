@@ -62,6 +62,7 @@ from .admin_window import AdminWindow
 from .history_view import HistoryView
 from .mapping_view import MappingView
 from .offer_table import POSITION_ROLE, OfferFilterProxy, OfferTableModel, OfferTableView
+from .quick_entry import QuickEntryBar
 from .position_details import PositionDetails
 from .queue_bar import QueueBar
 from .selector_view import SelectorView
@@ -381,6 +382,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_header_card())
         layout.addWidget(self._build_selection_bar())
 
+        # Schnellerfassung: standardmaessig eingeklappt, damit sie keinen
+        # Platz kostet, wenn die Erkennung ohnehin gegriffen hat.
+        self.quick_entry = QuickEntryBar()
+        self.quick_entry.positionEntered.connect(self._quick_position_entered)
+        # Ueber eine Methode statt direkt auf das Label: die Statuszeile
+        # entsteht weiter unten erst nach dieser Leiste.
+        self.quick_entry.message.connect(self._quick_message)
+        self.quick_entry.setVisible(False)
+        layout.addWidget(self.quick_entry)
+
         splitter = QSplitter(Qt.Orientation.Vertical)
         self.table = OfferTableView()
         self.table.setModel(self.proxy)
@@ -512,6 +523,12 @@ class MainWindow(QMainWindow):
         auswahl_menu.addAction("Nur fehlerfreie", self._select_clean)
         auswahl_menu.addSeparator()
         auswahl_menu.addAction("Position ergaenzen", self._add_position)
+        self.quick_entry_action = auswahl_menu.addAction(
+            "Schnellerfassung", lambda: self.toggle_quick_entry())
+        self.quick_entry_action.setCheckable(True)
+        self.quick_entry_action.setShortcut("Ctrl+E")
+        self.quick_entry_action.setToolTip(
+            "Eine Zeile tippen, Enter -- ohne die Maus anzufassen (Strg+E)")
         auswahl_button.setMenu(auswahl_menu)
         layout.addWidget(auswahl_button)
 
@@ -942,7 +959,9 @@ class MainWindow(QMainWindow):
         elif clicked is teach_button:
             self.teach_recognition()
         elif clicked is manual_button:
-            self._add_position()
+            # Schnellerfassung statt leerer Tabellenzeile: der Anwender kann
+            # sofort lostippen, ohne erst die richtige Zelle zu suchen.
+            self.toggle_quick_entry(True)
 
     #: Befunde, die *erklaeren*, warum nichts erkannt wurde -- im Unterschied
     #: zu den Folgemeldungen ("Waehrung fehlt", "keine Position"), die nur
@@ -1562,6 +1581,34 @@ class MainWindow(QMainWindow):
         if position is not None:
             self._revalidate()
             self._update_counters()
+
+    # ------------------------------------------------------------------
+    # Schnellerfassung
+    # ------------------------------------------------------------------
+    def _quick_message(self, text: str) -> None:
+        """Rueckmeldung der Schnellerfassung in die Statuszeile."""
+        if getattr(self, "counter_label", None) is not None:
+            self.counter_label.setText(text)
+
+    def toggle_quick_entry(self, sichtbar: bool | None = None) -> None:
+        """Schnellerfassung ein- oder ausblenden und den Fokus setzen."""
+        ziel = (not self.quick_entry.isVisible()) if sichtbar is None else sichtbar
+        self.quick_entry.setVisible(ziel)
+        if hasattr(self, "quick_entry_action"):
+            self.quick_entry_action.setChecked(ziel)
+        if ziel:
+            self.quick_entry.focus_first()
+
+    def _quick_position_entered(self, position: OfferPosition) -> None:
+        """Eine schnell erfasste Position uebernehmen.
+
+        Laeuft ueber denselben Weg wie jeder andere manuelle Zugang --
+        Vorbelegung, Materialabgleich, Neunummerierung, Pruefung.  Sonst
+        haette die Schnellerfassung andere Ergebnisse als die Tabelle, und
+        genau das faellt spaeter niemandem auf.
+        """
+        self._add_positions([position], "Schnellerfassung")
+        self.quick_entry.focus_first()
 
     def _fill_down(self, key: str) -> None:
         position = self.details.position or self.table.current_position()
