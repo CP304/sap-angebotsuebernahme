@@ -31,14 +31,20 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
-from typing import Callable
+from typing import Any, Callable
 
 from ..config.settings import Settings
-from ..models.document_plan import ContractPlan, PurchaseOrderPlan
+from ..models.document_plan import AttachmentRef, ContractPlan, PurchaseOrderPlan
 from ..models.enums import InfoRecordAction, PositionStatus, ResultState, SourceListAction
 from ..models.offer import Offer
 from ..models.offer_position import OfferPosition
 from ..models.results import ActionResult, BatchSummary, PositionResult
+from ..sap.attachment_service import (
+    build_summary_lines,
+    is_enabled as attachment_enabled,
+    object_label as attachment_label,
+    write_summary_file,
+)
 from ..sap.connection import SapError, SapPopupError
 from ..sap.gateway import SapGateway
 from ..sap.message_guard import MessageSuppressionError
@@ -58,6 +64,7 @@ PHASE_LABELS: dict[str, str] = {
     "contract": "Mengenkontrakt",
     "source_list": "Orderbuch",
     "purchase_order": "Bestellung",
+    "attachment": "Anlage",
     "done": "fertig",
 }
 
@@ -137,6 +144,14 @@ class _Run:
     contract_numbers: dict[int, tuple[str, str]] = field(default_factory=dict)
     contract_failed_uids: set[int] = field(default_factory=set)
 
+    #: Angebotsdokument, das an die erzeugten Objekte gehaengt wird
+    attachment: AttachmentRef | None = None
+    #: Zusammenfassung als Zusatzanlage (erst bei Bedarf erzeugt)
+    summary_attachment: AttachmentRef | None = None
+    #: Schon angehaengt: (Objektart, Schluessel, Dateiname) -- verhindert,
+    #: dass ein Beleg mit fuenf Positionen fuenfmal dieselbe Anlage bekommt
+    attached: set[tuple[str, str, str]] = field(default_factory=set)
+
     index: int = 0
     total: int = 0
 
@@ -149,11 +164,16 @@ class BatchProcessor:
     """Fuehrt den Komplettvorgang gegen SAP (oder das Testsystem) aus."""
 
     def __init__(self, gateway: SapGateway, settings: Settings,
-                 comparison: ComparisonService, validation: ValidationService) -> None:
+                 comparison: ComparisonService, validation: ValidationService,
+                 repository: Any = None) -> None:
         self.gateway = gateway
         self.settings = settings
         self.comparison = comparison
         self.validation = validation
+        #: Optional.  Nur fuer den Doppel-Schutz: die eigene Historie weiss,
+        #: welche Belege dieses Angebot frueher schon erzeugt hat.  Fehlt sie,
+        #: laeuft alles wie bisher -- ohne Warnung, aber auch ohne Absturz.
+        self.repository = repository
 
     # ------------------------------------------------------------------
     # Einstieg
@@ -172,6 +192,8 @@ class BatchProcessor:
             run.results[position.uid] = PositionResult(position_uid=position.uid,
                                                        label=position.display_name)
         summary.results = [run.results[p.uid] for p in selected]
+
+        run.attachment = offer.attachment or offer.resolve_attachment()
 
         self._prepare(run, selected)
         self._plan_units(run, selected)
@@ -348,6 +370,8 @@ class BatchProcessor:
             if result.ok and result.document_number:
                 position.created_info_record = result.document_number
             self._record(run, position, result, "info_record")
+            if result.ok:
+                self._attach(run, position, "info_record", result.document_number)
 
     # ------------------------------------------------------------------
     # 2. Mengenkontrakte
@@ -410,6 +434,32 @@ class BatchProcessor:
                     run.contract_failed_uids.add(item.position_uid)
 
             self._record_plan(run, plan, result, "contract", number)
+            if result.ok:
+                self._attach_for_plan(run, plan, "contract", number)
+
+    def _already_created(self, run: _Run, action: str) -> list[dict]:
+        """Hat dieses Angebot in einem frueheren Lauf schon so einen Beleg erzeugt?
+
+        Bewusst aus der eigenen Historie und nicht aus SAP: eine Suchmaske
+        dafuer gaebe es zwar, sie braeuchte aber geratene Feld-IDs.  Die
+        Historie ist dagegen belastbar -- sie kennt allerdings nur, was
+        dieses Werkzeug selbst geschrieben hat.  Probelauf und Testsystem
+        zaehlen nicht mit, sonst warnt es vor Belegen, die es nie gab.
+        """
+        if not self.settings.workflow.block_repeated_documents:
+            return []
+        if self.repository is None or run.summary.dry_run or self.gateway.is_mock:
+            return []
+        nummer = (run.offer.offer_number or "").strip()
+        if not nummer:
+            # Ohne Angebotsnummer laesst sich nichts sicher zuordnen -- dann
+            # lieber nicht warnen als falsch warnen.
+            return []
+        try:
+            return self.repository.documents_already_created(nummer, action)
+        except Exception as exc:  # noqa: BLE001 - darf den Lauf nie kippen
+            logger.warning("Doppelpruefung nicht moeglich (%s) -- es wird geschrieben.", exc)
+            return []
 
     def _reuse_existing_contract(self, plan: ContractPlan) -> str:
         """Vor der Neuanlage nach einem laufenden Kontrakt suchen.
@@ -499,6 +549,11 @@ class BatchProcessor:
             if note:
                 result.message = f"{result.message}{note}"
             self._record(run, position, result, "source_list")
+            if result.ok:
+                # Der Orderbucheintrag traegt keine eigene Belegnummer --
+                # fachlicher Schluessel ist Material + Werk.
+                self._attach(run, position, "source_list",
+                             f"{position.material_number}/{position.plant}")
 
     # ------------------------------------------------------------------
     # 4. Bestellungen
@@ -539,6 +594,26 @@ class BatchProcessor:
                 run.index += 1
                 continue
 
+            schon_da = self._already_created(run, "purchase_order")
+            if schon_da:
+                nummern = ", ".join(str(z.get("document_number") or "") for z in schon_da)
+                hinweis = (
+                    f"Bestellung übersprungen: zu Angebot {run.offer.offer_number} "
+                    f"wurde bereits bestellt ({nummern}). Eine zweite Bestellung "
+                    "wäre eine Doppelbestellung. Wenn das gewollt ist, muss die "
+                    "Bestellung in SAP von Hand angelegt werden.")
+                run.summary.document_results.append(ActionResult(
+                    action="purchase_order", state=ResultState.SKIPPED, message=hinweis))
+                for item in kept:
+                    position = run.positions.get(item.position_uid)
+                    if position is not None:
+                        self._record(run, position, ActionResult(
+                            action="purchase_order", state=ResultState.SKIPPED,
+                            message=hinweis), "purchase_order", advance=False)
+                plan.error = hinweis
+                run.index += 1
+                continue
+
             if from_contract:
                 # Kopfbezug *und* Positionsbezug: ohne die Kontraktposition kann
                 # SAP die richtige Kontraktzeile nicht ziehen.
@@ -574,6 +649,85 @@ class BatchProcessor:
             else:
                 plan.error = result.message
             self._record_plan(run, plan, result, "purchase_order", number)
+            if result.ok:
+                self._attach_for_plan(run, plan, "purchase_order", number)
+
+    # ------------------------------------------------------------------
+    # Anlage (Angebotsdokument am erzeugten Objekt)
+    # ------------------------------------------------------------------
+    def _summary_attachment(self, run: _Run) -> AttachmentRef:
+        """Textzusammenfassung erst dann erzeugen, wenn sie gebraucht wird."""
+        if run.summary_attachment is None:
+            zeilen = build_summary_lines(run.offer, list(run.positions.values()))
+            run.summary_attachment = write_summary_file(
+                self.settings, run.offer.offer_number or "Angebot", zeilen)
+        return run.summary_attachment
+
+    def _attach(self, run: _Run, position: OfferPosition, object_kind: str,
+                object_key: str, plan: ContractPlan | PurchaseOrderPlan | None = None
+                ) -> list[ActionResult]:
+        """Angebotsdokument nach einer ERFOLGREICHEN Aktion anhaengen.
+
+        Grundsaetze:
+
+        * Es wird nie an ein Objekt gehaengt, das gar nicht entstanden ist --
+          der Aufrufer ruft diese Methode ausschliesslich nach Erfolg auf.
+        * Ein Fehlschlag beim Anhaengen macht die Position NICHT fehlerhaft:
+          der Preis ist gepflegt, nur der Prueffpfad fehlt.  Deshalb wird ein
+          Misserfolg als ``SKIPPED`` (Warnung) protokolliert, nie als
+          ``FAILED``.
+        * Je Beleg wird dieselbe Datei nur einmal angehaengt.
+        """
+        if not attachment_enabled(self.settings, object_kind):
+            return []
+
+        einstellungen = self.settings.attachments
+        kandidaten: list[AttachmentRef] = []
+        if einstellungen.attach_original_file:
+            kandidaten.append(
+                (plan.attachment if plan is not None and plan.attachment is not None
+                 else run.attachment) or AttachmentRef())
+        if einstellungen.attach_summary:
+            kandidaten.append(self._summary_attachment(run))
+        if not kandidaten:
+            logger.info("Anlage fuer %s uebersprungen: weder Originaldatei noch "
+                        "Zusammenfassung sind eingeschaltet.",
+                        attachment_label(object_kind))
+            return []
+
+        ergebnisse: list[ActionResult] = []
+        for ref in kandidaten:
+            marke = (object_kind, object_key, ref.display_name or ref.path)
+            if marke in run.attached:
+                continue
+            run.attached.add(marke)
+            try:
+                result = self.gateway.attachments.attach(
+                    ref, object_kind, object_key, self.gateway.write_context())
+            except Exception as exc:  # noqa: BLE001 - Anlage darf nie den Lauf killen
+                logger.warning("Anlage an %s %s fehlgeschlagen: %s",
+                               object_kind, object_key, exc)
+                result = ActionResult(
+                    action="attachment", state=ResultState.SKIPPED,
+                    message=(f"Anlage NICHT angehaengt ({attachment_label(object_kind)} "
+                             f"{object_key}): {exc} Bitte von Hand anhaengen. "
+                             f"Datei: {ref.path or '(unbekannt)'}"),
+                    detail=str(exc))
+            self._record(run, position, result, "attachment", advance=False)
+            ergebnisse.append(result)
+        return ergebnisse
+
+    def _attach_for_plan(self, run: _Run, plan: ContractPlan | PurchaseOrderPlan,
+                         object_kind: str, number: str) -> None:
+        """Anlage EINMAL je Beleg -- nicht je beteiligter Position."""
+        if not number:
+            return
+        for item in plan.items:
+            position = run.positions.get(item.position_uid)
+            if position is None:
+                continue
+            self._attach(run, position, object_kind, number, plan=plan)
+            return
 
     # ------------------------------------------------------------------
     # Hilfen

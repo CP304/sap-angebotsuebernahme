@@ -157,6 +157,26 @@ class VendorServiceBase(SapServiceBase, ABC):
         """Lieferant anlegen (XK01) oder aendern (XK02)."""
 
 
+class AttachmentServiceBase(SapServiceBase, ABC):
+    """Anlage am SAP-Objekt (GOS, "Dienste zum Objekt").
+
+    Die Anlage ist *nie* der Zweck des Vorgangs, sondern der Prueffpfad
+    dazu.  Deshalb gilt durchgaengig: Ein Fehlschlag beim Anhaengen darf die
+    eigentliche Aktion nicht entwerten -- er wird als Warnung gemeldet, samt
+    Dateipfad zum manuellen Nachholen.
+    """
+
+    @abstractmethod
+    def attach(self, attachment, object_kind: str, object_key: str,
+               context: WriteContext) -> ActionResult:
+        """Datei an das genannte SAP-Objekt haengen.
+
+        ``object_kind`` ist einer der Schluessel aus
+        ``app.sap.attachment_service.OBJECT_LABELS``, ``object_key`` die
+        Beleg-/Satznummer bzw. der fachliche Schluessel.
+        """
+
+
 class ContractServiceBase(SapServiceBase, ABC):
     """Mengenkontrakt (ME31K/ME32K/ME33K)."""
 

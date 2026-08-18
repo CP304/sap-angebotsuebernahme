@@ -137,8 +137,7 @@ class SapSourceListService(SourceListServiceBase):
             connection.ensure_no_popup()
 
             rows = self._read_rows(position.plant)
-            target = next((r for r in rows if r.vendor_number.lstrip("0") ==
-                           position.vendor_number.lstrip("0")), None)
+            target = self._row_for_vendor(rows, position, context)
             row_index = target.row_index if target else self._find_free_row(rows)
             if row_index is None:
                 raise SapBusinessError(
@@ -275,6 +274,45 @@ class SapSourceListService(SourceListServiceBase):
         if total > visible:
             connection.scroll_table(table_id, 0)
         return entries
+
+    def _row_for_vendor(self, rows: list[SourceListEntry], position: OfferPosition,
+                        context: WriteContext) -> SourceListEntry | None:
+        """Welche Orderbuchzeile ist zu pflegen?
+
+        Ein Lieferant kann im Orderbuch mehrfach stehen -- mit
+        unterschiedlichen Gueltigkeitszeitraeumen.  Blind die erste Zeile zu
+        nehmen waere falsch: Man wuerde womoeglich einen historischen
+        Zeitraum ueberschreiben, waehrend die heute gueltige Zeile
+        unangetastet bleibt.
+
+        Vorrang hat deshalb die zum Stichtag gueltige Zeile.  Gibt es keine,
+        wird die zuletzt gueltige genommen (deren Zeitraum wird verlaengert);
+        gibt es gar keine Zeile fuer diesen Lieferanten, liefert die Methode
+        ``None`` und der Aufrufer legt eine neue an.
+        """
+        gesucht = (position.vendor_number or "").lstrip("0")
+        treffer = [r for r in rows if (r.vendor_number or "").lstrip("0") == gesucht]
+        if not treffer:
+            return None
+
+        stichtag = context.valid_from or date.today()
+        gueltig = [r for r in treffer if r.valid_on(stichtag)]
+        if gueltig:
+            if len(treffer) > 1:
+                logger.info("Orderbuch %s: %d Zeilen fuer Lieferant %s, es wird die "
+                            "zum %s gueltige gepflegt.", position.material_number,
+                            len(treffer), position.vendor_number, format_date(stichtag))
+            return gueltig[0]
+
+        # Keine gueltige Zeile -- die mit dem spaetesten Ende verlaengern
+        def ende(eintrag: SourceListEntry) -> date:
+            return eintrag.valid_to or date.min
+
+        juengste = max(treffer, key=ende)
+        logger.info("Orderbuch %s: Lieferant %s hat nur abgelaufene Zeilen, die "
+                    "juengste wird verlaengert.", position.material_number,
+                    position.vendor_number)
+        return juengste
 
     def _find_free_row(self, rows: list[SourceListEntry]) -> int | None:
         """Erste freie Zeile fuer einen neuen Eintrag ermitteln."""

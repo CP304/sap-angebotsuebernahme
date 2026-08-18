@@ -58,6 +58,12 @@ from app.services.extraction.material_roles import (                    # noqa: 
     own_ratio,
     resolve_position_roles,
 )
+from app.services.extraction.plausibility import (                      # noqa: E402
+    CODE_DOCUMENT_TOTAL_MISMATCH,
+    CODE_LINE_TOTAL_MISMATCH,
+    CODE_POSITION_GAP,
+    CODE_PRICE_OUTLIER,
+)
 from app.services.extraction.profiles import (                          # noqa: E402
     InMemoryProfileStore,
     VendorProfile,
@@ -1357,6 +1363,111 @@ class SchwierigeBeispieleTests(TempDirCase):
         )
         fehlend = [name for name in erwartet if not (ziel / name).exists()]
         self.assertEqual(fehlend, [], f"nicht erzeugt: {fehlend}")
+
+
+class KreuzpruefungAufBeispielenTests(TempDirCase):
+    """Schlagen die Kreuzpruefungen auf den echten Beispieldateien an?
+
+    Wichtiger noch als das Anschlagen ist das *Schweigen*: eine Warnung, die
+    ohne Anlass kommt, kostet den Einkaeufer genauso viel Zeit wie ein
+    uebersehener Lesefehler.  Deshalb steht hier beides nebeneinander.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.beispiele = _beispiele()
+
+    def _erzeuge(self, funktion, name: str) -> str:
+        pfad = Path(self.tmp) / name
+        funktion(pfad)
+        if not pfad.exists():
+            self.skipTest(f"{name} konnte nicht erzeugt werden (fehlende Bibliothek)")
+        return str(pfad)
+
+    def _import(self, funktion, name: str) -> Offer:
+        pfad = self._erzeuge(funktion, name)
+        return OfferImportService(self.settings, InMemoryProfileStore()).import_file(pfad)
+
+    @staticmethod
+    def _codes(offer: Offer) -> set[str]:
+        codes = {issue.code for issue in offer.issues}
+        for position in offer.positions:
+            codes |= {issue.code for issue in position.issues}
+        return codes
+
+    # -- Staffeln ueber zwei Seiten -------------------------------------
+    def test_B17_uebertragszeile_wird_keine_position(self) -> None:
+        offer = self._import(self.beispiele.pdf_staffelpreise_zwei_seiten,
+                             "staffeln.pdf")
+        self.assertTrue(any("Uebertrag" in note for note in offer.extraction_notes),
+                        offer.extraction_notes)
+        for position in offer.positions:
+            self.assertNotIn("Uebertrag", position.raw_text)
+
+    def test_B18_belegsumme_deckt_die_abweichung_auf(self) -> None:
+        """Die Gesamtsumme des Belegs passt nicht zu den Positionen.
+
+        Das ist genau der Fall, den die Pruefung finden soll -- ob nun eine
+        Position fehlt oder der Beleg selbst nicht stimmt, entscheidet der
+        Anwender.
+        """
+        offer = self._import(self.beispiele.pdf_staffelpreise_zwei_seiten,
+                             "staffeln.pdf")
+        self.assertIn(CODE_DOCUMENT_TOTAL_MISMATCH, self._codes(offer))
+        treffer = [n for n in offer.extraction_notes if "Differenz" in n]
+        self.assertTrue(treffer, offer.extraction_notes)
+        self.assertIn("15.402,50", treffer[0])
+
+    def test_B19_ohne_gesamtspalte_keine_zeilenpruefung(self) -> None:
+        offer = self._import(self.beispiele.pdf_staffelpreise_zwei_seiten,
+                             "staffeln.pdf")
+        self.assertNotIn(CODE_LINE_TOTAL_MISMATCH, self._codes(offer))
+        for position in offer.positions:
+            self.assertIsNone(position.line_total)
+
+    def test_B20_staffelstufen_bleiben_zu_pruefen(self) -> None:
+        offer = self._import(self.beispiele.pdf_staffelpreise_zwei_seiten,
+                             "staffeln.pdf")
+        staffeln = [p for p in offer.positions if "Staffel" in p.remarks]
+        self.assertTrue(staffeln)
+        for position in staffeln:
+            self.assertNotEqual(position.confidence_label(), "sicher")
+
+    # -- PDF im Fliesstextstil ------------------------------------------
+    def test_B21_fliesstext_loest_keine_falschmeldung_aus(self) -> None:
+        offer = self._import(self.beispiele.pdf_fliesstext, "fliesstext.pdf")
+        for code in (CODE_LINE_TOTAL_MISMATCH, CODE_DOCUMENT_TOTAL_MISMATCH,
+                     CODE_POSITION_GAP, CODE_PRICE_OUTLIER):
+            self.assertNotIn(code, self._codes(offer))
+
+    def test_B22_fliesstext_hat_die_niedrigste_konfidenz(self) -> None:
+        offer = self._import(self.beispiele.pdf_fliesstext, "fliesstext.pdf")
+        self.assertTrue(offer.positions)
+        for position in offer.positions:
+            self.assertLess(position.confidence, 0.5)
+            self.assertEqual(position.confidence_label(), "unsicher")
+            self.assertTrue(position.confidence_reasons)
+
+    # -- Vertauschte Spalten --------------------------------------------
+    def test_B23_vertauschte_spalten_ohne_falschmeldung(self) -> None:
+        offer = self._import(self.beispiele.excel_vertauschte_spalten,
+                             "vertauscht.xlsx")
+        for code in (CODE_LINE_TOTAL_MISMATCH, CODE_DOCUMENT_TOTAL_MISMATCH,
+                     CODE_POSITION_GAP, CODE_PRICE_OUTLIER):
+            self.assertNotIn(code, self._codes(offer))
+
+    def test_B24_saubere_tabelle_ist_sicher(self) -> None:
+        offer = self._import(self.beispiele.excel_mit_kopfzeile, "muster.xlsx")
+        self.assertTrue(offer.positions)
+        for position in offer.positions:
+            self.assertEqual(position.confidence_label(), "sicher")
+        self.assertEqual(self._codes(offer), set())
+
+    def test_B25_lueckenlose_nummernfolge_bleibt_still(self) -> None:
+        offer = self._import(self.beispiele.excel_mit_kopfzeile, "muster.xlsx")
+        nummern = [p.position_number for p in offer.positions]
+        self.assertEqual(nummern, ["10", "20", "30", "40", "50"])
+        self.assertNotIn(CODE_POSITION_GAP, self._codes(offer))
 
 
 if __name__ == "__main__":

@@ -15,9 +15,85 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 from ..utils.parsing import format_date, format_decimal
 from .offer_position import OfferPosition
+
+
+# ---------------------------------------------------------------------------
+# Anlage (Angebotsdokument am SAP-Objekt)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AttachmentRef:
+    """Welche Datei soll am erzeugten SAP-Objekt haengen?
+
+    Es wird bewusst *keine* Datei erfunden: gibt es kein Dokument (etwa weil
+    der Anwender den Angebotstext nur eingefuegt hat), bleibt ``path`` leer
+    und ``error`` traegt den Klartextgrund.  Ein stilles Nichtstun waere hier
+    das Schlimmste -- der Einkaeufer wuerde einen Prueffpfad erwarten, den es
+    gar nicht gibt.
+    """
+
+    path: str = ""
+    display_name: str = ""
+    error: str = ""
+
+    @property
+    def available(self) -> bool:
+        """Liegt eine tatsaechlich vorhandene Datei vor?"""
+        if not self.path or self.error:
+            return False
+        try:
+            return Path(self.path).is_file()
+        except OSError:
+            return False
+
+    @property
+    def size_bytes(self) -> int:
+        try:
+            return Path(self.path).stat().st_size if self.path else 0
+        except OSError:
+            return 0
+
+    @property
+    def size_mb(self) -> float:
+        return self.size_bytes / (1024 * 1024)
+
+    def display(self) -> str:
+        if self.error:
+            return self.error
+        return self.display_name or self.path or "(kein Dokument)"
+
+
+def attachment_from_paths(paths: list[str], fallback_hint: str = "") -> AttachmentRef:
+    """Erste tatsaechlich vorhandene Datei als Anlage waehlen.
+
+    ``fallback_hint`` beschreibt die Herkunft (z. B. "eingefuegter Text") und
+    landet in der Fehlermeldung, damit der Anwender versteht, warum nichts
+    angehaengt werden kann.
+    """
+    for raw in paths or []:
+        if not raw:
+            continue
+        try:
+            kandidat = Path(raw)
+        except (OSError, ValueError):
+            continue
+        if kandidat.is_file():
+            return AttachmentRef(path=str(kandidat), display_name=kandidat.name)
+
+    if paths:
+        return AttachmentRef(error=(
+            f"Die Angebotsdatei ist nicht mehr auffindbar ({paths[0]}). "
+            "Es kann nichts an SAP angehaengt werden -- bitte die Datei "
+            "wiederherstellen oder von Hand anhaengen."))
+    grund = f" ({fallback_hint})" if fallback_hint else ""
+    return AttachmentRef(error=(
+        f"Zu diesem Angebot liegt keine Datei vor{grund}. Es kann nichts an SAP "
+        "angehaengt werden -- bitte den Beleg von Hand anhaengen, wenn ein "
+        "Prueffpfad noetig ist."))
 
 
 @dataclass
@@ -79,6 +155,9 @@ class ContractPlan:
 
     #: Leer = neuer Kontrakt (ME31K); gesetzt = bestehenden erweitern (ME32K)
     existing_contract_number: str = ""
+
+    #: Angebotsdokument, das nach dem Sichern am Beleg haengen soll
+    attachment: AttachmentRef | None = None
 
     items: list[DocumentItem] = field(default_factory=list)
 
@@ -142,6 +221,9 @@ class PurchaseOrderPlan:
 
     #: Optional: Bestellung mit Bezug auf diesen Kontrakt anlegen
     reference_contract: str = ""
+
+    #: Angebotsdokument, das nach dem Sichern am Beleg haengen soll
+    attachment: AttachmentRef | None = None
 
     items: list[DocumentItem] = field(default_factory=list)
 
@@ -247,7 +329,8 @@ def build_contract_plans(positions: list[OfferPosition], *, vendor_names: dict[s
                          valid_to: date | None, offer_number: str = "",
                          payment_terms: str = "", incoterm: str = "",
                          incoterm_location: str = "",
-                         document_type: str = "MK") -> list[ContractPlan]:
+                         document_type: str = "MK",
+                         attachment: AttachmentRef | None = None) -> list[ContractPlan]:
     """Angehakte Positionen zu Kontrakten je Lieferant/EKorg/Waehrung buendeln."""
     plans: dict[tuple[str, str, str], ContractPlan] = {}
     for position in positions:
@@ -270,6 +353,7 @@ def build_contract_plans(positions: list[OfferPosition], *, vendor_names: dict[s
                 incoterm=incoterm,
                 incoterm_location=incoterm_location,
                 reference_offer=offer_number,
+                attachment=attachment,
             )
             plans[key] = plan
         quantity = position.contract_quantity
@@ -285,7 +369,9 @@ def build_purchase_order_plans(positions: list[OfferPosition], *,
                                document_date: date | None = None,
                                offer_number: str = "", payment_terms: str = "",
                                incoterm: str = "", incoterm_location: str = "",
-                               document_type: str = "NB") -> list[PurchaseOrderPlan]:
+                               document_type: str = "NB",
+                               attachment: AttachmentRef | None = None
+                               ) -> list[PurchaseOrderPlan]:
     """Angehakte Positionen zu Bestellungen je Lieferant/EKorg/Waehrung buendeln."""
     plans: dict[tuple[str, str, str], PurchaseOrderPlan] = {}
     for position in positions:
@@ -309,6 +395,7 @@ def build_purchase_order_plans(positions: list[OfferPosition], *,
                 incoterm_location=incoterm_location,
                 reference_offer=offer_number,
                 your_reference=offer_number,
+                attachment=attachment,
             )
             plans[key] = plan
         quantity = position.order_quantity

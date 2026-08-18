@@ -620,6 +620,38 @@ def default_screens() -> dict[str, Screen]:
         },
     )
 
+    # -- Anlage am Objekt (GOS: "Dienste zum Objekt") ----------------------
+    screens["attachment"] = Screen(
+        key="attachment", title="Anlage erstellen (Dienste zum Objekt / GOS)",
+        transaction="ME13/ME33K/ME23N/XK03",
+        note=("TODO: kundenspezifische SAP-GUI-IDs pruefen -- ALLE Vorschlaege dieser "
+              "Maske sind ungeprueft.\n\n"
+              "EHRLICHER HINWEIS ZUR GRENZE DES VERFAHRENS: Der Weg bis zur "
+              "Anlageerstellung (Dienste zum Objekt -> Anlage erstellen) laesst sich "
+              "automatisieren.  Der danach aufgehende DATEIAUSWAHL-DIALOG ist in den "
+              "meisten Systemen jedoch ein Fenster des Betriebssystems und KEIN "
+              "SAP-GUI-Objekt -- SAP GUI Scripting kann ihn dort nicht bedienen.  Die "
+              "Anwendung meldet in diesem Fall bewusst KEINEN Erfolg, sondern nennt "
+              "den vollstaendigen Dateipfad zum manuellen Anhaengen.  Nur wenn Ihr "
+              "System den SAP-eigenen Dateidialog verwendet (dann ist das Pfadfeld "
+              "unten ansprechbar), traegt die Anwendung den Pfad selbst ein."),
+        elements={
+            "gos_toolbar": _s("wnd[0]/titl/shellcont/shell", "Dienste zum Objekt "
+                              "(GOS-Werkzeugleiste)", "button"),
+            "gos_create_attachment": _s("wnd[0]/shellcont/shell",
+                                        "Menuepunkt 'Anlage erstellen'", "button"),
+            "file_dialog_window": _s("wnd[1]", "Fenster der Dateiauswahl", "window"),
+            "file_dialog_path": _s("wnd[1]/usr/ctxtDY_PATH", "Pfad in der Dateiauswahl"),
+            "file_dialog_name": _s("wnd[1]/usr/ctxtDY_FILENAME", "Dateiname in der "
+                                   "Dateiauswahl", optional=True),
+            "file_dialog_ok": _s("wnd[1]/tbar[0]/btn[0]", "Dateiauswahl bestaetigen",
+                                 "button"),
+            "attachment_list": _s("wnd[0]/shellcont/shell/shellcont[1]/shell",
+                                  "Anlagenliste (Ruecklese-Pruefung)", "grid",
+                                  optional=True),
+        },
+    )
+
     return screens
 
 
@@ -643,6 +675,9 @@ REQUIRED_SCREENS: dict[str, tuple[str, ...]] = {
     "material_read": ("material_display",),
     "vendor_read": ("vendor_display",),
     "vendor_master_write": ("vendor_master",),
+    #: Anlage am Objekt (GOS).  Ungeprueft = es wird nichts angehaengt; das
+    #: Ergebnis nennt dann den Dateipfad zum manuellen Anhaengen.
+    "attachment_write": ("attachment",),
 }
 
 

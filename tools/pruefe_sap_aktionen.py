@@ -305,6 +305,108 @@ def pruefe_schreibsperre():
 
 
 # ---------------------------------------------------------------------------
+# "Erst nachsehen, dann entscheiden" -- je Transaktion
+# ---------------------------------------------------------------------------
+
+def pruefe_entscheidung_infosatz():
+    """Drei Faelle: aendern, um Werkssicht erweitern, neu anlegen."""
+    from app.models.offer_position import OfferPosition
+
+    settings, gateway, offer, *_ = _grundausstattung()
+    erwartet = {
+        ("47110001", "0000100234"): "change",   # Werkssicht vorhanden
+        ("48200111", "0000102100"): "extend",   # nur EKorg-Ebene
+        ("47110004", "0000100234"): "create",   # gar nichts
+    }
+    for (material, lieferant), soll in erwartet.items():
+        satz = gateway.info_records.read(material, lieferant, "1000", "1000")
+        assert satz.write_mode == soll, (
+            f"{material}: erwartet '{soll}', erkannt '{satz.write_mode}'")
+
+    vorher = gateway.info_records.read("48200111", "0000102100", "1000", "1000")
+    position = OfferPosition(material_number="48200111", vendor_number="0000102100",
+                             purchasing_org="1000", plant="1000",
+                             price=Decimal("299.00"), price_unit=1,
+                             currency="EUR", uom="ST")
+    ergebnis = gateway.info_records.write(position, gateway.write_context())
+    assert ergebnis.document_number == vorher.info_record_number, (
+        "Erweiterung hat eine neue Infosatznummer vergeben -- SAP tut das nicht")
+    return "aendern / erweitern / anlegen korrekt unterschieden"
+
+
+def pruefe_entscheidung_orderbuch():
+    """Vorhandener Lieferant wird gepflegt, neuer als Zeile ergaenzt."""
+    from app.models.offer_position import OfferPosition
+
+    settings, gateway, offer, *_ = _grundausstattung()
+    vorhanden = gateway.source_lists.read("47110001", "1000")
+    zeilen_vorher = len(vorhanden.entries)
+
+    position = OfferPosition(material_number="47110001", vendor_number="0000100234",
+                             purchasing_org="1000", plant="1000")
+    ergebnis = gateway.source_lists.write(position, gateway.write_context())
+    assert ergebnis.ok, ergebnis.message
+    danach = gateway.source_lists.read("47110001", "1000")
+    assert len(danach.entries) == zeilen_vorher, (
+        "Es wurde eine zweite Zeile fuer denselben Lieferanten angelegt")
+
+    andere = OfferPosition(material_number="47110001", vendor_number="0000100987",
+                           purchasing_org="1000", plant="1000")
+    gateway.source_lists.write(andere, gateway.write_context())
+    zuletzt = gateway.source_lists.read("47110001", "1000")
+    assert len(zuletzt.entries) == zeilen_vorher + 1, (
+        "Neuer Lieferant hat keine eigene Zeile bekommen")
+    return "vorhandene Zeile gepflegt, neuer Lieferant ergaenzt"
+
+
+def pruefe_entscheidung_kontrakt():
+    """Vorhandenen Kontrakt weiterverwenden statt einen zweiten anzulegen."""
+    from app.models.document_plan import build_contract_plans
+
+    settings, gateway, offer, *_ = _grundausstattung()
+    settings.workflow.contract_reuse_existing = True
+    for position in offer.positions:
+        position.do_contract = bool(position.material_number)
+
+    plan = build_contract_plans(
+        [p for p in offer.positions if p.do_contract],
+        vendor_names={}, purchasing_group="100", valid_from=date.today(),
+        valid_to=date(2099, 12, 31), offer_number=offer.offer_number)[0]
+    erster = gateway.contracts.create(plan, gateway.write_context())
+    assert erster.ok, erster.message
+
+    sucher = getattr(gateway.contracts, "find_existing_contract", None)
+    assert sucher is not None, "Kontraktsuche ist nicht vorhanden"
+    gefunden = sucher("100234", "1000",
+                      settings.purchasing.contract_document_type,
+                      date.today() + timedelta(days=30))
+    assert gefunden, "Der eben angelegte Kontrakt wurde nicht wiedergefunden"
+    return f"vorhandener Kontrakt {gefunden} wird wiederverwendet"
+
+
+def pruefe_entscheidung_lieferant():
+    """Aendern erlaubt, Neuanlage verboten."""
+    settings, gateway, offer, *_ = _grundausstattung()
+    if not hasattr(gateway.vendors, "write"):
+        raise _NochNichtVorhanden("Lieferantenstamm-Pflege nicht vorhanden.")
+    from app.models.sap_vendor import VendorMasterPlan
+
+    kontext = gateway.write_context()
+    vorhanden = gateway.vendors.read("100234")
+    geaendert = gateway.vendors.write(
+        VendorMasterPlan(existing_vendor_number="100234", name=vorhanden.name,
+                         country=vorhanden.country or "DE", city="Pruefstadt"), kontext)
+    assert geaendert.ok, f"Aenderung fehlgeschlagen: {geaendert.message}"
+
+    anzahl = len(gateway.mock_system.vendors)
+    neu = gateway.vendors.write(
+        VendorMasterPlan(name="Erfundener Lieferant GmbH", country="DE"), kontext)
+    assert not neu.ok, "Neuanlage waere moeglich -- das darf nicht sein!"
+    assert len(gateway.mock_system.vendors) == anzahl, "Es wurde doch etwas angelegt"
+    return "Aenderung ok, Neuanlage abgelehnt und nichts angelegt"
+
+
+# ---------------------------------------------------------------------------
 
 def zaehle_offene_feld_ids() -> dict[str, int]:
     from app.sap.selectors import SelectorRegistry
@@ -334,6 +436,12 @@ def main() -> int:
     _pruefe("Dry Run schreibt nichts", pruefe_dry_run)
     _pruefe("Fehlerisolation (kaputte Position stoppt die anderen nicht)",
            pruefe_fehlerisolation)
+
+    print("\n=== Erst nachsehen, dann entscheiden ===")
+    _pruefe("Infosatz: aendern / erweitern / anlegen", pruefe_entscheidung_infosatz)
+    _pruefe("Orderbuch: pflegen statt doppeln", pruefe_entscheidung_orderbuch)
+    _pruefe("Kontrakt: vorhandenen weiterverwenden", pruefe_entscheidung_kontrakt)
+    _pruefe("Lieferant: aendern ja, anlegen nein", pruefe_entscheidung_lieferant)
 
     print("\n=== Sicherheit ===")
     _pruefe("Schreibsperre ohne geprueften Feld-IDs", pruefe_schreibsperre)

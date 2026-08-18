@@ -48,8 +48,12 @@ from .info_record_service import (
     verify_info_record_write,
     verify_source_list_write,
 )
+from .attachment_service import ACTION as ATTACHMENT_ACTION
+from .attachment_service import check_attachment
+from .attachment_service import object_label as attachment_label
 from .vendor_service import verify_vendor_master_write
 from .interfaces import (
+    AttachmentServiceBase,
     ContractServiceBase,
     InfoRecordServiceBase,
     MaterialInfo,
@@ -84,6 +88,8 @@ class MockSapSystem:
         self.source_lists: dict[str, list[dict]] = {}
         self.contracts: dict[str, dict] = {}
         self.purchase_orders: dict[str, dict] = {}
+        #: Anlagen je Objekt: "objektart|schluessel" -> [Dateiname, ...]
+        self.attachments: dict[str, list[str]] = {}
         self.counters: dict[str, int] = {}
         #: Pruefhilfe: Schluessel eines Infosatzes -> Preis, den das
         #: Testsystem beim Sichern *statt* des uebergebenen Wertes ablegt.
@@ -136,6 +142,7 @@ class MockSapSystem:
                 self.source_lists = data.get("source_lists", {})
                 self.contracts = data.get("contracts", {})
                 self.purchase_orders = data.get("purchase_orders", {})
+                self.attachments = data.get("attachments", {})
                 self.counters = data.get("counters", {})
                 self._rekey()
                 logger.info("Mock-SAP geladen: %s", self.path)
@@ -156,6 +163,7 @@ class MockSapSystem:
                 "source_lists": self.source_lists,
                 "contracts": self.contracts,
                 "purchase_orders": self.purchase_orders,
+                "attachments": self.attachments,
                 "counters": self.counters,
             }, indent=2, ensure_ascii=False), encoding="utf-8")
         except OSError as exc:
@@ -258,6 +266,7 @@ class MockSapSystem:
         }
         self.contracts = {}
         self.purchase_orders = {}
+        self.attachments = {}
         self.counters["info_record"] = 100
         logger.info("Mock-SAP auf Auslieferungszustand zurueckgesetzt.")
         self.save()
@@ -777,6 +786,59 @@ class MockVendorService(_MockBase, VendorServiceBase):
         if not plan.country:
             return "Kein Land angegeben -- Lieferant kann nicht geaendert werden."
         return ""
+
+
+class MockAttachmentService(_MockBase, AttachmentServiceBase):
+    """Anlagen im Testsystem am jeweiligen Objekt vermerken.
+
+    Bewusst mit denselben Vorpruefungen wie im Echtbetrieb (fehlende Datei,
+    Groessengrenze, Dry Run), damit sich Testsystem und Produktivsystem nicht
+    unterschiedlich verhalten.  Der Windows-Dateidialog des Echtbetriebs hat
+    hier natuerlich keine Entsprechung -- deshalb gelingt das Anhaengen im
+    Testsystem immer, sobald die Vorpruefungen sauber sind.
+    """
+
+    def __init__(self, system, settings, selectors) -> None:  # noqa: D107
+        _MockBase.__init__(self, system, settings, selectors)
+
+    @staticmethod
+    def object_key(object_kind: str, object_key: str) -> str:
+        return f"{object_kind}|{object_key}"
+
+    def attach(self, attachment, object_kind: str, object_key: str,
+               context: WriteContext) -> ActionResult:
+        started = self._now_ms()
+        label = attachment_label(object_kind)
+
+        problem = check_attachment(attachment, self.settings)
+        if problem:
+            return self._result(ATTACHMENT_ACTION, ResultState.SKIPPED, problem,
+                                started_ms=started)
+        if not object_key:
+            return self._result(
+                ATTACHMENT_ACTION, ResultState.SKIPPED,
+                f"Anlage NICHT angehaengt: SAP hat keine Nummer zum {label} "
+                f"gemeldet -- es ist unklar, an welches Objekt sie gehoert.",
+                started_ms=started)
+
+        if context.dry_run:
+            return self._result(
+                ATTACHMENT_ACTION, ResultState.SIMULATED,
+                f"Anlage '{attachment.display_name}' wuerde an {label} "
+                f"{object_key} gehaengt.", started_ms=started)
+
+        schluessel = self.object_key(object_kind, object_key)
+        liste = self.system.attachments.setdefault(schluessel, [])
+        if attachment.display_name not in liste:
+            liste.append(attachment.display_name)
+        self.system.save()
+
+        return self._result(
+            ATTACHMENT_ACTION, ResultState.SUCCESS,
+            f"Angebot '{attachment.display_name}' an {label} {object_key} "
+            f"angehaengt", document_number=object_key,
+            new_value=attachment.display_name, started_ms=started,
+            sap_messages=[f"Anlage am Objekt {schluessel} vermerkt"])
 
 
 class MockContractService(_MockBase, ContractServiceBase):

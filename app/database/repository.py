@@ -672,6 +672,43 @@ class Repository:
             (run_id,),
         )
 
+    def documents_already_created(self, offer_number: str, action: str,
+                                  material_number: str = "") -> list[dict]:
+        """Belege, die dieses Angebot in frueheren Laeufen schon erzeugt hat.
+
+        Das ist der Doppel-Schutz fuer Kontrakt und Bestellung: SAP selbst
+        laesst sich zu derselben Angebotsnummer beliebig oft beschicken, und
+        eine Suchmaske dafuer wuerde geratene Feld-IDs erfordern.  Die eigene
+        Historie weiss es dagegen sicher -- allerdings nur ueber das, was
+        dieses Werkzeug selbst geschrieben hat.  Genau so wird es dem
+        Anwender auch gemeldet.
+
+        Beruecksichtigt werden ausschliesslich echte, erfolgreiche Schreib-
+        vorgaenge: Probelauf und Testsystem zaehlen nicht, sonst warnt das
+        Werkzeug vor Belegen, die es in SAP gar nicht gibt.
+        """
+        if not offer_number.strip() or not action.strip():
+            return []
+        sql = ("SELECT document_number, timestamp, material_number, vendor_number, "
+               "run_id, new_value FROM history "
+               "WHERE offer_number = ? AND action = ? AND state = 'success' "
+               "AND dry_run = 0 AND mode = 'echt' AND document_number <> ''")
+        params: list[Any] = [offer_number.strip(), action.strip()]
+        if material_number.strip():
+            sql += " AND material_number = ?"
+            params.append(material_number.strip())
+        sql += " ORDER BY id DESC"
+
+        gesehen: set[str] = set()
+        eindeutig: list[dict] = []
+        for row in self._query(sql, params):
+            nummer = str(row.get("document_number") or "")
+            if nummer in gesehen:
+                continue
+            gesehen.add(nummer)
+            eindeutig.append(row)
+        return eindeutig
+
     def runs(self, limit: int = 50) -> list[dict]:
         """Die letzten Verarbeitungslaeufe, neueste zuerst."""
         return self._query(

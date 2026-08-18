@@ -771,7 +771,9 @@ class TestBatchProcessor(unittest.TestCase):
         phases: list[str] = []
         self.batch.run(offer, preview,
                        progress=lambda e: phases.append(e.phase))
-        without_done = [p for p in phases if p != "done"]
+        # Die Anlage laeuft als Nachlauf zu jeder Aktion und sagt ueber die
+        # Reihenfolge der Arbeitsschritte nichts aus.
+        without_done = [p for p in phases if p not in ("done", "attachment")]
         first_contract = without_done.index("contract")
         first_source = without_done.index("source_list")
         first_order = without_done.index("purchase_order")
@@ -920,7 +922,9 @@ class TestBatchProcessor(unittest.TestCase):
         preview = self._prepare(offer)
         events: list[ProgressEvent] = []
         self.batch.run(offer, preview, progress=events.append)
-        work = [e for e in events if e.phase != "done"]
+        # Die Anlage ist ein Nachlauf zur eigentlichen Aktion und wird
+        # gesondert gemeldet -- hier geht es um die Arbeitsschritte selbst.
+        work = [e for e in events if e.phase not in ("done", "attachment")]
         # 6 Einheiten (2 Infosaetze, 1 Kontrakt, 2 Orderbuch, 1 Bestellung);
         # Belegergebnisse werden auf beide beteiligten Positionen verteilt.
         self.assertTrue(all(e.total == 6 for e in work))

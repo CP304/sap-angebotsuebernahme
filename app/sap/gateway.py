@@ -14,9 +14,11 @@ from datetime import date
 from ..config.settings import Settings
 from ..models.offer_position import OfferPosition
 from .connection import SapError, SapGuiConnection, SapNotAvailableError, SessionInfo
+from .attachment_service import SapAttachmentService
 from .contract_service import SapContractService
 from .info_record_service import SapInfoRecordService
 from .interfaces import (
+    AttachmentServiceBase,
     ContractServiceBase,
     InfoRecordServiceBase,
     MaterialInfo,
@@ -29,6 +31,7 @@ from .interfaces import (
 )
 from .material_service import SapMaterialService
 from .mock_backend import (
+    MockAttachmentService,
     MockContractService,
     MockInfoRecordService,
     MockMaterialService,
@@ -95,6 +98,7 @@ class SapGateway:
         self.vendors: VendorServiceBase
         self.contracts: ContractServiceBase
         self.purchase_orders: PurchaseOrderServiceBase
+        self.attachments: AttachmentServiceBase
 
         self._build_services()
 
@@ -119,6 +123,7 @@ class SapGateway:
             self.vendors = MockVendorService(system, self.settings, self.selectors)
             self.contracts = MockContractService(system, self.settings, self.selectors)
             self.purchase_orders = MockPurchaseOrderService(system, self.settings, self.selectors)
+            self.attachments = MockAttachmentService(system, self.settings, self.selectors)
             logger.info("SAP-Services im Mock-Modus aufgebaut.")
         else:
             self._mock_system = None
@@ -129,6 +134,7 @@ class SapGateway:
             self.vendors = SapVendorService(connection, self.settings, self.selectors)
             self.contracts = SapContractService(connection, self.settings, self.selectors)
             self.purchase_orders = SapPurchaseOrderService(connection, self.settings, self.selectors)
+            self.attachments = SapAttachmentService(connection, self.settings, self.selectors)
             logger.info("SAP-Services im Echtbetrieb aufgebaut.")
         self.clear_cache()
 
@@ -145,7 +151,8 @@ class SapGateway:
     def _attach_connection(self) -> None:
         """Verbindung in die (echten) Services nachziehen."""
         for service in (self.info_records, self.source_lists, self.materials,
-                        self.vendors, self.contracts, self.purchase_orders):
+                        self.vendors, self.contracts, self.purchase_orders,
+                        self.attachments):
             service.connection = self.connection
 
     # ------------------------------------------------------------------

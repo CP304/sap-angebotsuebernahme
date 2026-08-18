@@ -81,17 +81,22 @@ class PositionDetails(QWidget):
 
     positionChanged = Signal(object)
     requestVendorAssignment = Signal(object)
+    requestVendorMaster = Signal(object)
     requestReloadSap = Signal(object)
     issueAcknowledged = Signal(object, str)
 
-    def __init__(self, comparison_service=None, parent=None) -> None:
+    def __init__(self, comparison_service=None, parent=None, settings=None) -> None:
         super().__init__(parent)
         self.comparison = comparison_service
+        #: Die Anlagen-Haken wirken auf ``settings.attachments`` -- die Anlage
+        #: ist eine Einstellung des Vorgangs, keine Eigenschaft der Zeile.
+        self.settings = settings
         self._position: OfferPosition | None = None
         self._loading = False
         self._fields: dict[str, _Field] = {}
 
         self._build()
+        self._fill_attachments()
         self.set_position(None)
 
     # ==================================================================
@@ -111,7 +116,17 @@ class PositionDetails(QWidget):
         outer.addWidget(self.tabs, 1)
 
     def _build_header(self) -> QFrame:
-        """Titel, Status und die vier Aktionen -- immer sichtbar."""
+        """Titel, Status und die Aktionen -- immer sichtbar.
+
+        Die Aktionen sind in zwei Gruppen getrennt, weil sie fachlich zwei
+        verschiedene Dinge sind:
+
+            Stammdaten        betreffen Lieferant bzw. Material als Ganzes
+            Einkaufsvorgang   sind Vorgaenge im Einkaufsbeleg-Umfeld
+
+        Innerhalb des Einkaufsvorgangs bleibt die Reihenfolge, wie sie ist --
+        sie entspricht der festen Verarbeitungsreihenfolge.
+        """
         card = QFrame()
         card.setObjectName("Card")
         layout = QVBoxLayout(card)
@@ -127,11 +142,47 @@ class PositionDetails(QWidget):
         zeile.addWidget(self.status_badge, 0)
         layout.addLayout(zeile)
 
-        aktionen = QHBoxLayout()
-        aktionen.setSpacing(16)
-        beschriftung = QLabel("In SAP pflegen:")
-        beschriftung.setObjectName("FieldLabel")
-        aktionen.addWidget(beschriftung)
+        # -- Gruppe 1: Stammdaten -------------------------------------
+        stammdaten = QHBoxLayout()
+        stammdaten.setSpacing(14)
+        self.master_group_label = QLabel("Stammdaten")
+        self.master_group_label.setObjectName("FieldLabel")
+        stammdaten.addWidget(self.master_group_label)
+
+        # Die Materialpruefung (MM03) ist reines Lesen und geschieht bereits
+        # beim "SAP-Daten laden".  Sie darf deshalb NICHT als Schreibaktion
+        # erscheinen -- hier steht nur ihr Ergebnis.
+        self.material_state_label = QLabel("Material: noch nicht geprueft")
+        self.material_state_label.setToolTip(
+            "Ergebnis der Materialpruefung (MM03). Reines Lesen -- es wird "
+            "dabei nichts in SAP geaendert.")
+        stammdaten.addWidget(self.material_state_label)
+
+        # Die Lieferantenpflege (XK02) gilt je LIEFERANT, nicht je Position.
+        # Ein Haken an jeder Zeile wuerde denselben Stammsatz n-mal anfassen --
+        # deshalb bewusst eine Schaltflaeche statt eines Ankreuzfelds.
+        self.vendor_master_button = QPushButton("Stammdaten dieses Lieferanten pflegen ...")
+        self.vendor_master_button.setToolTip(
+            "Aendert den Lieferantenstammsatz (XK02). Gilt einmal je Lieferant, "
+            "nicht je Position.")
+        self.vendor_master_button.clicked.connect(self._request_vendor_master)
+        stammdaten.addWidget(self.vendor_master_button)
+        stammdaten.addStretch(1)
+        layout.addLayout(stammdaten)
+
+        trenner = QFrame()
+        trenner.setFrameShape(QFrame.Shape.HLine)
+        trenner.setFrameShadow(QFrame.Shadow.Plain)
+        trenner.setStyleSheet(f"color: {Colors.BORDER};")
+        layout.addWidget(trenner)
+
+        # -- Gruppe 2: Einkaufsvorgang --------------------------------
+        vorgang = QGridLayout()
+        vorgang.setHorizontalSpacing(16)
+        vorgang.setVerticalSpacing(2)
+        self.process_group_label = QLabel("Einkaufsvorgang")
+        self.process_group_label.setObjectName("FieldLabel")
+        vorgang.addWidget(self.process_group_label, 0, 0)
 
         self.check_info = QCheckBox("Infosatz")
         self.check_info.setToolTip("ME11 / ME12")
@@ -141,17 +192,42 @@ class PositionDetails(QWidget):
         self.check_contract.setToolTip("ME31K – Mengenkontrakt")
         self.check_order = QCheckBox("Bestellung")
         self.check_order.setToolTip("ME21N – Abruf aus dem Kontrakt")
-        for box in (self.check_info, self.check_source, self.check_contract,
-                    self.check_order):
-            box.stateChanged.connect(self._commit_actions)
-            aktionen.addWidget(box)
 
-        aktionen.addStretch(1)
+        self.attach_info = self._attachment_box(
+            "Infosatz", "Das Angebot haengt nach dem Sichern am Infosatz.")
+        self.attach_source = self._attachment_box(
+            "Orderbuch", "Viele Systeme lassen am Orderbuch keine Anlage zu.")
+        self.attach_contract = self._attachment_box(
+            "Kontrakt", "Das Angebot haengt nach dem Sichern am Mengenkontrakt.")
+        self.attach_order = self._attachment_box(
+            "Bestellung", "Das Angebot haengt nach dem Sichern an der Bestellung.")
+
+        paare = ((self.check_info, self.attach_info),
+                 (self.check_source, self.attach_source),
+                 (self.check_contract, self.attach_contract),
+                 (self.check_order, self.attach_order))
+        for spalte, (aktion, anlage) in enumerate(paare, start=1):
+            aktion.stateChanged.connect(self._commit_actions)
+            anlage.stateChanged.connect(self._commit_attachments)
+            vorgang.addWidget(aktion, 0, spalte)
+            vorgang.addWidget(anlage, 1, spalte)
+        vorgang.setColumnStretch(len(paare) + 1, 1)
+
         self.document_label = QLabel("")
         self.document_label.setObjectName("SubHeading")
-        aktionen.addWidget(self.document_label)
-        layout.addLayout(aktionen)
+        vorgang.addWidget(self.document_label, 0, len(paare) + 1,
+                          Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(vorgang)
         return card
+
+    def _attachment_box(self, aktion: str, hinweis: str) -> QCheckBox:
+        """Kleines Ankreuzfeld "+ Beleg anhaengen" unter einer Aktion."""
+        box = QCheckBox("+ Beleg anhaengen")
+        box.setToolTip(f"{aktion}: {hinweis}\n\nAngehaengt wird das eingelesene "
+                       f"Angebot (Datei bzw. Mailanhang). Gibt es keine Datei, "
+                       f"wird das gemeldet -- es wird nichts erfunden.")
+        box.setStyleSheet(f"QCheckBox {{ color: {Colors.TEXT_MUTED}; }}")
+        return box
 
     def _add_field(self, form: QFormLayout, key: str, label: str,
                    placeholder: str = "") -> _Field:
@@ -314,12 +390,16 @@ class PositionDetails(QWidget):
             for field in self._fields.values():
                 field.setEnabled(aktiv)
             self.vendor_button.setEnabled(aktiv)
+            # Die Lieferantenpflege gilt je Lieferant und haengt deshalb NICHT
+            # daran, ob gerade eine Position markiert ist.
             self.reload_button.setEnabled(aktiv)
             for box in (self.check_info, self.check_source, self.check_contract,
                         self.check_order):
                 box.setEnabled(aktiv)
 
             if position is None:
+                self.material_state_label.setText("Material: keine Position ausgewaehlt")
+                self.material_state_label.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
                 self.title_label.setText("Keine Position ausgewaehlt")
                 self.status_badge.setText("")
                 self.status_badge.setStyleSheet("")
@@ -344,6 +424,7 @@ class PositionDetails(QWidget):
             self._fill_sap(position)
             self._fill_change(position)
             self._fill_actions(position)
+            self._fill_material_state(position)
             self._fill_issues(position)
         finally:
             self._loading = False
@@ -463,6 +544,40 @@ class PositionDetails(QWidget):
         zeilen.append(f"<b>Orderbuch:</b> {position.source_list_action.label}")
         self.change_label.setText("<br>".join(zeilen))
 
+    def _attachment_settings(self):
+        """Anlagen-Einstellungen -- notfalls die Auslieferungsvorgaben."""
+        einstellungen = getattr(self.settings, "attachments", None)
+        if einstellungen is None:
+            from ..config.settings import AttachmentSettings
+            einstellungen = AttachmentSettings()
+            if self.settings is not None:
+                self.settings.attachments = einstellungen
+        return einstellungen
+
+    def _fill_attachments(self) -> None:
+        einstellungen = self._attachment_settings()
+        self._loading = True
+        try:
+            self.attach_info.setChecked(einstellungen.attach_to_info_record)
+            self.attach_source.setChecked(einstellungen.attach_to_source_list)
+            self.attach_contract.setChecked(einstellungen.attach_to_contract)
+            self.attach_order.setChecked(einstellungen.attach_to_purchase_order)
+        finally:
+            self._loading = False
+
+    def _fill_material_state(self, position: OfferPosition) -> None:
+        """Zustandsanzeige der Materialpruefung -- niemals eine Schreibaktion."""
+        if not position.material_number:
+            text, farbe = "Material: keine Nummer erfasst", Colors.TEXT_MUTED
+        elif position.material_exists is None:
+            text, farbe = "Material: noch nicht geprueft", Colors.TEXT_MUTED
+        elif position.material_exists:
+            text, farbe = "Material vorhanden", Colors.GREEN
+        else:
+            text, farbe = "Material nicht vorhanden", Colors.RED
+        self.material_state_label.setText(text)
+        self.material_state_label.setStyleSheet(f"color: {farbe};")
+
     def _fill_actions(self, position: OfferPosition) -> None:
         self.check_info.setChecked(position.do_info_record)
         self.check_source.setChecked(position.do_source_list)
@@ -548,6 +663,25 @@ class PositionDetails(QWidget):
     def _request_vendor(self) -> None:
         if self._position is not None:
             self.requestVendorAssignment.emit(self._position)
+
+    def _request_vendor_master(self) -> None:
+        """Lieferantenstammpflege anstossen -- gilt je Lieferant."""
+        self.requestVendorMaster.emit(self._position)
+
+    def _commit_attachments(self) -> None:
+        """Anlagen-Haken in die Einstellungen uebernehmen.
+
+        Bewusst NICHT an die Position gehaengt: ob das Angebot als Anlage
+        mitgeht, ist eine Entscheidung ueber den Vorgang, nicht ueber die
+        einzelne Zeile.
+        """
+        if self._loading:
+            return
+        einstellungen = self._attachment_settings()
+        einstellungen.attach_to_info_record = self.attach_info.isChecked()
+        einstellungen.attach_to_source_list = self.attach_source.isChecked()
+        einstellungen.attach_to_contract = self.attach_contract.isChecked()
+        einstellungen.attach_to_purchase_order = self.attach_order.isChecked()
 
     def _commit_actions(self) -> None:
         if self._loading or self._position is None:

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
+from .document_plan import AttachmentRef, attachment_from_paths
 from .enums import FieldOrigin, SourceKind
 from .issue import IssueList
 from .offer_position import OfferPosition
@@ -43,6 +44,11 @@ class EmailContext:
     sent: datetime | None = None
     body_text: str = ""
     attachment_names: list[str] = field(default_factory=list)
+    #: Vollstaendige Pfade der abgelegten Anhaenge, sofern die Mail beim
+    #: Einlesen ausgepackt wurde.  Nur was hier steht, laesst sich spaeter
+    #: als Anlage an ein SAP-Objekt haengen -- ein blosser Dateiname reicht
+    #: dafuer nicht.
+    attachment_paths: list[str] = field(default_factory=list)
     message_id: str = ""
 
     @property
@@ -79,6 +85,10 @@ class Offer:
     imported_at: datetime = field(default_factory=datetime.now)
     raw_text: str = ""
 
+    #: Dokument, das als Anlage an die erzeugten SAP-Objekte gehaengt wird.
+    #: Wird von :meth:`resolve_attachment` ermittelt und dort zwischengelegt.
+    attachment: AttachmentRef | None = None
+
     # -- Bewertung -------------------------------------------------------
     field_origins: dict[str, FieldOrigin] = field(default_factory=dict)
     issues: IssueList = field(default_factory=IssueList)
@@ -101,6 +111,33 @@ class Offer:
             self.set_field(name, value, origin)
             return True
         return False
+
+    # ------------------------------------------------------------------
+    # Anlage (Angebotsdokument fuer SAP)
+    # ------------------------------------------------------------------
+    def resolve_attachment(self) -> AttachmentRef:
+        """Welches Dokument soll am erzeugten SAP-Objekt haengen?
+
+        Reihenfolge: zuerst die eingelesene Datei (``source_files``), dann der
+        abgelegte E-Mail-Anhang.  Gibt es weder das eine noch das andere --
+        etwa bei eingefuegtem Text --, wird das als Klartext gemeldet und
+        nicht stillschweigend uebergangen.
+        """
+        pfade = [p for p in self.source_files if p]
+        if self.email is not None:
+            pfade.extend(p for p in self.email.attachment_paths if p)
+        hinweis = ""
+        if not pfade:
+            if self.source_kind is SourceKind.TEXT:
+                hinweis = "eingefuegter Text ohne Datei"
+            elif self.email is not None and self.email.attachment_names:
+                hinweis = ("die E-Mail nennt Anhaenge, deren Dateien aber nicht "
+                           "abgelegt wurden")
+            elif self.email is not None:
+                hinweis = "E-Mail-Text ohne Anhang"
+        ref = attachment_from_paths(pfade, hinweis)
+        self.attachment = ref
+        return ref
 
     # ------------------------------------------------------------------
     @property

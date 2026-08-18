@@ -182,10 +182,40 @@ class GuiSmokeTest(unittest.TestCase):
         dritte = offer.positions[2]           # 47110004 hat keinen Infosatz
         self.assertFalse(dritte.sap_info_record.exists)
 
+    def test_07b_detailansicht_ist_zweigeteilt(self) -> None:
+        """Stammdaten und Einkaufsvorgang sind sichtbar getrennt."""
+        details = self.window.details
+        self.assertEqual(details.master_group_label.text(), "Stammdaten")
+        self.assertEqual(details.process_group_label.text(), "Einkaufsvorgang")
+        # Materialpruefung ist reines Lesen -- kein Schreibhaken
+        self.assertFalse(hasattr(details, "check_material"))
+        self.assertTrue(hasattr(details, "material_state_label"))
+        # Lieferantenpflege gilt je Lieferant -- Schaltflaeche statt Haken
+        self.assertFalse(hasattr(details, "check_vendor"))
+        self.assertTrue(hasattr(details, "vendor_master_button"))
+
+    def test_07c_anlagen_haken_in_der_detailansicht(self) -> None:
+        details = self.window.details
+        self.assertTrue(details.attach_info.isChecked())
+        self.assertTrue(details.attach_contract.isChecked())
+        self.assertTrue(details.attach_order.isChecked())
+        self.assertFalse(details.attach_source.isChecked())
+        self.assertIn("anhaengen", details.attach_info.text())
+
     def test_08_komplettvorgang_dialog(self) -> None:
         dialog = ChainDialog(self.settings, 3, self.window)
         geaendert = dialog.apply_to(self.window.offer.positions)
         self.assertEqual(geaendert, 3)
+        dialog.deleteLater()
+
+    def test_08b_komplettvorgang_ist_zweigeteilt(self) -> None:
+        """Auch der Komplettvorgang trennt Stammdaten und Einkaufsvorgang."""
+        dialog = ChainDialog(self.settings, 3, self.window)
+        self.assertEqual(dialog.master_heading.text(), "Stammdaten")
+        self.assertEqual(dialog.process_heading.text(), "Einkaufsvorgang")
+        self.assertIn("je Lieferant", dialog.check_vendor_master.text())
+        self.assertFalse(hasattr(dialog, "check_material"))
+        self.assertTrue(dialog.attach_info.isChecked())
         dialog.deleteLater()
 
     def test_09_vorschau_und_ergebnis(self) -> None:

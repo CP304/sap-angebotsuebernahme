@@ -576,6 +576,17 @@ class PasteTextDialog(QDialog):
 # Komplettvorgang konfigurieren
 # ---------------------------------------------------------------------------
 
+def _attachment_box(hinweis: str = "") -> QCheckBox:
+    """Kompaktes Ankreuzfeld "+ Beleg anhaengen" neben einer Aktion."""
+    box = QCheckBox("+ Beleg anhaengen")
+    box.setToolTip(("Haengt das eingelesene Angebot als Anlage an das erzeugte "
+                    "Objekt (Dienste zum Objekt). Gibt es keine Datei, wird das "
+                    "gemeldet -- es wird nichts erfunden.")
+                   + (f"\n\n{hinweis}" if hinweis else ""))
+    box.setStyleSheet(f"QCheckBox {{ color: {Colors.TEXT_MUTED}; }}")
+    return box
+
+
 class ChainDialog(QDialog):
     """"Komplettvorgang": alles auf einmal fuer die ausgewaehlten Positionen.
 
@@ -599,9 +610,45 @@ class ChainDialog(QDialog):
         heading.setObjectName("Heading")
         layout.addWidget(heading)
 
+        attachments = getattr(self.settings, "attachments", None)
+
+        # -- Gruppe 1: Stammdaten -------------------------------------
+        # Lieferant und Material betreffen den Stammsatz als Ganzes und
+        # gehoeren deshalb nicht zwischen die Belegvorgaenge.
+        master_card = QFrame()
+        master_card.setObjectName("Card")
+        master_layout = QVBoxLayout(master_card)
+        self.master_heading = QLabel("Stammdaten")
+        self.master_heading.setObjectName("FieldLabel")
+        master_layout.addWidget(self.master_heading)
+
+        self.check_vendor_master = QCheckBox(
+            "Lieferantenstammdaten pflegen (XK02) -- einmal je Lieferant")
+        self.check_vendor_master.setChecked(
+            bool(getattr(workflow, "chain_vendor_master", False)))
+        self.check_vendor_master.setToolTip(
+            "Gilt je Lieferant, nicht je Position: der Stammsatz wird auch bei "
+            "zwanzig Positionen nur einmal angefasst.")
+        master_layout.addWidget(self.check_vendor_master)
+
+        self.vendor_master_hint = QLabel(
+            "Die Lieferantenpflege gilt fuer den gesamten Lieferanten -- sie "
+            "wird deshalb genau einmal ausgefuehrt, egal wie viele Positionen "
+            "ausgewaehlt sind. Die Materialpruefung (MM03) ist reines Lesen "
+            "und geschieht bereits beim Laden der SAP-Daten; sie schreibt "
+            "nichts und ist deshalb hier nicht ankreuzbar.")
+        self.vendor_master_hint.setWordWrap(True)
+        self.vendor_master_hint.setObjectName("SubHeading")
+        master_layout.addWidget(self.vendor_master_hint)
+        layout.addWidget(master_card)
+
+        # -- Gruppe 2: Einkaufsvorgang --------------------------------
         card = QFrame()
         card.setObjectName("Card")
         card_layout = QVBoxLayout(card)
+        self.process_heading = QLabel("Einkaufsvorgang")
+        self.process_heading.setObjectName("FieldLabel")
+        card_layout.addWidget(self.process_heading)
 
         self.check_info = QCheckBox("1.  Infosatz pflegen (ME11/ME12)")
         self.check_contract = QCheckBox("2.  Mengenkontrakt schreiben (ME31K)")
@@ -611,9 +658,29 @@ class ChainDialog(QDialog):
         self.check_contract.setChecked(workflow.chain_contract)
         self.check_source.setChecked(workflow.chain_source_list)
         self.check_order.setChecked(workflow.chain_purchase_order)
-        for box in (self.check_info, self.check_contract, self.check_source,
-                    self.check_order):
-            card_layout.addWidget(box)
+
+        self.attach_info = _attachment_box()
+        self.attach_contract = _attachment_box()
+        self.attach_source = _attachment_box(
+            "Viele Systeme lassen am Orderbuch ueberhaupt keine Anlage zu.")
+        self.attach_order = _attachment_box()
+        self.attach_info.setChecked(bool(getattr(attachments,
+                                                 "attach_to_info_record", True)))
+        self.attach_contract.setChecked(bool(getattr(attachments,
+                                                     "attach_to_contract", True)))
+        self.attach_source.setChecked(bool(getattr(attachments,
+                                                   "attach_to_source_list", False)))
+        self.attach_order.setChecked(bool(getattr(attachments,
+                                                  "attach_to_purchase_order", True)))
+
+        for aktion, anlage in ((self.check_info, self.attach_info),
+                               (self.check_contract, self.attach_contract),
+                               (self.check_source, self.attach_source),
+                               (self.check_order, self.attach_order)):
+            zeile = QHBoxLayout()
+            zeile.addWidget(aktion, 1)
+            zeile.addWidget(anlage, 0)
+            card_layout.addLayout(zeile)
         layout.addWidget(card)
 
         form = QFormLayout()
@@ -658,6 +725,16 @@ class ChainDialog(QDialog):
         workflow.chain_contract = self.check_contract.isChecked()
         workflow.chain_source_list = self.check_source.isChecked()
         workflow.chain_purchase_order = self.check_order.isChecked()
+        # Stammdaten: gilt je Lieferant, wird deshalb NICHT auf die Positionen
+        # uebertragen, sondern nur in den Einstellungen vermerkt.
+        workflow.chain_vendor_master = self.check_vendor_master.isChecked()
+
+        attachments = getattr(self.settings, "attachments", None)
+        if attachments is not None:
+            attachments.attach_to_info_record = self.attach_info.isChecked()
+            attachments.attach_to_contract = self.attach_contract.isChecked()
+            attachments.attach_to_source_list = self.attach_source.isChecked()
+            attachments.attach_to_purchase_order = self.attach_order.isChecked()
 
         valid_to = self.valid_to_edit.text().strip()
         if valid_to and parse_date(valid_to):
@@ -683,3 +760,8 @@ class ChainDialog(QDialog):
                 position.contract_quantity = position.quantity
             count += 1
         return count
+
+    @property
+    def maintain_vendor_master(self) -> bool:
+        """Soll der Lieferantenstamm gepflegt werden?  Einmal je Lieferant."""
+        return self.check_vendor_master.isChecked()

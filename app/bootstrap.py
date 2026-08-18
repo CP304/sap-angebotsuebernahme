@@ -214,7 +214,7 @@ def build_services(settings: Settings) -> Services:
 
         def batch_factory() -> Any:
             return BatchProcessor(gateway, settings, services.comparison,
-                                  services.validation)
+                                  services.validation, services.repository)
 
         services.batch_factory = batch_factory
     except Exception as exc:  # noqa: BLE001

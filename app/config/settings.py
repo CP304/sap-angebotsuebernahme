@@ -479,6 +479,10 @@ class WorkflowDefaults:
     chain_source_list: bool = True
     chain_contract: bool = True
     chain_purchase_order: bool = True
+    #: Stammdaten (kein Belegvorgang): Lieferantenstamm pflegen (XK02).
+    #: Gilt EINMAL je Lieferant, nicht je Position -- sonst wuerde derselbe
+    #: Stammsatz n-mal angefasst.  Deshalb standardmaessig aus.
+    chain_vendor_master: bool = False
 
     # -- Infosatz --------------------------------------------------------
     #: Gueltig-bis-Platzhalter fuer Infosatzkonditionen
@@ -529,6 +533,14 @@ class WorkflowDefaults:
     #: Belegart, nach der gesucht wird (leer = wie contract_document_type)
     contract_search_document_type: str = ""
 
+    # -- Doppelte Belege -------------------------------------------------
+    #: Keine zweite Bestellung zu einer Angebotsnummer, zu der dieses
+    #: Werkzeug schon eine geschrieben hat.  Grundlage ist die eigene
+    #: Historie, nicht SAP -- von Hand in SAP angelegte Bestellungen sieht
+    #: das Werkzeug also nicht.  Wer bewusst nachbestellen will, macht das
+    #: in SAP oder schaltet die Sperre hier ab.
+    block_repeated_documents: bool = True
+
     # -- Mengenstaffeln im Infosatz -------------------------------------
     #: Erkannte Staffelpreise als Konditionsstaffel schreiben statt nur den
     #: ersten Preis zu uebernehmen
@@ -536,6 +548,42 @@ class WorkflowDefaults:
     #: Mehr Staffelstufen als hier zugelassen werden abgeschnitten (mit
     #: Protokolleintrag -- stillschweigend verschwinden darf nichts)
     max_scale_levels: int = 6
+
+
+@dataclass
+class AttachmentSettings:
+    """Das Angebotsdokument als Anlage am erzeugten SAP-Objekt.
+
+    Warum das wichtig ist: Ein halbes Jahr spaeter fragt jemand "warum steht
+    hier dieser Preis?".  Steht das Angebot als Anlage am Infosatz bzw. am
+    Beleg, ist die Frage in zehn Sekunden beantwortet -- sonst beginnt die
+    Suche im Mailpostfach.
+
+    SAP haengt Dokumente ueber GOS an ("Dienste zum Objekt" ->
+    "Anlage erstellen").  Der dabei aufgehende Dateiauswahl-Dialog ist ein
+    WINDOWS-Fenster und kein SAP-GUI-Objekt; er laesst sich per GUI-Scripting
+    nicht zuverlaessig bedienen.  Deshalb meldet die Anwendung in diesem Fall
+    keinen Erfolg, sondern nennt den vollstaendigen Dateipfad zum manuellen
+    Anhaengen (siehe ``app.sap.attachment_service``).
+    """
+
+    #: Je Aktion: soll das Angebot am erzeugten Objekt haengen?
+    attach_to_info_record: bool = True
+    #: Orderbuch traegt in vielen Systemen ueberhaupt keine Anlagen --
+    #: deshalb standardmaessig aus.
+    attach_to_source_list: bool = False
+    attach_to_contract: bool = True
+    attach_to_purchase_order: bool = True
+    #: Lieferantenstamm ist eine Stammdatenpflege je Lieferant, kein
+    #: Belegvorgang -- Anlage dort nur auf ausdruecklichen Wunsch.
+    attach_to_vendor: bool = False
+
+    #: Die Originaldatei (Angebots-PDF, Preisliste, E-Mail-Anhang) anhaengen
+    attach_original_file: bool = True
+    #: Zusaetzlich eine kurze Textzusammenfassung der uebernommenen Werte
+    attach_summary: bool = False
+    #: Groessere Dateien werden abgelehnt (SAP-Ablage, Archivkosten)
+    max_attachment_mb: int = 10
 
 
 @dataclass
@@ -577,6 +625,7 @@ class Settings:
     extraction: ExtractionSettings = field(default_factory=ExtractionSettings)
     ocr: OcrSettings = field(default_factory=OcrSettings)
     workflow: WorkflowDefaults = field(default_factory=WorkflowDefaults)
+    attachments: AttachmentSettings = field(default_factory=AttachmentSettings)
     ui: UiSettings = field(default_factory=UiSettings)
 
     #: Betriebsart

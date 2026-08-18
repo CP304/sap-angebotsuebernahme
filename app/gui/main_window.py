@@ -387,9 +387,10 @@ class MainWindow(QMainWindow):
         self.table.requestFillDown.connect(self._fill_down)
         splitter.addWidget(self.table)
 
-        self.details = PositionDetails(self.comparison)
+        self.details = PositionDetails(self.comparison, settings=self.settings)
         self.details.positionChanged.connect(self._position_changed)
         self.details.requestVendorAssignment.connect(self.assign_vendor)
+        self.details.requestVendorMaster.connect(self._maintain_vendor_master)
         self.details.requestReloadSap.connect(self._reload_single_position)
         self.details.issueAcknowledged.connect(lambda *_: self._revalidate())
         splitter.addWidget(self.details)
@@ -1196,6 +1197,10 @@ class MainWindow(QMainWindow):
         self.details.refresh()
         self._update_counters()
         self.counter_label.setText(f"Komplettvorgang fuer {count} Position(en) festgelegt")
+        if dialog.maintain_vendor_master:
+            # Stammdatenpflege gilt je Lieferant und laeuft deshalb nicht im
+            # Stapel mit, sondern genau einmal -- mit eigener Bestaetigung.
+            self._maintain_vendor_master()
 
     def process_offer(self) -> None:
         if self.offer is None or self.preview_service is None or self.batch_factory is None:
@@ -1364,6 +1369,19 @@ class MainWindow(QMainWindow):
         self._fill_header()
         self.details.refresh()
         self._update_counters()
+
+    def _maintain_vendor_master(self, position=None) -> None:
+        """Stammdaten des Lieferanten pflegen (XK02).
+
+        Bewusst je LIEFERANT und nicht je Position: derselbe Stammsatz darf
+        nicht mehrfach angefasst werden, nur weil das Angebot zwanzig Zeilen
+        hat.  Der Name kommt deshalb aus dem Angebotskopf.
+        """
+        if self.offer is None:
+            show_error(self, "Kein Angebot geladen",
+                       "Bitte zuerst ein Angebot einlesen.")
+            return
+        self._create_vendor_in_sap(self.offer.vendor_name)
 
     def _create_vendor_in_sap(self, vendor_name: str) -> None:
         """Neuanlage-Dialog oeffnen und -- nach Bestaetigung -- in SAP anlegen (XK01).

@@ -34,6 +34,8 @@ class ActionResult:
             "source_list": "Orderbuch",
             "contract": "Mengenkontrakt",
             "purchase_order": "Bestellung",
+            "vendor_master": "Lieferantenstamm",
+            "attachment": "Anlage",
         }.get(self.action, self.action)
 
     def display(self) -> str:

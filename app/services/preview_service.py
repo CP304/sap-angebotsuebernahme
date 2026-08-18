@@ -243,6 +243,10 @@ class PreviewService:
         if offer.vendor_number:
             vendor_names.setdefault(offer.vendor_number, offer.vendor_name)
 
+        # Angebotsdokument fuer die Anlage einmal ermitteln -- beide Belege
+        # haengen dieselbe Datei an.
+        anlage = offer.resolve_attachment()
+
         today = date.today()
         contract_from = offer.valid_from or today
         contract_to = settings.parsed_contract_valid_to()
@@ -260,6 +264,7 @@ class PreviewService:
             incoterm=offer.incoterm,
             incoterm_location=offer.incoterm_location,
             document_type=purchasing.contract_document_type,
+            attachment=anlage,
         )
 
         delivery = today + timedelta(days=purchasing.default_delivery_days)
@@ -274,6 +279,7 @@ class PreviewService:
             incoterm=offer.incoterm,
             incoterm_location=offer.incoterm_location,
             document_type=purchasing.purchase_order_document_type,
+            attachment=anlage,
         )
 
     # ------------------------------------------------------------------
