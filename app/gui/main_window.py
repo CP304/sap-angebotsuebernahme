@@ -18,10 +18,12 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -524,6 +526,18 @@ class MainWindow(QMainWindow):
         auswahl_menu.addSeparator()
         auswahl_menu.addAction("Nur geaenderte", self._select_changed)
         auswahl_menu.addAction("Nur fehlerfreie", self._select_clean)
+        auswahl_menu.addSeparator()
+        self.adjust_action = auswahl_menu.addAction(
+            "Preise anpassen ...", self.adjust_prices)
+        self.adjust_action.setShortcut("Ctrl+Shift+P")
+        self.adjust_action.setToolTip(
+            "Alle ausgewaehlten Preise auf einmal aendern -- prozentual, um "
+            "einen festen Betrag oder auf einen festen Wert (Strg+Umschalt+P)")
+        self.duplicate_plant_action = auswahl_menu.addAction(
+            "Fuer weiteres Werk anlegen ...", self.duplicate_for_plant)
+        self.duplicate_plant_action.setToolTip(
+            "Die ausgewaehlten Positionen ein zweites Mal fuer ein anderes "
+            "Werk anlegen -- fuer die werksspezifische Infosatz-Sicht")
         auswahl_menu.addSeparator()
         auswahl_menu.addAction("Position ergaenzen", self._add_position)
         self.quick_entry_action = auswahl_menu.addAction(
@@ -1630,6 +1644,138 @@ class MainWindow(QMainWindow):
         count = self.table_model.apply_value_to_selected(key, text)
         self._revalidate()
         self.counter_label.setText(f"Wert auf {count} Position(en) uebertragen")
+
+    # -- Massenaenderungen ----------------------------------------------
+    def _zielpositionen(self) -> list:
+        """Ausgewaehlte Positionen -- ersatzweise alle angehakten.
+
+        Der Anwender denkt in Haken, nicht in markierten Zeilen.  Wer
+        nichts markiert hat, meint die angehakten Positionen.
+        """
+        markiert = self.table.selected_positions()
+        if markiert:
+            return markiert
+        if self.offer is None:
+            return []
+        return [p for p in self.offer.positions if p.selected]
+
+    def adjust_prices(self) -> None:
+        """Preise der ausgewaehlten Positionen in einem Rutsch anpassen."""
+        from .price_adjust_dialog import PriceAdjustDialog
+
+        ziel = self._zielpositionen()
+        if not ziel:
+            show_error(self, "Keine Position ausgewaehlt",
+                       "Bitte Zeilen markieren oder Positionen anhaken.")
+            return
+
+        dialog = PriceAdjustDialog(ziel, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._snapshot("Preise angepasst")
+        ergebnis = dialog.apply()
+        self.table_model.refresh_all()
+        self._revalidate()
+        self._update_counters()
+        self.counter_label.setText(ergebnis.summary())
+
+        if ergebnis.skipped:
+            # Uebersprungene Positionen nicht verschlucken: der Anwender
+            # glaubt sonst, alles sei angepasst.
+            hinweis = QMessageBox(self)
+            hinweis.setWindowTitle("Preise angepasst")
+            hinweis.setText(ergebnis.summary())
+            hinweis.setDetailedText(ergebnis.details())
+            hinweis.exec()
+
+    def duplicate_for_plant(self) -> None:
+        """Positionen ein zweites Mal fuer ein anderes Werk anlegen.
+
+        Derselbe Artikel beim selben Lieferanten hat je Werk eine eigene
+        Infosatz-Sicht mit eigenem Preis.  Gilt ein Angebot fuer mehrere
+        Werke, muessen die Positionen also mehrfach vorkommen -- einmal je
+        Werk.  Von Hand ist das fehleranfaellig und langweilig.
+        """
+        ziel = self._zielpositionen()
+        if not ziel or self.offer is None:
+            show_error(self, "Keine Position ausgewaehlt",
+                       "Bitte Zeilen markieren oder Positionen anhaken.")
+            return
+
+        vorhandene = sorted({p.plant for p in self.offer.positions if p.plant})
+        werk, ok = QInputDialog.getText(
+            self, "Fuer weiteres Werk anlegen",
+            f"{len(ziel)} Position(en) werden zusaetzlich fuer folgendes Werk "
+            "angelegt:\n\n"
+            f"(bereits im Angebot: {', '.join(vorhandene) or 'keines'})",
+            text=self.settings.purchasing.plant)
+        werk = (werk or "").strip().upper()
+        if not ok or not werk:
+            return
+
+        schon_da = [p for p in ziel if (p.plant or "").upper() == werk]
+        if schon_da:
+            if not ask_yes_no(
+                    self, "Werk bereits gesetzt",
+                    f"{len(schon_da)} der ausgewaehlten Position(en) stehen "
+                    f"bereits auf Werk {werk}.",
+                    "Diese werden uebersprungen, damit keine Dubletten "
+                    "entstehen. Fortfahren?"):
+                return
+
+        self._snapshot(f"Positionen fuer Werk {werk} angelegt")
+        neue = []
+        for position in ziel:
+            if (position.plant or "").upper() == werk:
+                continue
+            kopie = position.copy_for_plant(werk) if hasattr(
+                position, "copy_for_plant") else self._kopie_fuer_werk(position, werk)
+            neue.append(kopie)
+
+        if not neue:
+            self.counter_label.setText(
+                f"Nichts angelegt -- alle stehen bereits auf Werk {werk}.")
+            return
+
+        self.offer.positions.extend(neue)
+        self.offer.renumber()
+        self.table_model.set_offer(self.offer)
+        self._revalidate()
+        self._update_counters()
+        self.counter_label.setText(
+            f"{len(neue)} Position(en) zusaetzlich fuer Werk {werk} angelegt.")
+
+    def _kopie_fuer_werk(self, position, werk: str):
+        """Eine Position fuer ein anderes Werk vervielfaeltigen.
+
+        Kopiert werden die Angebotsdaten.  Alles, was sich auf SAP oder
+        auf einen bereits gelaufenen Vorgang bezieht, wird bewusst NICHT
+        uebernommen: der gelesene Infosatz gehoert zum alten Werk, und ein
+        Ergebnis aus einem frueheren Lauf waere hier schlicht falsch.
+        """
+        import copy as _copy
+
+        from ..models.enums import FieldOrigin
+
+        kopie = _copy.deepcopy(position)
+        kopie.uid = OfferPosition().uid          # eigene Kennung
+        kopie.plant = werk
+        kopie.set_field("plant", werk, FieldOrigin.MANUAL)
+        kopie.sap_info_record = None
+        kopie.sap_source_list = None
+        # CHECK, nicht READY: die Kopie ist noch von niemandem
+        # angesehen worden. Die Neubewertung setzt gleich den
+        # richtigen Zustand, aber bis dahin wird nichts behauptet.
+        kopie.status = PositionStatus.CHECK
+        kopie.result_text = ""
+        # Nur die selbst erzeugten Befunde loeschen -- vom Anwender
+        # bestaetigte Hinweise gelten auch fuer die Kopie weiter.
+        kopie.issues.clear_generated()
+        kopie.confidence_reasons.append(
+            f"Kopie fuer Werk {werk} -- die SAP-Daten des Ursprungswerks "
+            "wurden bewusst nicht uebernommen.")
+        return kopie
 
     # -- Auswahl --------------------------------------------------------
     def _select_all(self, selected: bool) -> None:

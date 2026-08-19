@@ -66,6 +66,17 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("description", "Beschreibung", 260, True, "text"),
     ColumnSpec("vendor_display", "Lieferant", 130, False, "text",
                "Zugeordneter SAP-Lieferant (Zuordnung in der Detailansicht)"),
+    # Einkaufsorganisation und Werk stehen bewusst als eigene Spalten da und
+    # nicht nur im Tooltip: Sie entscheiden, WELCHER Infosatz geschrieben
+    # wird.  Derselbe Artikel beim selben Lieferanten hat je Werk einen
+    # eigenen Satz mit eigenem Preis -- wer die Spalte nicht sieht, merkt
+    # eine Verwechslung erst, wenn der Preis im falschen Werk steht.
+    ColumnSpec("purchasing_org", "EKorg", 62, True, "text",
+               "Einkaufsorganisation. Bestimmt zusammen mit dem Werk, "
+               "welche Infosatz-Sicht geschrieben wird."),
+    ColumnSpec("plant", "Werk", 62, True, "text",
+               "Werk der werksspezifischen Infosatz-Sicht. Leer = nur die "
+               "EKorg-Sicht ohne Werksbezug."),
     ColumnSpec("quantity", "Menge", 80, True, "decimal",
                align=int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)),
     ColumnSpec("uom", "ME", 48, True, "text"),
