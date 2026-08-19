@@ -470,16 +470,30 @@ def _unit_price(position: OfferPosition) -> Decimal | None:
 
 
 def _material_key(position: OfferPosition) -> str:
-    """Schluessel fuer die Dublettensuche: SAP-Material vor Lieferantennummer.
+    """Schluessel fuer die Dublettensuche.
 
-    Die blosse Bezeichnung genuegt ausdruecklich **nicht** -- zwei Zeilen
-    "Dichtring" muessen nicht dasselbe Teil sein.
+    Massgeblich ist die SAP-Materialnummer, ersatzweise die des
+    Lieferanten.  Die blosse Bezeichnung genuegt ausdruecklich **nicht** --
+    zwei Zeilen "Dichtring" muessen nicht dasselbe Teil sein.
+
+    Einkaufsorganisation und Werk gehoeren mit in den Schluessel, denn sie
+    entscheiden ueber die Infosatz-Sicht: Dasselbe Material kann je Werk
+    einen anderen Preis haben -- etwa weil es anders angeliefert wird --
+    und dann sind BEIDE Preise richtig.  Ohne diese Unterscheidung wuerde
+    die zweite Werkszeile als Alternative abgewaehlt und ihr Preis kaeme
+    nie in SAP an.  Das faellt niemandem auf, weil die Zeile ja sichtbar
+    dasteht -- nur eben ohne Haken.
     """
     if position.material_number:
-        return "M:" + normalize_material_number(position.material_number)
-    if position.vendor_material_number:
-        return "L:" + normalize_material_number(position.vendor_material_number)
-    return ""
+        kern = "M:" + normalize_material_number(position.material_number)
+    elif position.vendor_material_number:
+        kern = "L:" + normalize_material_number(position.vendor_material_number)
+    else:
+        return ""
+
+    sicht = (f"{(position.purchasing_org or '').strip().upper()}/"
+             f"{(position.plant or '').strip().upper()}")
+    return f"{kern}@{sicht}"
 
 
 # --------------------------------------------------------------------------

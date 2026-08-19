@@ -206,3 +206,92 @@ class ZielpositionenTest(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class WerkstrennungBeiDublettenTest(unittest.TestCase):
+    """Zwei Werke duerfen unterschiedliche Preise haben.
+
+    Preise koennen sich je Werk unterscheiden -- etwa weil die Ware
+    anders angeliefert wird.  Dann sind BEIDE Preise richtig, und beide
+    gehoeren nach SAP.
+
+    Ohne diese Unterscheidung haette die Dublettenpruefung die zweite
+    Werkszeile als Alternativposition abgewaehlt.  Das ist der
+    unangenehmste Fehlertyp: Die Zeile steht sichtbar da, nur eben ohne
+    Haken -- es faellt niemandem auf, und der Preis fuer das zweite Werk
+    kommt nie an.
+    """
+
+    def _position(self, nummer: str, material: str, preis: str,
+                  werk: str, ekorg: str = "1000"):
+        position = OfferPosition(position_number=nummer,
+                                 material_number=material)
+        position.price = Decimal(preis)
+        position.quantity = Decimal("100")
+        position.plant = werk
+        position.purchasing_org = ekorg
+        position.selected = True
+        return position
+
+    def _auswerten(self, positionen):
+        from app.services.extraction.position_kinds import apply_position_kinds
+
+        angebot = Offer()
+        angebot.positions.extend(positionen)
+        apply_position_kinds(angebot)
+        return angebot.positions
+
+    def test_zwei_werke_bleiben_beide_gewaehlt(self):
+        positionen = self._auswerten([
+            self._position("10", "4711001", "2.95", "1000"),
+            self._position("20", "4711001", "3.20", "2000"),
+        ])
+        self.assertTrue(all(p.selected for p in positionen),
+                        "Beide Werkspreise gehoeren nach SAP")
+        self.assertTrue(all(getattr(p, "position_kind", "material") == "material"
+                            for p in positionen))
+
+    def test_zwei_einkaufsorganisationen_bleiben_beide_gewaehlt(self):
+        positionen = self._auswerten([
+            self._position("10", "4711001", "2.95", "1000", "1000"),
+            self._position("20", "4711001", "3.20", "1000", "2000"),
+        ])
+        self.assertTrue(all(p.selected for p in positionen))
+
+    def test_gleiches_werk_bleibt_eine_alternative(self):
+        """Die Pruefung darf dadurch nicht stumpf werden."""
+        positionen = self._auswerten([
+            self._position("10", "4711001", "2.95", "1000"),
+            self._position("20", "4711001", "3.20", "1000"),
+        ])
+        self.assertTrue(positionen[0].selected)
+        self.assertFalse(positionen[1].selected,
+                         "Zweimal dasselbe Werk mit anderem Preis bleibt "
+                         "eine Entscheidung des Anwenders")
+
+    def test_ohne_werksangabe_bleibt_es_eine_alternative(self):
+        positionen = self._auswerten([
+            self._position("10", "4711001", "2.95", ""),
+            self._position("20", "4711001", "3.20", ""),
+        ])
+        self.assertFalse(positionen[1].selected)
+
+    def test_drei_werke(self):
+        positionen = self._auswerten([
+            self._position("10", "4711001", "2.95", "1000"),
+            self._position("20", "4711001", "3.20", "2000"),
+            self._position("30", "4711001", "3.50", "3000"),
+        ])
+        self.assertEqual(sum(1 for p in positionen if p.selected), 3)
+
+    def test_werk_und_dublette_gemischt(self):
+        """Zwei Werke, davon eines mit einer echten Alternative darin."""
+        positionen = self._auswerten([
+            self._position("10", "4711001", "2.95", "1000"),
+            self._position("20", "4711001", "3.20", "2000"),
+            self._position("30", "4711001", "3.80", "2000"),
+        ])
+        self.assertTrue(positionen[0].selected, "Werk 1000")
+        self.assertTrue(positionen[1].selected, "Werk 2000, erste Zeile")
+        self.assertFalse(positionen[2].selected,
+                         "Werk 2000 zum zweiten Mal -- das ist eine Alternative")
