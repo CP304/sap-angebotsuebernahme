@@ -72,6 +72,19 @@ _NULL_ANTEIL = 0.30
 #: falsch geraten.  Echter Text enthaelt keine Nullzeichen.
 _NULL_ANTEIL_TEXT = 0.05
 
+#: Unterhalb dieses Anteils lesbarer Zeichen ist ein Ergebnis kein Text
+#: mehr, sondern Zeichensalat.  Geschaeftsbelege bestehen praktisch
+#: vollstaendig aus lateinischer Schrift; 60 % laesst genug Luft fuer
+#: Sonderzeichen und einzelne fremdsprachige Stellen.
+_LESBAR_MINDESTENS = 0.60
+
+#: Um wie viel besser die andere Bytereihenfolge sein muss, damit sie
+#: gegen die Angabe der Byte-Order-Mark gewinnt.
+_LESBAR_DEUTLICH = 0.25
+
+#: So viele Zeichen werden fuer die Lesbarkeitspruefung betrachtet.
+_PROBE_TEXT = 2000
+
 
 def _kodierung_aus_bom(data: bytes) -> str:
     """Welche Kodierung meldet die Byte-Order-Mark -- falls eine dasteht?"""
@@ -119,6 +132,86 @@ def _wirkt_unentschluesselt(text: str) -> bool:
     return text.count("\x00") > len(text) * _NULL_ANTEIL_TEXT
 
 
+def _lesbarkeit(text: str) -> float:
+    """Wie viel von diesem Text ist plausible Geschaeftsschrift?
+
+    Ein Angebot oder eine Preisliste besteht aus lateinischer Schrift,
+    Ziffern und Satzzeichen.  Kommt etwas ganz anderes heraus -- lange
+    Folgen ostasiatischer Zeichen etwa -- dann steht das nicht in der
+    Datei, sondern die Bytes wurden falsch zusammengesetzt.
+    """
+    probe = text[:_PROBE_TEXT]
+    if not probe:
+        return 1.0
+    lesbar = 0
+    for zeichen in probe:
+        nummer = ord(zeichen)
+        if nummer in (9, 10, 13) or 32 <= nummer <= 126:
+            lesbar += 1            # ASCII inkl. Tabulator und Umbruch
+        elif 160 <= nummer <= 591:
+            lesbar += 1            # Latin-1 und Latin Extended (Umlaute)
+        elif zeichen in "€£¥‚„…†‡‰‹›''""–—":
+            lesbar += 1            # gaengige Satz- und Waehrungszeichen
+    return lesbar / len(probe)
+
+
+def _andere_byte_reihenfolge(kodierung: str) -> str:
+    """Die jeweils andere Lesart einer Zweibyte-Kodierung."""
+    return {
+        "utf-16-le": "utf-16-be",
+        "utf-16-be": "utf-16-le",
+        "utf-32-le": "utf-32-be",
+        "utf-32-be": "utf-32-le",
+    }.get(kodierung, "")
+
+
+def _pruefe_byte_reihenfolge(data: bytes, text: str,
+                             kodierung: str) -> tuple[str, str, str]:
+    """Sagt die Byte-Order-Mark die Wahrheit?
+
+    Sie kann luegen: wird eine UTF-16LE-Datei mit der Marke fuer die
+    andere Reihenfolge versehen -- etwa weil ein Werkzeug den Kopf
+    kopiert und den Rumpf durchgereicht hat --, ergibt das Dekodieren
+    ostasiatischen Zeichensalat statt einer Preisliste.  Kein Codec
+    meldet dabei einen Fehler, und die Tabellenerkennung findet
+    anschliessend nichts.
+
+    Deshalb wird das Ergebnis angesehen: ist es unlesbar und die andere
+    Reihenfolge deutlich besser, gewinnt die andere -- und der Anwender
+    erfaehrt, dass die Datei einen falschen Kopf traegt.  Bleibt es in
+    beiden Richtungen unlesbar, wird nichts umgedreht, aber auch nichts
+    verschwiegen.
+    """
+    if _lesbarkeit(text) >= _LESBAR_MINDESTENS:
+        return text, kodierung, ""
+
+    # Ohne Marke gelesen, damit sie nicht erneut als Zeichen auftaucht.
+    rumpf = data[4:] if kodierung.startswith("utf-32") else data[2:]
+    tatsaechlich = ("utf-32-le" if kodierung == "utf-32" and data[:2] == b"\xff\xfe"
+                    else "utf-32-be" if kodierung == "utf-32"
+                    else "utf-16-le" if data[:2] == b"\xff\xfe"
+                    else "utf-16-be")
+    gegenprobe = _andere_byte_reihenfolge(tatsaechlich)
+    if gegenprobe:
+        try:
+            anders = rumpf.decode(gegenprobe)
+        except UnicodeDecodeError:
+            anders = ""
+        if anders and _lesbarkeit(anders) > _lesbarkeit(text) + _LESBAR_DEUTLICH:
+            logger.warning("Byte-Order-Mark meldet %s, lesbar ist die Datei "
+                           "als %s", tatsaechlich, gegenprobe)
+            return (anders, gegenprobe,
+                    "Die Datei traegt eine falsche Kennung ihrer "
+                    "Bytereihenfolge und wurde in der anderen Lesart "
+                    "eingelesen. Bitte stichprobenweise pruefen, ob Text "
+                    "und Zahlen stimmen.")
+
+    return (text, kodierung,
+            "Die Datei laesst sich nicht in lesbaren Text uebersetzen -- "
+            "moeglicherweise ist sie beschaedigt oder gar keine Textdatei. "
+            "Bitte sie neu als UTF-8 oder Excel-Arbeitsmappe speichern.")
+
+
 def decode_bytes(data: bytes) -> tuple[str, str, str]:
     """Bytes in Text wandeln und dabei die Kodierung bestimmen.
 
@@ -142,6 +235,8 @@ def decode_bytes(data: bytes) -> tuple[str, str, str]:
             logger.warning("Byte-Order-Mark meldet %s, der Inhalt passt "
                            "nicht dazu", kodierung)
         else:
+            if kodierung in ("utf-16", "utf-32"):
+                return _pruefe_byte_reihenfolge(data, text, kodierung)
             return text, kodierung, ""
 
     # 2. Zweibyte-Kodierung ohne Marke.

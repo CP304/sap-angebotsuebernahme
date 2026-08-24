@@ -131,6 +131,20 @@ oeffnet, landet Zeichensalat im Eingabefeld (leere Rechtecke zwischen den
 Buchstaben). Die Anwendung faengt das ab und sagt es auch, aber der
 zuverlaessige Weg ist *Datei oeffnen ...*.
 
+Die Aufzeichnung darf nachbearbeitet sein. Gelesen werden auch:
+
+| Schreibweise | Beispiel |
+|---|---|
+| anderer Objektname | `sess.findById(...)` statt `session.findById(...)` |
+| beliebige Gross-/Kleinschreibung | `FindById`, `.Text` — VBS unterscheidet keine |
+| verkettete Aufrufe (Subscreen) | `findById("wnd[0]/usr/subSUB0:...").findById("ctxtEINA-LIFNR")` |
+| Zeilenfortsetzung | Unterstrich am Zeilenende |
+| Anfuehrungszeichen im Wert | `"Dichtring 1"" NPT"` ergibt `Dichtring 1" NPT` |
+| Positionstabellen | `tblSAPLMEGUITC_1211/ctxtMEPO1211-EMATN[3,0]` |
+
+Findet die Seite nichts, nennt sie den Grund — Zeichensalat, keine
+`findById`-Zeile, oder eine Aufzeichnung, die nur Klicks enthaelt.
+
 ### 3.3 Von Hand nacharbeiten
 
 Was der Automatismus nicht findet, tragen Sie direkt in der Tabelle ein.

@@ -48,6 +48,12 @@ from ..utils.textkodierung import entferne_nullzeichen
 
 logger = logging.getLogger(__name__)
 
+#: Ein einzelner ``findById("...")``-Aufruf aus einer Aufzeichnung.
+_FIND_BY_ID = re.compile(r'findById\s*\(\s*"([^"]*)"\s*\)', re.I)
+
+#: Zeilenfortsetzung: ein Unterstrich allein hinter Leerraum am Zeilenende.
+_FORTSETZUNG = re.compile(r"[ \t]_[ \t]*\r?\n[ \t]*")
+
 #: Kennzeichnung im Beschreibungstext, solange eine ID nicht geprueft ist
 TODO_MARKER = "TODO: kundenspezifische SAP-GUI-ID pruefen"
 
@@ -840,14 +846,27 @@ class SelectorRegistry:
         Damit kann der Anwender eine ``.vbs`` einlesen und die IDs per Klick
         den Feldern zuordnen, statt sie abzutippen.
         """
-        pattern = re.compile(r'findById\(\s*"([^"]+)"\s*\)')
-        seen: list[str] = []
         # Aus einem Editor kopiert, der die UTF-16-Aufzeichnung falsch
         # geoeffnet hat, steht zwischen je zwei Buchstaben ein Nullzeichen.
         # Die IDs bestehen nur aus ASCII -- ohne die Nullzeichen sind sie
-        # wieder vollstaendig lesbar.
-        for match in pattern.finditer(entferne_nullzeichen(vbs_text)):
-            element_id = match.group(1)
+        # wieder vollstaendig lesbar.  Ein Unterstrich am Zeilenende setzt
+        # die Anweisung in der naechsten Zeile fort.
+        text = entferne_nullzeichen(vbs_text)
+        text = _FORTSETZUNG.sub(" ", text)
+
+        seen: list[str] = []
+        for line in text.split("\n"):
+            # VBS kennt keine Gross- und Kleinschreibung, der Objektname vor
+            # dem Aufruf ist frei waehlbar -- beides darf nicht darueber
+            # entscheiden, ob eine Aufzeichnung lesbar ist.
+            treffer = [t.strip("/") for t in _FIND_BY_ID.findall(line)
+                       if t.strip("/")]
+            if not treffer:
+                continue
+            # Mehrere Aufrufe in einer Zeile sind eine Kette ueber einen
+            # Subscreen und meinen zusammen ein Feld:
+            # findById("wnd[0]/usr/subSUB0:...").findById("ctxtEINA-LIFNR")
+            element_id = "/".join(treffer)
             if element_id not in seen:
                 seen.append(element_id)
         return seen

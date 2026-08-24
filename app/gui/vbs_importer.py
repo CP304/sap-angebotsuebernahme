@@ -87,6 +87,14 @@ _ID_HINWEISE: tuple[tuple[str, str], ...] = (
     ("IDNLF", "vendor_material_number"),
     ("LIFNR", "vendor_number"),
     ("MATNR", "material_number"),
+    # In den Positionstabellen von Bestellung und Kontrakt heissen
+    # dieselben Felder anders als im Infosatz -- die Aufzeichnungen fuer
+    # ME21N und ME31K sind laut Einrichtungsanleitung ausdruecklich
+    # vorgesehen, also gehoeren ihre Namen hierher.
+    ("EMATN", "material_number"),
+    ("EEIND", "delivery_date"),
+    ("KDATB", "valid_from"),
+    ("KDATE", "valid_to"),
     ("EKORG", "purchasing_org"),
     ("WERKS", "plant"),
     ("MEINS", "uom"),

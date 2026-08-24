@@ -154,6 +154,41 @@ class VorschlagTest(unittest.TestCase):
         self.assertEqual(self._vorschlag("wnd[0]/usr/txtEINE-PEINH"),
                          "price_unit")
 
+    def test_positionsfelder_der_bestellung_und_des_kontrakts(self):
+        """In ME21N und ME31K heissen dieselben Felder anders.
+
+        Die Einrichtungsanleitung sieht Aufzeichnungen dieser beiden
+        Transaktionen ausdruecklich vor.  Deren Positionstabelle benutzt
+        aber nicht die Namen des Infosatzes: die Materialnummer heisst
+        dort EMATN, der Liefertermin EEIND, die Kontraktgueltigkeit
+        KDATB/KDATE.  Ohne diese Namen steht der Anwender vor einer
+        Tabelle ganz ohne Vorauswahl.
+        """
+        faelle = (
+            ("wnd[0]/usr/tblSAPLMEGUITC_1211/ctxtMEPO1211-EMATN[3,0]",
+             "material_number"),
+            ("wnd[0]/usr/tblSAPLMEGUITC_1211/ctxtMEPO1211-EEIND[8,0]",
+             "delivery_date"),
+            ("wnd[0]/usr/ctxtEKKO-KDATB", "valid_from"),
+            ("wnd[0]/usr/ctxtEKKO-KDATE", "valid_to"),
+        )
+        for kennung, erwartet in faelle:
+            with self.subTest(kennung=kennung.split("/")[-1]):
+                self.assertEqual(self._vorschlag(kennung), erwartet)
+
+    def test_neue_namen_verdraengen_die_alten_nicht(self):
+        """Die Zuordnung geht ueber Teilzeichenketten -- also nachpruefen."""
+        faelle = (
+            ("wnd[0]/usr/ctxtEINA-MATNR", "material_number"),
+            ("wnd[0]/usr/ctxtEINE-DATAB", "valid_from"),
+            ("wnd[0]/usr/ctxtEINE-DATBI", "valid_to"),
+            ("wnd[0]/usr/ctxtEKPO-EINDT", "delivery_date"),
+            ("wnd[0]/usr/ctxtEINA-IDNLF", "vendor_material_number"),
+        )
+        for kennung, erwartet in faelle:
+            with self.subTest(kennung=kennung.split("/")[-1]):
+                self.assertEqual(self._vorschlag(kennung), erwartet)
+
     def test_unbekanntes_feld_bekommt_keinen_vorschlag(self):
         self.assertEqual(self._vorschlag("wnd[0]/usr/ctxtZZ-EIGEN"), "")
 

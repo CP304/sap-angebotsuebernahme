@@ -144,6 +144,54 @@ class KodierungErkennenTest(unittest.TestCase):
         self.assertIn("UTF-8", warnung)
 
 
+class FalscheByteReihenfolgeTest(unittest.TestCase):
+    """Wenn die Byte-Order-Mark luegt.
+
+    Eine Marke kann falsch sein -- etwa weil ein Werkzeug den Kopf
+    kopiert und den Rumpf unveraendert durchgereicht hat.  Kein Codec
+    meldet dabei einen Fehler: aus einer Preisliste wird ostasiatischer
+    Zeichensalat, und die Tabellenerkennung findet nichts.  Das ist an
+    der Schrift erkennbar und wird nicht stillschweigend hingenommen.
+    """
+
+    def test_marke_sagt_be_inhalt_ist_le(self):
+        text, kodierung, warnung = decode_bytes(
+            b"\xfe\xff" + ANGEBOT_TABELLE.encode("utf-16-le"))
+        self.assertIn("Dichtring 40x52", text)
+        self.assertEqual(kodierung, "utf-16-le")
+        self.assertTrue(warnung)
+
+    def test_marke_sagt_le_inhalt_ist_be(self):
+        text, kodierung, warnung = decode_bytes(
+            b"\xff\xfe" + ANGEBOT_TABELLE.encode("utf-16-be"))
+        self.assertIn("Dichtring 40x52", text)
+        self.assertEqual(kodierung, "utf-16-be")
+        self.assertTrue(warnung)
+
+    def test_ehrliche_marke_wird_nicht_umgedreht(self):
+        """Was stimmt, bleibt -- und ohne Warnung."""
+        for marke, kodierung in ((b"\xff\xfe", "utf-16-le"),
+                                 (b"\xfe\xff", "utf-16-be")):
+            with self.subTest(kodierung=kodierung):
+                text, erkannt, warnung = decode_bytes(
+                    marke + ANGEBOT_TABELLE.encode(kodierung))
+                self.assertIn("Dichtring 40x52", text)
+                self.assertEqual(erkannt, "utf-16")
+                self.assertEqual(warnung, "")
+
+    def test_angebot_mit_falscher_marke_ergibt_positionen(self):
+        """Der ganze Weg, nicht nur die Kodierung."""
+        ordner = Path(tempfile.mkdtemp(prefix="sap_bom_luegt_"))
+        pfad = ordner / "Angebot.txt"
+        pfad.write_bytes(b"\xfe\xff" + ANGEBOT_TABELLE.encode("utf-16-le"))
+        angebot = OfferImportService(Settings()).import_file(pfad)
+        self.assertEqual(len(angebot.positions), 2)
+        # Repariert ist nicht verschwiegen: der Anwender wird darauf
+        # hingewiesen, dass die Datei einen falschen Kopf traegt.
+        self.assertTrue(any("Bytereihenfolge" in befund.message
+                            for befund in angebot.issues))
+
+
 class NullzeichenEntfernenTest(unittest.TestCase):
     """Rettungsanker fuer bereits falsch dekodierten Text."""
 
@@ -263,6 +311,87 @@ class AngebotAlsUnicodeTextTest(unittest.TestCase):
             "Angebot_Umlaute.txt", b"\xff\xfe" + inhalt.encode("utf-16-le"))
         beschreibungen = [p.description for p in angebot.positions]
         self.assertIn("Kegelstück grün", beschreibungen)
+
+
+class ContainerTest(unittest.TestCase):
+    """UTF-16 in der Mail und im Archiv.
+
+    Angebote kommen selten als blanke Datei -- sie haengen an einer Mail
+    oder liegen in einem ZIP.  Die Kodierungserkennung muss deshalb auch
+    dort greifen, wo die Datei erst ausgepackt wird.
+    """
+
+    def setUp(self):
+        self.ordner = Path(tempfile.mkdtemp(prefix="sap_container_"))
+        self.dienst = OfferImportService(Settings())
+
+    def test_mail_mit_utf16_anhang(self):
+        from email.message import EmailMessage
+        for endung, trenner in ((".txt", "\t"), (".csv", ";")):
+            with self.subTest(endung=endung):
+                inhalt = ANGEBOT_TABELLE.replace("\t", trenner)
+                nachricht = EmailMessage()
+                nachricht["From"] = "vertrieb@nordtec.example"
+                nachricht["Subject"] = "Angebot 4711"
+                nachricht.set_content("Guten Tag, anbei unser Angebot.")
+                nachricht.add_attachment(
+                    b"\xff\xfe" + inhalt.encode("utf-16-le"),
+                    maintype="text", subtype="plain",
+                    filename=f"angebot{endung}")
+                pfad = self.ordner / f"mail{endung}.eml"
+                pfad.write_bytes(nachricht.as_bytes())
+                angebot = self.dienst.import_file(pfad)
+                self.assertEqual(len(angebot.positions), 2)
+
+    def test_zip_mit_utf16_datei(self):
+        import zipfile
+        pfad = self.ordner / "sammlung.zip"
+        with zipfile.ZipFile(pfad, "w") as archiv:
+            archiv.writestr("angebot.txt",
+                            b"\xff\xfe" + ANGEBOT_TABELLE.encode("utf-16-le"))
+        angebot = self.dienst.import_file(pfad)
+        self.assertEqual(len(angebot.positions), 2)
+
+
+class UnauffaelligeRandfaelleTest(unittest.TestCase):
+    """Was nicht gehen kann, darf wenigstens nicht abstuerzen."""
+
+    def setUp(self):
+        self.ordner = Path(tempfile.mkdtemp(prefix="sap_rand_"))
+        self.dienst = OfferImportService(Settings())
+
+    def _positionen(self, name: str, rohdaten: bytes) -> int:
+        pfad = self.ordner / name
+        pfad.write_bytes(rohdaten)
+        return len(self.dienst.import_file(pfad).positions)
+
+    def test_leere_und_unvollstaendige_dateien(self):
+        faelle = (
+            ("leer.txt", b""),
+            ("nur_leerraum.txt", b"   \n\n  \n"),
+            ("nur_marke.txt", b"\xff\xfe"),
+            ("halbe_marke.txt", b"\xff"),
+        )
+        for name, rohdaten in faelle:
+            with self.subTest(name=name):
+                self.assertEqual(self._positionen(name, rohdaten), 0)
+
+    def test_ungerade_byte_zahl_bei_utf16(self):
+        """Ein abgeschnittenes letztes Zeichen kostet nicht die Datei."""
+        rohdaten = (b"\xff\xfe" + ANGEBOT_TABELLE.encode("utf-16-le")
+                    + b"\x41")
+        self.assertEqual(self._positionen("abgeschnitten.txt", rohdaten), 2)
+
+    def test_vereinzeltes_nullbyte_in_utf8(self):
+        rohdaten = ANGEBOT_TABELLE.encode("utf-8").replace(
+            b"Dichtring", b"Dicht\x00ring")
+        self.assertEqual(self._positionen("nullbyte.txt", rohdaten), 2)
+
+    def test_gemischte_zeilenenden(self):
+        inhalt = ("Position\tMaterial\tBezeichnung\tMenge\tEinheit\tPreis\tWaehrung\r\n"
+                  "10\t4711001\tDichtring 40x52\t100\tST\t2,95\tEUR\n"
+                  "20\t4711002\tFlanschdichtung DN50\t50\tST\t7,40\tEUR\r\n")
+        self.assertEqual(self._positionen("gemischt.txt", inhalt.encode()), 2)
 
 
 if __name__ == "__main__":  # pragma: no cover
