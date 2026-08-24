@@ -30,6 +30,9 @@ from PySide6.QtWidgets import (
 )
 
 from ..sap.feldnamen import beschreibe_feld
+from ..services.selektoren_excel import (exportiere_selektoren,
+                                         lies_selektoren,
+                                         uebernimm_selektoren)
 from ..sap.selectors import REQUIRED_SCREENS, SelectorRegistry
 from ..services.vbs_parser import TRANSACTION_NAMES, detect_transaction
 from ..utils.textkodierung import decode_bytes
@@ -109,6 +112,20 @@ class SelectorView(QWidget):
         import_button = QPushButton("Aufzeichnung (.vbs) einlesen ...")
         import_button.clicked.connect(self._import_vbs)
         buttons.addWidget(import_button)
+
+        excel_export = QPushButton("Nach Excel sichern ...")
+        excel_export.setToolTip(
+            "Alle Feld-IDs als Arbeitsmappe sichern -- zum Aufheben, "
+            "Weitergeben oder Durchsehen")
+        excel_export.clicked.connect(self._export_excel)
+        buttons.addWidget(excel_export)
+
+        excel_import = QPushButton("Aus Excel einlesen ...")
+        excel_import.setToolTip(
+            "Eine gesicherte Arbeitsmappe zurueckspielen oder die eines "
+            "Kollegen uebernehmen")
+        excel_import.clicked.connect(self._import_excel)
+        buttons.addWidget(excel_import)
 
         verify_visible = QPushButton("Sichtbare als geprueft markieren")
         verify_visible.clicked.connect(self._verify_visible)
@@ -339,6 +356,85 @@ class SelectorView(QWidget):
             "ungeprueft: bitte am Zielsystem kontrollieren und dann den "
             "Haken „Geprueft“ setzen. Vorher schreibt die Anwendung damit "
             "nicht in ein echtes SAP.")
+
+    def _export_excel(self) -> None:
+        """Alle Feld-IDs als Arbeitsmappe sichern."""
+        vorschlag = str(Path(self.settings.selectors_file).with_name(
+            "SAP-Feld-IDs.xlsx"))
+        pfad, _filter = QFileDialog.getSaveFileName(
+            self, "Feld-IDs sichern", vorschlag, "Excel-Arbeitsmappe (*.xlsx)")
+        if not pfad:
+            return
+        if not pfad.lower().endswith(".xlsx"):
+            pfad += ".xlsx"
+        try:
+            ziel = exportiere_selektoren(self.registry, Path(pfad))
+        except (OSError, RuntimeError) as fehler:
+            show_error(self, "Sichern fehlgeschlagen",
+                       "Die Feld-IDs konnten nicht als Excel gesichert werden.",
+                       str(fehler))
+            return
+        QMessageBox.information(
+            self, "Gesichert",
+            f"Die Feld-IDs wurden gesichert:\n{ziel}\n\n"
+            "Die Mappe enthaelt zu jedem Feld die ID, ihre Bedeutung im "
+            "Klartext und eine Spalte fuer Bemerkungen. Sie laesst sich "
+            "hier wieder einlesen.")
+
+    def _import_excel(self) -> None:
+        """Eine gesicherte Arbeitsmappe zurueckspielen."""
+        pfad, _filter = QFileDialog.getOpenFileName(
+            self, "Gesicherte Feld-IDs waehlen", "",
+            "Excel-Arbeitsmappe (*.xlsx *.xlsm);;Alle Dateien (*.*)")
+        if not pfad:
+            return
+        try:
+            ergebnis = lies_selektoren(self.registry, Path(pfad))
+        except (OSError, RuntimeError, ValueError) as fehler:
+            show_error(self, "Einlesen fehlgeschlagen",
+                       "Die Arbeitsmappe konnte nicht gelesen werden.",
+                       str(fehler))
+            return
+
+        if not ergebnis.hat_aenderungen:
+            QMessageBox.information(
+                self, "Nichts zu aendern",
+                "Die Mappe stimmt mit dem aktuellen Stand ueberein.\n\n"
+                + "\n".join(ergebnis.warnungen))
+            return
+
+        # Alt und neu nebeneinander -- wer nicht sieht, was ueberschrieben
+        # wird, bestaetigt im Zweifel blind.
+        zeilen = []
+        for (screen_key, element_key), (alt_id, neu_id) in \
+                sorted(ergebnis.geaendert.items())[:12]:
+            beschreibung = self.registry.get(screen_key, element_key).description
+            zeilen.append(f"{screen_key}.{element_key} — {beschreibung}\n"
+                          f"    bisher: {alt_id or '(leer)'}\n"
+                          f"    neu:    {neu_id}")
+        if len(ergebnis.geaendert) > 12:
+            zeilen.append(f"... und {len(ergebnis.geaendert) - 12} weitere")
+        if ergebnis.freigaben:
+            zeilen.append(f"Ausserdem {len(ergebnis.freigaben)} unveraenderte "
+                          "Feld-ID(s), die laut Mappe geprueft sind.")
+        zeilen.extend(ergebnis.warnungen)
+
+        if not ask_yes_no(
+                self, "Aus Excel uebernehmen",
+                f"{len(ergebnis.geaendert)} Feld-ID(s) weichen ab.",
+                "\n\n".join(zeilen)):
+            return
+
+        anzahl = uebernimm_selektoren(self.registry, ergebnis)
+        self.reload()
+        self.changed.emit()
+        QMessageBox.information(
+            self, "Uebernommen",
+            f"{anzahl} Feld(er) uebernommen.\n\nGeaenderte IDs gelten wieder "
+            "als ungeprueft: ob eine ID aus einer fremden Mappe zu diesem "
+            "System passt, weiss nur, wer sie hier kontrolliert. Bitte "
+            "pruefen und dann den Haken „Geprueft“ setzen.\n\n"
+            "Nicht vergessen: „Speichern“, damit es dauerhaft gilt.")
 
     def _reset(self) -> None:
         if not ask_yes_no(self, "Zuruecksetzen",
