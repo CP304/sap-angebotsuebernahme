@@ -145,6 +145,17 @@ Die Aufzeichnung darf nachbearbeitet sein. Gelesen werden auch:
 Findet die Seite nichts, nennt sie den Grund — Zeichensalat, keine
 `findById`-Zeile, oder eine Aufzeichnung, die nur Klicks enthaelt.
 
+Zugeordnet wird **je Transaktion**: angeboten werden die Felder der
+Bildschirme, die zur erkannten Transaktion gehoeren. Dieselbe Bedeutung
+in zwei Vorgaengen (Lieferant im Infosatz *und* im Kontrakt) sind zwei
+getrennte Eintraege — genau so, wie SAP sie fuehrt.
+
+**Schaltflaechen werden nie automatisch zugeordnet.** Ein Knopf traegt
+keinen Feldnamen, nur eine Nummer (`btn[3]`), und die laesst sich nicht
+uebertragen. Solche Felder auf der Seite *SAP-Feld-IDs* von Hand
+eintragen — dort zeigt die Spalte „So heisst das Feld in SAP“ zu jeder
+eingetragenen ID, welches Feld sie tatsaechlich meint.
+
 ### 3.3 Von Hand nacharbeiten
 
 Was der Automatismus nicht findet, tragen Sie direkt in der Tabelle ein.

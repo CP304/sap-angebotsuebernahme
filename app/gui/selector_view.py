@@ -29,14 +29,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..sap.feldnamen import beschreibe_feld
 from ..sap.selectors import REQUIRED_SCREENS, SelectorRegistry
+from ..services.vbs_parser import TRANSACTION_NAMES, detect_transaction
 from ..utils.textkodierung import decode_bytes
 from .dialogs import ask_yes_no, show_error
 from .style import Colors
 
 logger = logging.getLogger(__name__)
 
-_COLUMNS = ("Maske / Feld", "Beschreibung", "SAP-GUI-ID", "Pflicht", "Geprueft")
+_COLUMNS = ("Maske / Feld", "Beschreibung", "SAP-GUI-ID",
+            "So heisst das Feld in SAP", "Pflicht", "Geprueft")
 
 
 class SelectorView(QWidget):
@@ -94,6 +97,7 @@ class SelectorView(QWidget):
         self.tree.setAlternatingRowColors(True)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.tree.header().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.itemChanged.connect(self._item_changed)
         layout.addWidget(self.tree, 1)
 
@@ -140,6 +144,7 @@ class SelectorView(QWidget):
                     screen.transaction,
                     screen.note,
                     "",
+                    "",
                     f"{verified}/{required} geprueft",
                 ])
                 parent.setFlags(parent.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -147,23 +152,28 @@ class SelectorView(QWidget):
                 font.setBold(True)
                 parent.setFont(0, font)
                 if required and verified < required:
-                    parent.setForeground(4, Qt.GlobalColor.darkYellow)
+                    parent.setForeground(5, Qt.GlobalColor.darkYellow)
 
                 matched = 0
                 for key, selector in screen.elements.items():
                     haystack = f"{key} {selector.description} {selector.id}".lower()
                     if search and search not in haystack:
                         continue
+                    # Was der SAP-Feldname bedeutet.  Beim Eintragen von
+                    # Hand ist das die eigentliche Hilfe: die Beschreibung
+                    # sagt, welches Feld gemeint ist, diese Spalte sagt,
+                    # ob die eingetragene ID dazu passt.
                     child = QTreeWidgetItem([
                         key,
                         selector.description,
                         selector.id,
+                        beschreibe_feld(selector.id),
                         "nein" if selector.optional else "ja",
                         "",
                     ])
                     child.setFlags(child.flags() | Qt.ItemFlag.ItemIsEditable
                                    | Qt.ItemFlag.ItemIsUserCheckable)
-                    child.setCheckState(4, Qt.CheckState.Checked if selector.verified
+                    child.setCheckState(5, Qt.CheckState.Checked if selector.verified
                                         else Qt.CheckState.Unchecked)
                     child.setData(0, Qt.ItemDataRole.UserRole, (screen_key, key))
                     if not selector.verified and not selector.optional:
@@ -208,11 +218,13 @@ class SelectorView(QWidget):
             if new_id != selector.id:
                 self.registry.set_id(screen_key, element_key, new_id)
                 self._loading = True
-                item.setCheckState(4, Qt.CheckState.Unchecked)
+                item.setCheckState(5, Qt.CheckState.Unchecked)
+                # Die Lesehilfe gilt fuer die neue ID, nicht mehr fuer die alte.
+                item.setText(3, beschreibe_feld(new_id))
                 self._loading = False
                 logger.info("Feld-ID geaendert: %s.%s = %s", screen_key, element_key, new_id)
-        elif column == 4:
-            selector.verified = item.checkState(4) == Qt.CheckState.Checked
+        elif column == 5:
+            selector.verified = item.checkState(5) == Qt.CheckState.Checked
         self._update_summary()
         self.changed.emit()
 
@@ -245,7 +257,7 @@ class SelectorView(QWidget):
                     continue
                 screen_key, element_key = data
                 self.registry.get(screen_key, element_key).verified = True
-                child.setCheckState(4, Qt.CheckState.Checked)
+                child.setCheckState(5, Qt.CheckState.Checked)
         self._loading = False
         self._update_summary()
         self.changed.emit()
@@ -276,31 +288,57 @@ class SelectorView(QWidget):
                        "Stammt sie wirklich vom SAP GUI Script Recorder?")
             return
 
-        mapping = self.registry.suggest_mapping(ids)
+        # Aus welcher Transaktion stammt die Aufzeichnung?  Das grenzt die
+        # Zuordnung auf deren Bildschirme ein: eine ME11-Aufzeichnung kann
+        # keine Kontraktfelder enthalten, und was nicht zugeordnet werden
+        # kann, wird auch nicht ueberschrieben.
+        transaktion = detect_transaction(text)
+        herkunft = (f" aus {transaktion}"
+                    f" ({TRANSACTION_NAMES.get(transaktion, '')})".rstrip(" ()")
+                    if transaktion else "")
+
+        mapping = self.registry.suggest_mapping(ids, transaktion)
         if not mapping:
             QMessageBox.information(
-                self, "Keine Zuordnung moeglich",
-                f"{len(ids)} ID(s) gelesen, aber keine passt zu den konfigurierten "
-                f"Feldern. Bitte die IDs von Hand eintragen.")
+                self, "Nichts zu aendern",
+                f"{len(ids)} ID(s) gelesen{herkunft}.\n\n"
+                "Es gibt nichts zu aktualisieren: entweder stimmen die "
+                "hinterlegten IDs bereits mit der Aufzeichnung ueberein, "
+                "oder die aufgezeichneten Felder lassen sich nicht "
+                "zweifelsfrei zuordnen.\n\n"
+                "Schaltflaechen werden bewusst nie zugeordnet -- welcher "
+                "Knopf welcher ist, verraet nur seine Nummer, und die ist "
+                "nicht uebertragbar. Solche Felder bitte von Hand eintragen.")
             return
 
-        preview = "\n".join(f"{screen}.{key}\n    {new_id}"
-                            for (screen, key), new_id in list(mapping.items())[:15])
-        more = "" if len(mapping) <= 15 else f"\n... und {len(mapping) - 15} weitere"
+        # Alt und neu nebeneinander: sonst sieht der Anwender nicht, was
+        # ueberschrieben wird, und bestaetigt im Zweifel blind.
+        zeilen = []
+        for (screen_key, element_key), neue_id in sorted(mapping.items())[:12]:
+            selector = self.registry.get(screen_key, element_key)
+            zeilen.append(f"{screen_key}.{element_key} — {selector.description}\n"
+                          f"    bisher: {selector.id or '(leer)'}\n"
+                          f"    neu:    {neue_id}")
+        preview = "\n\n".join(zeilen)
+        more = "" if len(mapping) <= 12 else f"\n\n... und {len(mapping) - 12} weitere"
         if not ask_yes_no(self, "Zuordnungen uebernehmen",
-                          f"{len(mapping)} Feld-ID(s) koennen aktualisiert werden.",
+                          f"{len(mapping)} von {len(ids)} gelesenen ID(s)"
+                          f"{herkunft} weichen ab und koennen uebernommen werden.",
                           preview + more):
             return
 
         for (screen_key, element_key), new_id in mapping.items():
             self.registry.set_id(screen_key, element_key, new_id)
-        logger.info("%d Feld-IDs aus Aufzeichnung uebernommen (%s)", len(mapping), path)
+        logger.info("%d Feld-IDs aus Aufzeichnung uebernommen (%s, %s)",
+                    len(mapping), path, transaktion or "Transaktion unbekannt")
         self.reload()
         self.changed.emit()
         QMessageBox.information(
             self, "Uebernommen",
-            f"{len(mapping)} Feld-ID(s) uebernommen.\n\nBitte pruefen Sie die Zuordnung "
-            f"und setzen Sie anschliessend die Haken „Geprueft“.")
+            f"{len(mapping)} Feld-ID(s) uebernommen.\n\nSie gelten als "
+            "ungeprueft: bitte am Zielsystem kontrollieren und dann den "
+            "Haken „Geprueft“ setzen. Vorher schreibt die Anwendung damit "
+            "nicht in ein echtes SAP.")
 
     def _reset(self) -> None:
         if not ask_yes_no(self, "Zuruecksetzen",

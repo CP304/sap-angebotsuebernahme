@@ -48,6 +48,33 @@ from ..utils.textkodierung import entferne_nullzeichen
 
 logger = logging.getLogger(__name__)
 
+#: Steuerungspraefix eines Bedienelements -- es sagt nur, um welche Art
+#: es sich handelt, und nichts ueber die Bedeutung.
+_ELEMENT_PRAEFIXE = ("ctxt", "txt", "cmbx", "cmb", "chk", "rad", "lbl", "btn",
+                     "tbl", "tabs", "tabp", "ssub", "sub")
+
+
+def _technischer_name(element_id: str) -> str:
+    """Der Feldname am Ende einer ID -- ohne Pfad, Praefix und Index."""
+    rest = (element_id or "").split("/")[-1]
+    for praefix in _ELEMENT_PRAEFIXE:
+        if rest.lower().startswith(praefix):
+            rest = rest[len(praefix):]
+            break
+    return re.sub(r"\[[^\]]*\]$", "", rest).upper()
+
+
+def _ist_feldname(name: str) -> bool:
+    """Traegt dieses Element ueberhaupt einen Feldnamen?
+
+    Eingabefelder heissen nach ihrer Datenbanktabelle und ihrem Feld
+    (``EINA-LIFNR``).  Schaltflaechen, Fenster und Registerkarten nicht --
+    dort bleibt nach dem Abschneiden von Praefix und Index nichts uebrig
+    oder nur ein Rest, der nichts identifiziert.
+    """
+    return "-" in name and len(name) > 3
+
+
 #: Ein einzelner ``findById("...")``-Aufruf aus einer Aufzeichnung.
 _FIND_BY_ID = re.compile(r'findById\s*\(\s*"([^"]*)"\s*\)', re.I)
 
@@ -896,29 +923,67 @@ class SelectorRegistry:
             treffer.append("common")
         return treffer
 
-    def suggest_mapping(self, vbs_ids: list[str]) -> dict[tuple[str, str], str]:
+    def suggest_mapping(self, vbs_ids: list[str],
+                        transaction: str = "") -> dict[tuple[str, str], str]:
         """Aufgezeichnete IDs den konfigurierten Feldern zuordnen (Vorschlag).
 
         Zugeordnet wird ueber den technischen Feldnamen am Ende der ID
-        (z. B. ``EINE-NETPR``), nicht ueber den kompletten Pfad -- der
-        Praefix unterscheidet sich je nach Bildaufbau.
-        """
-        def tail(element_id: str) -> str:
-            base = element_id.split("/")[-1]
-            base = re.sub(r"\[[^\]]*\]$", "", base)
-            return re.sub(r"^(ctxt|txt|chk|rad|cmb|btn|lbl|tbl|tabs|tabp|ssub|sub)", "",
-                          base).upper()
+        (``EINE-NETPR``), nicht ueber den kompletten Pfad -- der
+        unterscheidet sich je nach Bildaufbau und Release, der Feldname
+        nicht.
 
-        by_tail: dict[str, str] = {}
+        Drei Dinge werden dabei bewusst NICHT zugeordnet:
+
+        *Elemente ohne Feldnamen.*  Schaltflaechen und Fenster
+        (``wnd[0]/tbar[0]/btn[3]``) haben keinen -- am Ende steht nur die
+        Nummer des Knopfes.  Frueher galten sie deshalb alle als derselbe
+        leere Name und damit als derselbe Treffer: ein einziger
+        Zurueck-Knopf in einer Aufzeichnung schrieb sich in Sichern,
+        Abbrechen, Beenden, Konditionen und ein Dutzend weiterer Felder.
+        Danach haette "Sichern" auf "Zurueck" gedrueckt.  Welcher Knopf
+        welcher ist, verraet nur seine Nummer, und die laesst sich nicht
+        uebertragen -- also wird geschwiegen.
+
+        *Felder fremder Transaktionen.*  Eine Aufzeichnung aus ME11 kann
+        keine Kontraktfelder enthalten.  Ist die Transaktion bekannt,
+        werden nur ihre Bildschirme betrachtet.
+
+        *Mehrdeutiges.*  Passt ein Feldname auf mehrere Elemente oder
+        kommt er in der Aufzeichnung mehrfach vor, wird nichts
+        vorgeschlagen -- ein falscher Vorschlag, den jemand ungeprueft
+        bestaetigt, schreibt spaeter in das falsche Feld.
+
+        Zurueck kommen nur Felder, deren ID sich tatsaechlich aendert.
+        """
+        aufgezeichnet: dict[str, list[str]] = {}
         for element_id in vbs_ids:
-            by_tail.setdefault(tail(element_id), element_id)
+            name = _technischer_name(element_id)
+            if not _ist_feldname(name):
+                continue
+            aufgezeichnet.setdefault(name, []).append(element_id)
+
+        screens = (self.screens_fuer_transaktion(transaction) if transaction
+                   else list(self.screens))
+
+        # Erst sammeln, welches Element welchen Namen traegt -- damit
+        # Mehrdeutigkeit auffaellt, bevor etwas zugeordnet wird.
+        ziele: dict[str, list[tuple[str, str]]] = {}
+        for screen_key in screens:
+            screen = self.screens.get(screen_key)
+            if screen is None:
+                continue
+            for element_key, selector in screen.elements.items():
+                name = _technischer_name(selector.id)
+                if not _ist_feldname(name):
+                    continue
+                ziele.setdefault(name, []).append((screen_key, element_key))
 
         mapping: dict[tuple[str, str], str] = {}
-        for screen_key, screen in self.screens.items():
-            for element_key, selector in screen.elements.items():
-                if not selector.id:
-                    continue
-                candidate = by_tail.get(tail(selector.id))
-                if candidate and candidate != selector.id:
-                    mapping[(screen_key, element_key)] = candidate
+        for name, kandidaten in ziele.items():
+            quellen = aufgezeichnet.get(name)
+            if not quellen or len(quellen) > 1 or len(kandidaten) > 1:
+                continue
+            screen_key, element_key = kandidaten[0]
+            if quellen[0] != self.screens[screen_key].elements[element_key].id:
+                mapping[(screen_key, element_key)] = quellen[0]
         return mapping
