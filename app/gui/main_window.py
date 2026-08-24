@@ -444,6 +444,7 @@ class MainWindow(QMainWindow):
         self.table.requestVendorAssignment.connect(self.assign_vendor)
         self.table.requestRemove.connect(self._remove_positions)
         self.table.requestFillDown.connect(self._fill_down)
+        self.table.requestScaleEdit.connect(self._edit_scales)
         splitter.addWidget(self.table)
 
         self.details = PositionDetails(self.comparison, settings=self.settings)
@@ -1722,6 +1723,29 @@ class MainWindow(QMainWindow):
         """
         self._add_positions([position], "Schnellerfassung")
         self.quick_entry.focus_first()
+
+    def _edit_scales(self, position: OfferPosition) -> None:
+        """Mengenstaffel einer Position von Hand pflegen.
+
+        Bisher entstanden Staffeln nur beim Zusammenfassen mehrerer
+        Angebotszeilen.  Steht die Staffel im Angebot als Fliesstext, hat
+        der Einkaeufer eine Stufe nachverhandelt, oder soll eine
+        bestehende SAP-Staffel angepasst statt ueberschrieben werden --
+        dann fuehrte bisher kein Weg dorthin.
+        """
+        from .scale_dialog import ScaleDialog
+
+        dialog = ScaleDialog(position, self)
+        if dialog.exec() != ScaleDialog.DialogCode.Accepted:
+            return
+        self._snapshot("Mengenstaffel geaendert")
+        meldungen = dialog.uebernehmen()
+        self._revalidate()
+        self.table_model.refresh_row(position.uid)
+        self.details.show_position(position)
+        self._update_counters()
+        if meldungen:
+            self.counter_label.setText(meldungen[0])
 
     def _fill_down(self, key: str) -> None:
         position = self.details.position or self.table.current_position()

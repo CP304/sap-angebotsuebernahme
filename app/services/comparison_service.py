@@ -221,7 +221,27 @@ class ComparisonService:
             return False
         if not record.valid_on(self.effective_date(position)):
             return False
+        if self.scales_changed(position, record):
+            return False
         return True
+
+    def scales_changed(self, position: OfferPosition,
+                       record: SapInfoRecord) -> bool:
+        """Weicht die Mengenstaffel vom Bestand ab?
+
+        Der Grundpreis allein genuegt hier nicht.  Steht in SAP eine
+        dreistufige Staffel und im Angebot nur ein Preis, ist der Satz
+        eben nicht unveraendert -- er wuerde die Stufen verlieren.  Ohne
+        diese Pruefung meldete die Anwendung "unveraendert" und liesse den
+        Anwender in dem Glauben, es sei nichts zu tun.
+
+        Wurde die Staffel nicht gelesen, wird nichts behauptet: "keine
+        Staffel in SAP" und "wir wissen es nicht" sind zweierlei.
+        """
+        if not record.scales_read:
+            return False
+        return position.sorted_scales() != [
+            (Decimal(menge), Decimal(preis)) for menge, preis in record.scales]
 
     # -- Einzelvergleiche (auch von der Validierung genutzt) -------------
     def currency_changed(self, position: OfferPosition,

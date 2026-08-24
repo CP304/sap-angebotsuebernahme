@@ -32,6 +32,12 @@ Verschlechterung, kein Fortschritt.
 - Kodierung: UTF-8, UTF-8 mit BOM, Latin-1, Windows-1252, **UTF-16** (mit und ohne BOM) — so schreibt Excel „Unicode Text (*.txt)" und so kommt der SAP-Listexport heraus
 - Zeilenenden: Windows, Unix, gemischt
 
+### A1. Mengenstaffeln
+- aus mehreren Angebotszeilen desselben Materials zusammengefasst
+- von Hand gepflegt (Kontextmenü → *Mengenstaffel pflegen*)
+- aus SAP gelesen und beim Alt/Neu-Vergleich berücksichtigt
+- nach dem Schreiben zurückgelesen und Stufe für Stufe geprüft
+
 ### B. Tabellenaufbau
 - echte Tabelle · Text mit Tabulatoren · Fließtext · Bild/Scan
 - **keine Kopfzeile**

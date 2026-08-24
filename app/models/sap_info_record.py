@@ -63,6 +63,15 @@ class SapInfoRecord:
     valid_to: date | None = None
     conditions: list[SapCondition] = field(default_factory=list)
 
+    #: Mengenstaffel des Bestandssatzes: (ab-Menge, Preis), aufsteigend.
+    #: Leer heisst: keine Staffel gepflegt ODER nicht gelesen -- welches
+    #: von beidem, sagt :attr:`scales_read`.  Die Unterscheidung ist
+    #: wichtig: "keine Staffel in SAP" und "wir wissen es nicht" duerfen
+    #: nie dasselbe bedeuten, sonst meldet der Vergleich eine
+    #: Staffelaenderung, die keine ist.
+    scales: list[tuple[Decimal, Decimal]] = field(default_factory=list)
+    scales_read: bool = False
+
     # Einkaufsdaten
     lead_time_days: int | None = None
     min_order_qty: Decimal | None = None

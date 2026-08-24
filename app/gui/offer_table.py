@@ -760,6 +760,7 @@ class OfferTableView(QTableView):
     requestDetails = Signal(object)
     requestRemove = Signal(list)             # list[uid]
     requestFillDown = Signal(str)            # Spaltenschluessel
+    requestScaleEdit = Signal(object)        # OfferPosition
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -921,6 +922,10 @@ class OfferTableView(QTableView):
                            lambda: self.requestDetails.emit(position))
             menu.addAction("SAP-Lieferant zuordnen ...",
                            lambda: self.requestVendorAssignment.emit(position))
+            beschriftung = ("Mengenstaffel pflegen ..." if position.has_scales
+                            else "Mengenstaffel anlegen ...")
+            menu.addAction(beschriftung,
+                           lambda: self.requestScaleEdit.emit(position))
             menu.addSeparator()
 
         if positions:
