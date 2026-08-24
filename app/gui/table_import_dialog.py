@@ -56,7 +56,7 @@ from ..utils.parsing import (
     parse_int,
     similarity,
 )
-from ..utils.textkodierung import decode_bytes
+from ..utils.textkodierung import decode_bytes, entferne_nullzeichen
 from .style import Colors
 
 logger = logging.getLogger(__name__)
@@ -283,6 +283,11 @@ class TableImportDialog(QDialog):
         unterstuetzt -- entschieden wird nach dem Trenner, der die gleich-
         maessigste Spaltenzahl ergibt.
         """
+        # Aus Excel oder Outlook kopiert ist der Text sauber.  Kommt er aus
+        # einem Editor, der eine UTF-16-Datei falsch geoeffnet hat, steht
+        # zwischen je zwei Buchstaben ein Nullzeichen -- die Spalten teilen
+        # sich dann zwar richtig auf, aber in jeder Zelle staende Salat.
+        text = entferne_nullzeichen(text)
         lines = [line for line in text.replace("\r\n", "\n").split("\n") if line.strip()]
         if not lines:
             return []

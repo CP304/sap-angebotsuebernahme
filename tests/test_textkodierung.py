@@ -394,5 +394,54 @@ class UnauffaelligeRandfaelleTest(unittest.TestCase):
         self.assertEqual(self._positionen("gemischt.txt", inhalt.encode()), 2)
 
 
+class EingefuegteTabelleTest(unittest.TestCase):
+    """Die Wege, auf denen der Anwender selbst erfasst.
+
+    Neben dem Dateiimport gibt es drei: eine Tabelle einfuegen, eine
+    Datei im Tabellendialog laden, und die Schnellerfassung.  Aus Excel
+    oder Outlook kopiert ist der Text sauber -- kommt er aus einem
+    Editor, der eine UTF-16-Datei falsch geoeffnet hat, traegt er
+    Nullzeichen zwischen den Buchstaben.  Die Spalten teilen sich dann
+    zwar richtig auf, aber in jeder Zelle staende Zeichensalat.
+    """
+
+    ZEILE = "10\t4711001\tDichtring 40x52\t100\tST\t2,95"
+
+    def _wie_aus_falschem_editor(self, text: str) -> str:
+        """Text so verfaelschen, wie ein Editor es tut, der UTF-16 als
+        Windows-1252 oeffnet."""
+        return (b"\xff\xfe" + text.encode("utf-16-le")).decode("cp1252")
+
+    def test_tabellendialog_zerlegt_zeichensalat_richtig(self):
+        try:
+            from app.gui.table_import_dialog import TableImportDialog
+        except ImportError:  # pragma: no cover -- ohne PySide6
+            self.skipTest("PySide6 ist nicht installiert")
+        raster = TableImportDialog._parse_text(
+            self._wie_aus_falschem_editor(self.ZEILE))
+        self.assertEqual(raster, [["10", "4711001", "Dichtring 40x52",
+                                   "100", "ST", "2,95"]])
+
+    def test_schnellerfassung_zerlegt_zeichensalat_richtig(self):
+        try:
+            from app.gui.quick_entry import split_pasted_row
+        except ImportError:  # pragma: no cover -- ohne PySide6
+            self.skipTest("PySide6 ist nicht installiert")
+        self.assertEqual(
+            split_pasted_row(self._wie_aus_falschem_editor(self.ZEILE)),
+            ["10", "4711001", "Dichtring 40x52", "100", "ST", "2,95"])
+
+    def test_sauberer_text_bleibt_unveraendert(self):
+        """Der Normalfall darf sich durch die Bereinigung nicht aendern."""
+        try:
+            from app.gui.quick_entry import split_pasted_row
+            from app.gui.table_import_dialog import TableImportDialog
+        except ImportError:  # pragma: no cover -- ohne PySide6
+            self.skipTest("PySide6 ist nicht installiert")
+        erwartet = ["10", "4711001", "Dichtring 40x52", "100", "ST", "2,95"]
+        self.assertEqual(split_pasted_row(self.ZEILE), erwartet)
+        self.assertEqual(TableImportDialog._parse_text(self.ZEILE), [erwartet])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

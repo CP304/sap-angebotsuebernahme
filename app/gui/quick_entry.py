@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 from ..models.enums import FieldOrigin
 from ..models.offer_position import OfferPosition
 from ..utils.parsing import parse_decimal
+from ..utils.textkodierung import entferne_nullzeichen
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,10 @@ def split_pasted_row(text: str) -> list[str]:
     vorkommt.  Der Aufrufer laesst den Text dann einfach stehen, wo er
     hingeschrieben wurde.
     """
-    zeile = (text or "").splitlines()[0] if text else ""
+    # Wie beim Tabellenimport: aus einem Editor kopierter UTF-16-Text
+    # traegt Nullzeichen zwischen den Buchstaben.
+    text = entferne_nullzeichen(text or "")
+    zeile = text.splitlines()[0] if text else ""
     for trenner in _SEPARATORS:
         if trenner in zeile:
             return [teil.strip() for teil in zeile.split(trenner)]
