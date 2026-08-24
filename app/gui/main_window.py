@@ -176,10 +176,17 @@ class MainWindow(QMainWindow):
         self.vbs_importer = VbsImporterWidget(
             self.settings, self.gateway.selectors)
 
+        # Die beiden Seiten fuer die Feld-IDs gehoeren nebeneinander und in
+        # dieser Reihenfolge: erst die Aufzeichnung einlesen, dann das
+        # Ergebnis pruefen und freigeben.  Die Pflegeseite war bisher zwar
+        # gebaut, aber in keiner Liste eingetragen -- damit war sie ueber
+        # kein Menue erreichbar, obwohl mehrere Meldungen auf sie
+        # verweisen ("bitte auf der Seite SAP-Feld-IDs bestaetigen").
         self._admin_pages = [
             ("Historie", self.history_view),
             ("Zuordnungen", self.mapping_view),
-            ("SAP Feld-ID Zuordnung", self.vbs_importer),
+            ("Aufzeichnung einlesen (.vbs)", self.vbs_importer),
+            ("SAP-Feld-IDs", self.selector_view),
             ("Einstellungen", self.settings_view),
             ("Diagnose", self.diagnosis_view),
             ("Protokoll", self.log_view),

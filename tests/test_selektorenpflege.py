@@ -237,5 +237,67 @@ class PflegeMaskeTest(unittest.TestCase):
         self.assertEqual(kopf[5], "Geprueft")
 
 
+@unittest.skipUnless(HAS_QT, "PySide6 ist nicht installiert")
+class SeiteIstErreichbarTest(unittest.TestCase):
+    """Eine gebaute Seite, die in keinem Menue steht, gibt es nicht.
+
+    Der Fehler, um den es geht
+    --------------------------
+    Die Pflegeseite wurde beim Start erzeugt, ihr Aenderungssignal war
+    verdrahtet -- nur in die Liste der Verwaltungsseiten eingetragen war
+    sie nie.  Damit war sie ueber kein Menue zu oeffnen, obwohl mehrere
+    Meldungen ausdruecklich auf sie verweisen ("bitte pruefen Sie die
+    SAP-Feld-IDs auf der gleichnamigen Seite").  Wer dem folgte, suchte
+    eine Seite, die es im Menue nicht gab.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from app.bootstrap import build_services
+        from app.config.settings import Settings
+        from app.gui.main_window import MainWindow
+
+        cls.app = QApplication.instance() or QApplication([])
+        einstellungen = Settings()
+        einstellungen.use_mock_sap = True
+        einstellungen.dry_run = True
+        einstellungen.ensure_dirs()
+        cls.fenster = MainWindow(einstellungen,
+                                 build_services(einstellungen).as_dict())
+
+    def _seiten(self) -> dict:
+        return {name: widget for name, widget in self.fenster._admin_pages}
+
+    def test_beide_seiten_stehen_im_menue(self):
+        from app.gui.selector_view import SelectorView
+        from app.gui.vbs_importer import VbsImporterWidget
+
+        seiten = self._seiten()
+        self.assertIsInstance(seiten.get("SAP-Feld-IDs"), SelectorView)
+        self.assertIsInstance(seiten.get("Aufzeichnung einlesen (.vbs)"),
+                              VbsImporterWidget)
+
+    def test_erst_einlesen_dann_pruefen(self):
+        """Die Reihenfolge im Menue ist die Reihenfolge der Arbeit."""
+        namen = [name for name, _ in self.fenster._admin_pages]
+        self.assertLess(namen.index("Aufzeichnung einlesen (.vbs)"),
+                        namen.index("SAP-Feld-IDs"))
+
+    def test_jede_gebaute_verwaltungsseite_ist_erreichbar(self):
+        """Damit dasselbe nicht der naechsten Seite passiert."""
+        eingetragen = {id(widget) for _name, widget in self.fenster._admin_pages}
+        for attribut in ("history_view", "mapping_view", "selector_view",
+                         "settings_view", "diagnosis_view", "vbs_importer"):
+            with self.subTest(seite=attribut):
+                widget = getattr(self.fenster, attribut, None)
+                self.assertIsNotNone(widget, attribut)
+                self.assertIn(id(widget), eingetragen,
+                              f"{attribut} ist gebaut, steht aber in keinem Menue")
+
+    def test_die_seite_laesst_sich_oeffnen(self):
+        self.fenster.open_admin("SAP-Feld-IDs")
+        self.assertIsNotNone(self.fenster._admin_window)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
