@@ -160,6 +160,15 @@ class ValidationService:
         acknowledged = self._remember_acknowledged(position.issues)
         position.issues.items = []
 
+        if position.ist_leere_erfassungszeile:
+            # Eine Zeile, in die noch nichts geschrieben wurde, ist eine
+            # Einladung zum Tippen und kein Fehler.  Wuerde sie geprueft,
+            # begruesste die Anwendung jeden, der ohne Datei anfaengt, mit
+            # drei roten Befunden -- fuer etwas, das er gerade erst
+            # anfangen wollte.
+            position.status = PositionStatus.NOT_SELECTED
+            return
+
         self._check_material(position)
         self._check_vendor(position)
         self._check_price(position)

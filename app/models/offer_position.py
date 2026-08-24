@@ -321,9 +321,41 @@ class OfferPosition:
         )
 
     @property
+    def ist_leere_erfassungszeile(self) -> bool:
+        """Eine Zeile, in die noch nichts geschrieben wurde.
+
+        Wer ohne Datei anfangen will, bekommt eine leere Zeile
+        hingestellt und schreibt hinein.  Solange darin nichts steht, ist
+        sie eine Einladung und kein Fehler: sie wird nicht geprueft, nicht
+        gezaehlt und nicht geschrieben.  Sobald der erste Wert darin
+        steht, gilt sie wie jede andere Position.
+
+        Massgeblich sind nur die fachlichen Felder.  Einkaufsorganisation,
+        Werk, Mengeneinheit, Preiseinheit und Waehrung stehen aus der
+        Vorbelegung schon da und sagen nichts darueber aus, ob jemand
+        etwas eingetragen hat.
+        """
+        if self.source_kind is not SourceKind.MANUAL:
+            return False
+        return not any((
+            self.material_number.strip(),
+            self.vendor_material_number.strip(),
+            self.description.strip(),
+            self.quantity is not None,
+            self.price is not None,
+            self.scale_quantities,
+            self.conditions,
+            self.remarks.strip(),
+        ))
+
+    @property
     def is_processable(self) -> bool:
         """Darf diese Position geschrieben werden?"""
         if not self.selected:
+            return False
+        if self.ist_leere_erfassungszeile:
+            # Doppelter Boden: angehakt wird sie ohnehin erst mit dem
+            # ersten Wert, geschrieben wird sie unter keinen Umstaenden.
             return False
         if self.issues.has_blocking:
             return False

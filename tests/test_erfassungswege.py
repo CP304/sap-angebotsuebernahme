@@ -96,7 +96,7 @@ class AufzeichnungEinlesenTest(unittest.TestCase):
         """Was in der Tabelle steht: Feldname -> vorgeschlagene Bedeutung."""
         ergebnis = {}
         for zeile in range(maske.table.rowCount()):
-            auswahl = maske.table.cellWidget(zeile, 2)
+            auswahl = maske.table.cellWidget(zeile, 3)
             ergebnis[maske.table.item(zeile, 0).text()] = (
                 auswahl.currentText() if isinstance(auswahl, QComboBox) else "")
         return ergebnis
@@ -406,21 +406,39 @@ class DirektInDerTabelleTest(unittest.TestCase):
         index = fenster.table_model.index(zeile, self._spalte(schluessel))
         return fenster.table_model.setData(index, wert, Qt.ItemDataRole.EditRole)
 
-    def test_ohne_geladenes_angebot_entsteht_eine_zeile(self):
+    def test_beim_start_steht_schon_eine_zeile_bereit(self):
+        """Ohne sie stuende der Anwender vor einer Tabelle ohne Zellen."""
         fenster = self._fenster()
-        self.assertIsNone(fenster.offer)
-        self.assertEqual(fenster.table_model.rowCount(), 0)
-
-        fenster._add_position()
-
         self.assertIsNotNone(fenster.offer)
         self.assertEqual(fenster.table_model.rowCount(), 1)
+        self.assertTrue(
+            fenster.offer.positions[0].ist_leere_erfassungszeile)
+
+    def test_die_bereitgestellte_zeile_ist_kein_fehler(self):
+        """Eine Einladung zum Tippen darf nicht rot begruesst werden."""
+        from app.models.enums import PositionStatus
+
+        fenster = self._fenster()
+        position = fenster.offer.positions[0]
+        self.assertEqual(len(list(position.issues)), 0)
+        self.assertEqual(position.status, PositionStatus.NOT_SELECTED)
+        self.assertFalse(position.selected)
+        self.assertFalse(position.is_processable)
+        self.assertIn("0 mit Fehler", fenster.counter_label.text())
+
+    def test_die_zeile_erwacht_beim_ersten_wert(self):
+        """Sonst muesste sie noch von Hand angehakt werden."""
+        fenster = self._fenster()
+        position = fenster.offer.positions[0]
+        self.assertFalse(position.selected)
+        self._tippe(fenster, 0, "material_number", "4711001")
+        self.assertTrue(position.selected)
+        self.assertFalse(position.ist_leere_erfassungszeile)
 
     def test_die_neue_zeile_ist_vorbelegt(self):
         """Wie eine schnell erfasste -- sonst haetten zwei Wege zwei
         Ergebnisse."""
         fenster = self._fenster()
-        fenster._add_position()
         position = fenster.offer.positions[0]
         self.assertTrue(position.purchasing_org)
         self.assertTrue(position.plant)
@@ -433,7 +451,7 @@ class DirektInDerTabelleTest(unittest.TestCase):
         from app.gui.offer_table import COLUMNS
 
         fenster = self._fenster()
-        fenster._add_position()
+        fenster._add_position()          # zweite Zeile, Cursor hinein
         index = fenster.table.currentIndex()
         self.assertTrue(index.isValid())
         quelle = fenster.proxy.mapToSource(index)
@@ -441,7 +459,6 @@ class DirektInDerTabelleTest(unittest.TestCase):
 
     def test_getippte_werte_landen_in_der_position(self):
         fenster = self._fenster()
-        fenster._add_position()
         for schluessel, wert in (("material_number", "4711001"),
                                  ("description", "Dichtring 40x52"),
                                  ("quantity", "100"),
@@ -460,20 +477,35 @@ class DirektInDerTabelleTest(unittest.TestCase):
 
     def test_zweite_zeile_wird_weitergezaehlt(self):
         fenster = self._fenster()
-        fenster._add_position()
+        self._tippe(fenster, 0, "material_number", "4711001")
         fenster._add_position()
         self.assertEqual(fenster.table_model.rowCount(), 2)
         self.assertEqual([p.position_number for p in fenster.offer.positions],
                          ["10", "20"])
 
-    def test_menuepunkt_ist_ohne_angebot_erreichbar(self):
-        """Er war es immer -- er tat nur nichts.  Jetzt beides."""
+    def test_menuepunkt_legt_eine_weitere_zeile_an(self):
+        """Er war immer anklickbar -- er tat nur nichts.  Jetzt beides."""
         fenster = self._fenster()
         self.assertTrue(fenster.add_position_action.isEnabled())
         self.assertEqual(fenster.add_position_action.shortcut().toString(),
                          "Ins")
+        vorher = fenster.table_model.rowCount()
         fenster.add_position_action.trigger()
+        self.assertEqual(fenster.table_model.rowCount(), vorher + 1)
+
+    def test_echte_positionen_raeumen_die_leerzeile_weg(self):
+        """Sonst stuende sie zwischen den uebernommenen Positionen herum."""
+        from app.models.enums import SourceKind
+        from app.models.offer_position import OfferPosition
+
+        fenster = self._fenster()
         self.assertEqual(fenster.table_model.rowCount(), 1)
+        echte = OfferPosition(source_kind=SourceKind.EXCEL,
+                              material_number="4711001",
+                              description="Dichtring 40x52")
+        fenster._add_positions([echte], "Tabelle")
+        self.assertEqual(fenster.table_model.rowCount(), 1)
+        self.assertEqual(fenster.offer.positions[0].material_number, "4711001")
 
 
 if __name__ == "__main__":  # pragma: no cover

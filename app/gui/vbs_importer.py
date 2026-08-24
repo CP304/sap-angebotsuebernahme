@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..sap.feldnamen import beschreibe_feld
 from ..services.vbs_parser import (
     TRANSACTION_NAMES,
     VbsField,
@@ -226,12 +227,14 @@ class VbsImporterWidget(QWidget):
         layout.addWidget(self.transaction_label)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(3)
+        self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(
-            ["SAP-Feld", "Das stand darin", "Das ist die/der ..."])
-        self.table.setColumnWidth(0, 170)
-        self.table.setColumnWidth(1, 190)
+            ["SAP-Feld", "Das stand darin", "So heisst das Feld in SAP",
+             "Das ist die/der ..."])
+        self.table.setColumnWidth(0, 150)
+        self.table.setColumnWidth(1, 150)
         self.table.setColumnWidth(2, 300)
+        self.table.setColumnWidth(3, 260)
         layout.addWidget(self.table, 1)
 
         fuss = QHBoxLayout()
@@ -362,13 +365,29 @@ class VbsImporterWidget(QWidget):
 
         for zeile, feld in enumerate(self.fields):
             kennung = QTableWidgetItem(feld.short_id())
-            kennung.setToolTip(feld.field_id)
+            erklaerung = beschreibe_feld(feld.field_id)
+            kennung.setToolTip(f"{feld.field_id}\n\n{erklaerung}"
+                               if erklaerung else feld.field_id)
             kennung.setFlags(kennung.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(zeile, 0, kennung)
 
             wert = QTableWidgetItem(feld.value)
             wert.setFlags(wert.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(zeile, 1, wert)
+
+            # Die Lesehilfe: SAP-Feldnamen sind nicht kryptisch, nur
+            # abgekuerzt -- und ueber alle Anlagen hinweg dieselben.  Ohne
+            # sie muesste der Anwender raten oder mit auffaelligen
+            # Testwerten herumprobieren, bis er weiss, welches Feld das ist.
+            klartext = beschreibe_feld(feld.field_id)
+            bedeutung = QTableWidgetItem(klartext)
+            bedeutung.setFlags(bedeutung.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            if not klartext:
+                bedeutung.setText("– dieser Feldname ist hier nicht hinterlegt –")
+                bedeutung.setToolTip(
+                    "Kein Grund zur Sorge: der Wert daneben verraet meist, "
+                    "worum es geht. Waehlen Sie rechts aus, was es ist.")
+            self.table.setItem(zeile, 2, bedeutung)
 
             auswahl = QComboBox()
             for schluessel, beschriftung in FIELD_MAPPINGS:
@@ -380,14 +399,14 @@ class VbsImporterWidget(QWidget):
                 index = auswahl.findData(gewuenscht)
                 if index >= 0:
                     auswahl.setCurrentIndex(index)
-            self.table.setCellWidget(zeile, 2, auswahl)
+            self.table.setCellWidget(zeile, 3, auswahl)
 
     # ------------------------------------------------------------------
     def current_mapping(self) -> dict[str, str]:
         """Was in der Tabelle gerade eingestellt ist."""
         zuordnung: dict[str, str] = {}
         for zeile, feld in enumerate(self.fields):
-            auswahl = self.table.cellWidget(zeile, 2)
+            auswahl = self.table.cellWidget(zeile, 3)
             if not isinstance(auswahl, QComboBox):
                 continue
             schluessel = auswahl.currentData()

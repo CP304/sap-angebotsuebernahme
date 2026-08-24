@@ -109,8 +109,38 @@ class MainWindow(QMainWindow):
         self._build()
         self._connect_log()
         self._update_mode_badges()
+        self._bereite_erfassung_vor()
         self._update_actions()
         QTimer.singleShot(200, self._show_startup_problems)
+
+    def _bereite_erfassung_vor(self) -> None:
+        """Eine leere Zeile bereitstellen, in die sofort getippt werden kann.
+
+        Ohne sie steht der Anwender beim Start vor einer Tabelle ganz ohne
+        Zellen: nichts zum Anklicken, nichts zum Hineinschreiben.  Wer nur
+        einen einzelnen Preis erfassen will, muss dann erst eine Datei
+        besorgen oder einen Menuepunkt finden -- fuer den kleinsten
+        denkbaren Fall der groesste Umweg.
+
+        Die Zeile ist ausdruecklich nichts weiter als eine Einladung:
+        nicht angehakt, nicht geprueft, nicht gezaehlt, nicht schreibbar.
+        Sie wird zur Position, sobald der erste Wert darin steht -- und
+        verschwindet, sobald ein Angebot geladen oder uebernommen wird.
+        """
+        if self.offer is not None:
+            return
+        self.offer = Offer()
+        self.offer.set_field("currency", self.settings.purchasing.currency,
+                             FieldOrigin.DEFAULT)
+        position = OfferPosition(source_kind=SourceKind.MANUAL,
+                                 source_hint="von Hand erfasst")
+        self.offer.positions.append(position)
+        self._apply_defaults_to_new([position])
+        self.offer.renumber()
+        self._revalidate()
+        self.table_model.set_offer(self.offer)
+        self.table.apply_column_widths()
+        self._update_counters()
 
     # ==================================================================
     # Aufbau
@@ -1103,6 +1133,11 @@ class MainWindow(QMainWindow):
                                  FieldOrigin.DEFAULT)
         self._snapshot("Positionen ergaenzt")
 
+        # Die bereitgestellte Leerzeile hat ausgedient, sobald echte
+        # Positionen dazukommen -- sonst steht sie zwischen ihnen herum.
+        if any(not p.ist_leere_erfassungszeile for p in positions):
+            self.offer.positions = [p for p in self.offer.positions
+                                    if not p.ist_leere_erfassungszeile]
         vorhanden = len(self.offer.positions)
         self.offer.positions.extend(positions)
         self.offer.add_note(f"{len(positions)} Position(en) manuell erfasst ({quelle})")
@@ -1142,7 +1177,9 @@ class MainWindow(QMainWindow):
             if position.delivery_date is None:
                 position.delivery_date = date.today() + timedelta(
                     days=purchasing.default_delivery_days)
-            position.selected = True
+            # Eine noch leere Erfassungszeile bleibt aussen vor, bis
+            # etwas darin steht -- sie wird beim ersten Wert angehakt.
+            position.selected = not position.ist_leere_erfassungszeile
             position.do_info_record = workflow.chain_info_record
             position.do_source_list = workflow.chain_source_list
             position.do_contract = workflow.chain_contract
