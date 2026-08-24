@@ -15,6 +15,8 @@ Genau daran haengt der praktische Nutzen des Werkzeugs:
    Erkennung einmal nicht greift.
 3. **Schnellerfassung** -- fuer die formlose Preismitteilung, aus der
    eine einzige Position wird.
+4. **Direkt in der Tabelle tippen** -- der kuerzeste Weg von allen:
+   Zeile anlegen, hineinschreiben, fertig.
 
 Geprueft wird jeweils bis zum sichtbaren Ergebnis: was in der Tabelle
 steht, was vorgeschlagen wird, was als Position herauskommt.
@@ -151,6 +153,85 @@ class AufzeichnungEinlesenTest(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_QT, "PySide6 ist nicht installiert")
+class EingefuegteAufzeichnungTest(unittest.TestCase):
+    """Weg 1b: die Aufzeichnung wird nicht geoeffnet, sondern eingefuegt.
+
+    Der Fehler, um den es geht
+    --------------------------
+    Wer die .vbs ueber einen Editor kopiert, der sie falsch geoeffnet
+    hat, fuegt Text mit einem Nullzeichen zwischen je zwei Buchstaben
+    ein.  Auf dem Bildschirm ist das ein Rechteck, dann ein Buchstabe,
+    dann wieder ein Rechteck.
+
+    Ausgewertet wurde so ein Text auch bisher schon richtig -- die
+    *Anzeige* blieb aber Zeichensalat.  Wer darauf blickt, haelt das
+    Werkzeug fuer kaputt und sieht gar nicht, dass die Tabelle darunter
+    stimmt.  Deshalb wird die Anzeige mitgezogen.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _maske_mit_einfuegung(self, salat: str):
+        from PySide6.QtCore import QMimeData
+        from app.gui.vbs_importer import VbsImporterWidget
+
+        maske = VbsImporterWidget(Settings())
+        daten = QMimeData()
+        daten.setText(salat)
+        maske.input.insertFromMimeData(daten)      # genau wie Strg+V
+        maske.parse_input()
+        return maske
+
+    def test_beide_byte_reihenfolgen(self):
+        """LE ergibt "Buchstabe, Rechteck", BE "Rechteck, Buchstabe"."""
+        for name, kodierung in (("Buchstabe zuerst", "utf-16-le"),
+                                ("Rechteck zuerst", "utf-16-be")):
+            with self.subTest(muster=name):
+                salat = AUFZEICHNUNG_ME11.encode(kodierung).decode("cp1252")
+                maske = self._maske_mit_einfuegung(salat)
+
+                # Die Anzeige ist lesbar -- kein Nullzeichen mehr.
+                self.assertNotIn("\x00", maske.input.toPlainText())
+                self.assertTrue(
+                    maske.input.toPlainText().lstrip().startswith("If Not"))
+                self.assertIn('findById("wnd[0]/usr/ctxtEINA-LIFNR")',
+                              maske.input.toPlainText())
+                # Und ausgewertet ist es auch.
+                self.assertIn("ME11", maske.transaction_label.text())
+                self.assertEqual(maske.table.rowCount(), 6)
+
+    def test_mit_byte_order_mark_im_eingefuegten_text(self):
+        salat = wie_aus_falschem_editor(AUFZEICHNUNG_ME11)
+        maske = self._maske_mit_einfuegung(salat)
+        self.assertNotIn("\x00", maske.input.toPlainText())
+        self.assertEqual(maske.table.rowCount(), 6)
+
+    def test_der_anwender_erfaehrt_davon(self):
+        """Stillschweigend geradeziehen waere auch wieder falsch."""
+        salat = wie_aus_falschem_editor(AUFZEICHNUNG_ME11)
+        maske = self._maske_mit_einfuegung(salat)
+        self.assertIn("Datei oeffnen", maske.status_label.text())
+
+    def test_sauberer_text_wird_nicht_angefasst(self):
+        maske = self._maske_mit_einfuegung(AUFZEICHNUNG_ME11)
+        self.assertEqual(maske.input.toPlainText().replace("\r\n", "\n"),
+                         AUFZEICHNUNG_ME11)
+        self.assertEqual(maske.table.rowCount(), 6)
+
+    def test_auch_ohne_zwischenablage_bleibt_die_anzeige_sauber(self):
+        """Etwa beim Ziehen und Ablegen -- da greift insertFromMimeData nicht."""
+        from app.gui.vbs_importer import VbsImporterWidget
+
+        maske = VbsImporterWidget(Settings())
+        maske.input.setPlainText(wie_aus_falschem_editor(AUFZEICHNUNG_ME11))
+        maske.parse_input()
+        self.assertNotIn("\x00", maske.input.toPlainText())
+        self.assertEqual(maske.table.rowCount(), 6)
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 ist nicht installiert")
 class TabelleUebernehmenTest(unittest.TestCase):
     """Weg 2: Bereich aus Excel einfuegen oder Datei laden."""
 
@@ -274,6 +355,125 @@ class SchnellerfassungTest(unittest.TestCase):
         self.assertEqual(leiste.edits["material_number"].text(), "4711005")
         self.assertEqual(leiste.edits["description"].text(), "Dichtring 60x80")
         self.assertEqual(leiste.edits["price"].text(), "9,90")
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 ist nicht installiert")
+class DirektInDerTabelleTest(unittest.TestCase):
+    """Weg 4: einfach in die Tabelle schreiben, die schon da ist.
+
+    Der Fehler, um den es geht
+    --------------------------
+    Der direkteste Weg ueberhaupt -- Anwendung starten, Zeile anlegen,
+    tippen -- ging nicht.  Ohne geladenes Angebot gab das Tabellenmodell
+    keine Zeile heraus, und der Menuepunkt "Position ergaenzen" tat
+    schlicht nichts: keine Zeile, keine Meldung, kein Hinweis worauf man
+    wartet.  Wer ohne Datei anfangen wollte, stand vor einer leeren
+    Tabelle, in die er nicht hineinkam.
+
+    Ausserdem entstand die Zeile auf einem anderen Weg als eine schnell
+    erfasste und blieb deshalb ohne Vorbelegung -- Einkaufsorganisation,
+    Werk, Mengeneinheit und Preiseinheit leer.  Zwei Wege, dasselbe zu
+    tun, mit verschiedenen Ergebnissen: genau das faellt spaeter
+    niemandem auf.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from app.bootstrap import build_services
+        from app.gui.main_window import MainWindow
+
+        cls.app = QApplication.instance() or QApplication([])
+        cls.settings = Settings()
+        cls.settings.use_mock_sap = True
+        cls.settings.dry_run = True
+        cls.settings.ensure_dirs()
+        cls.services = build_services(cls.settings)
+        cls.Fenster = MainWindow
+
+    def _fenster(self):
+        return self.Fenster(self.settings, self.services.as_dict())
+
+    @staticmethod
+    def _spalte(schluessel: str) -> int:
+        from app.gui.offer_table import COLUMNS
+
+        return next(i for i, spec in enumerate(COLUMNS)
+                    if spec.key == schluessel)
+
+    def _tippe(self, fenster, zeile: int, schluessel: str, wert: str) -> bool:
+        from PySide6.QtCore import Qt
+
+        index = fenster.table_model.index(zeile, self._spalte(schluessel))
+        return fenster.table_model.setData(index, wert, Qt.ItemDataRole.EditRole)
+
+    def test_ohne_geladenes_angebot_entsteht_eine_zeile(self):
+        fenster = self._fenster()
+        self.assertIsNone(fenster.offer)
+        self.assertEqual(fenster.table_model.rowCount(), 0)
+
+        fenster._add_position()
+
+        self.assertIsNotNone(fenster.offer)
+        self.assertEqual(fenster.table_model.rowCount(), 1)
+
+    def test_die_neue_zeile_ist_vorbelegt(self):
+        """Wie eine schnell erfasste -- sonst haetten zwei Wege zwei
+        Ergebnisse."""
+        fenster = self._fenster()
+        fenster._add_position()
+        position = fenster.offer.positions[0]
+        self.assertTrue(position.purchasing_org)
+        self.assertTrue(position.plant)
+        self.assertTrue(position.uom)
+        self.assertTrue(position.currency)
+        self.assertIsNotNone(position.price_unit)
+
+    def test_der_cursor_steht_schon_im_ersten_feld(self):
+        """Sonst muesste die neue Zeile erst gesucht und angeklickt werden."""
+        from app.gui.offer_table import COLUMNS
+
+        fenster = self._fenster()
+        fenster._add_position()
+        index = fenster.table.currentIndex()
+        self.assertTrue(index.isValid())
+        quelle = fenster.proxy.mapToSource(index)
+        self.assertEqual(COLUMNS[quelle.column()].key, "material_number")
+
+    def test_getippte_werte_landen_in_der_position(self):
+        fenster = self._fenster()
+        fenster._add_position()
+        for schluessel, wert in (("material_number", "4711001"),
+                                 ("description", "Dichtring 40x52"),
+                                 ("quantity", "100"),
+                                 ("uom", "ST"),
+                                 ("price", "2,95"),
+                                 ("currency", "EUR")):
+            with self.subTest(feld=schluessel):
+                self.assertTrue(self._tippe(fenster, 0, schluessel, wert))
+
+        position = fenster.offer.positions[0]
+        self.assertEqual(position.material_number, "4711001")
+        self.assertEqual(position.description, "Dichtring 40x52")
+        self.assertEqual(str(position.quantity), "100")
+        self.assertEqual(str(position.price), "2.95")
+        self.assertEqual(position.currency, "EUR")
+
+    def test_zweite_zeile_wird_weitergezaehlt(self):
+        fenster = self._fenster()
+        fenster._add_position()
+        fenster._add_position()
+        self.assertEqual(fenster.table_model.rowCount(), 2)
+        self.assertEqual([p.position_number for p in fenster.offer.positions],
+                         ["10", "20"])
+
+    def test_menuepunkt_ist_ohne_angebot_erreichbar(self):
+        """Er war es immer -- er tat nur nichts.  Jetzt beides."""
+        fenster = self._fenster()
+        self.assertTrue(fenster.add_position_action.isEnabled())
+        self.assertEqual(fenster.add_position_action.shortcut().toString(),
+                         "Ins")
+        fenster.add_position_action.trigger()
+        self.assertEqual(fenster.table_model.rowCount(), 1)
 
 
 if __name__ == "__main__":  # pragma: no cover

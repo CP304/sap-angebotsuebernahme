@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config.settings import Settings
-from ..models.enums import FieldOrigin, PositionStatus
+from ..models.enums import FieldOrigin, PositionStatus, SourceKind
 from ..models.offer import Offer
 from ..models.offer_position import OfferPosition
 from ..sap.gateway import SapGateway
@@ -63,7 +63,8 @@ from .dialogs import (
 from .admin_window import AdminWindow
 from .history_view import HistoryView
 from .mapping_view import MappingView
-from .offer_table import POSITION_ROLE, OfferFilterProxy, OfferTableModel, OfferTableView
+from .offer_table import (COLUMNS, POSITION_ROLE, OfferFilterProxy,
+                          OfferTableModel, OfferTableView)
 from .quick_entry import QuickEntryBar
 from .position_details import PositionDetails
 from .queue_bar import QueueBar
@@ -539,7 +540,15 @@ class MainWindow(QMainWindow):
             "Die ausgewaehlten Positionen ein zweites Mal fuer ein anderes "
             "Werk anlegen -- fuer die werksspezifische Infosatz-Sicht")
         auswahl_menu.addSeparator()
-        auswahl_menu.addAction("Position ergaenzen", self._add_position)
+        self.add_position_action = auswahl_menu.addAction(
+            "Position ergaenzen", self._add_position)
+        # Einfg ist in Tabellen die uebliche Taste fuer "Zeile einfuegen".
+        # Sie macht den direktesten Weg auch zum kuerzesten: Anwendung
+        # starten, Einfg, tippen -- ohne Datei, ohne Menue.
+        self.add_position_action.setShortcut("Ins")
+        self.add_position_action.setToolTip(
+            "Eine leere Zeile anlegen und direkt hineinschreiben (Einfg) -- "
+            "geht auch ohne geladenes Angebot")
         self.quick_entry_action = auswahl_menu.addAction(
             "Schnellerfassung", lambda: self.toggle_quick_entry())
         self.quick_entry_action.setCheckable(True)
@@ -1602,10 +1611,44 @@ class MainWindow(QMainWindow):
         self._update_counters()
 
     def _add_position(self) -> None:
-        position = self.table_model.add_empty_position()
-        if position is not None:
-            self._revalidate()
-            self._update_counters()
+        """Eine leere Zeile anlegen und den Cursor hineinsetzen.
+
+        Der direkteste Weg ueberhaupt: Zeile anlegen, tippen, fertig --
+        ohne vorher eine Datei zu haben.  Genau das ging bisher nicht.
+        Ohne geladenes Angebot gab das Modell die Zeile nicht heraus, und
+        der Menuepunkt tat schlicht nichts -- ohne Zeile, ohne Meldung.
+
+        Angelegt wird ueber denselben Weg wie jeder andere manuelle
+        Zugang.  Sonst haette eine von Hand ergaenzte Zeile andere
+        Vorbelegungen als eine schnell erfasste -- Einkaufsorganisation,
+        Werk, Mengeneinheit und Preiseinheit blieben leer --, und genau
+        das faellt spaeter niemandem auf.
+        """
+        position = OfferPosition(source_kind=SourceKind.MANUAL,
+                                 source_hint="von Hand erfasst")
+        self._add_positions([position], "von Hand")
+        self._springe_in_zeile(position)
+
+    def _springe_in_zeile(self, position: OfferPosition) -> None:
+        """In die Zelle springen, in der die Eingabe beginnt.
+
+        Ohne das muesste der Anwender die neue Zeile erst suchen und
+        anklicken -- bei einer langen Tabelle steht sie ausserhalb des
+        sichtbaren Bereichs.
+        """
+        zeile = self.table_model.row_of_uid(position.uid)
+        if zeile < 0:
+            return
+        spalte = next((i for i, spec in enumerate(COLUMNS)
+                       if spec.key == "material_number"), 0)
+        quelle = self.table_model.index(zeile, spalte)
+        ziel = self.proxy.mapFromSource(quelle)
+        if not ziel.isValid():
+            return
+        self.table.setCurrentIndex(ziel)
+        self.table.scrollTo(ziel)
+        self.table.edit(ziel)
+        self.table.setFocus()
 
     # ------------------------------------------------------------------
     # Schnellerfassung

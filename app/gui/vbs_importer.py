@@ -45,7 +45,7 @@ from ..services.vbs_parser import (
     detect_transaction,
     parse_vbs_recording,
 )
-from ..utils.textkodierung import decode_bytes
+from ..utils.textkodierung import decode_bytes, entferne_nullzeichen
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,32 @@ def vorschlag_fuer(field: VbsField) -> str:
     return ""
 
 
+class _AufzeichnungsFeld(QPlainTextEdit):
+    """Ein Eingabefeld, das eingefuegten Zeichensalat sofort geradezieht.
+
+    Die Aufzeichnung ist UTF-16.  Wer sie ueber einen Editor kopiert, der
+    sie falsch geoeffnet hat, fuegt hier Text mit einem Nullzeichen
+    zwischen je zwei Buchstaben ein -- auf dem Bildschirm ein Rechteck,
+    dann ein Buchstabe, dann wieder ein Rechteck.
+
+    Ausgewertet wurde so ein Text auch bisher schon richtig, die
+    *Anzeige* blieb aber Zeichensalat.  Wer das sieht, haelt es fuer
+    kaputt und liest gar nicht erst weiter -- deshalb wird schon beim
+    Einfuegen bereinigt, nicht erst beim Auswerten.
+    """
+
+    #: Meldet, dass eingefuegter Text bereinigt werden musste.
+    salatBereinigt = Signal()
+
+    def insertFromMimeData(self, source) -> None:  # noqa: N802 - Qt-Vorgabe
+        text = source.text() if source else ""
+        if "\x00" in text:
+            self.insertPlainText(entferne_nullzeichen(text))
+            self.salatBereinigt.emit()
+            return
+        super().insertFromMimeData(source)
+
+
 class VbsImporterWidget(QWidget):
     """Siehe Modulkopf."""
 
@@ -168,7 +194,8 @@ class VbsImporterWidget(QWidget):
         layout.addWidget(info)
 
         # -- Eingabe ------------------------------------------------------
-        self.input = QPlainTextEdit()
+        self.input = _AufzeichnungsFeld()
+        self.input.salatBereinigt.connect(self._melde_bereinigung)
         self.input.setPlaceholderText(
             'Inhalt der .vbs hier einfuegen, z. B.:\n'
             'session.findById("wnd[0]/usr/ctxtEINA-LIFNR").text = "100234"')
@@ -219,6 +246,19 @@ class VbsImporterWidget(QWidget):
         layout.addWidget(self.status_label)
 
     # ------------------------------------------------------------------
+    def _melde_bereinigung(self) -> None:
+        """Nach dem Einfuegen von Zeichensalat: sagen, was geschehen ist.
+
+        Der Hinweis wird gemerkt statt nur angezeigt: gleich darauf setzt
+        das Auswerten seine eigene Meldung, und ein Hinweis, der davon
+        ueberschrieben wird, ist keiner.
+        """
+        self._kodierungshinweis = (
+            "Der eingefuegte Text war Zeichensalat und wurde geradegezogen "
+            "-- zuverlaessiger ist \"Datei oeffnen ...\", dann bleiben auch "
+            "Umlaute erhalten.")
+        self.status_label.setText(self._kodierungshinweis)
+
     def _vergiss_kodierungshinweis(self) -> None:
         self._kodierungshinweis = ""
 
@@ -249,6 +289,17 @@ class VbsImporterWidget(QWidget):
     def parse_input(self) -> None:
         """Den eingefuegten Text auswerten."""
         text = self.input.toPlainText()
+        if "\x00" in text:
+            # Kommt der Text nicht ueber die Zwischenablage herein --
+            # etwa per Ziehen und Ablegen --, greift die Bereinigung des
+            # Eingabefelds nicht.  Dann eben hier, und sichtbar: der
+            # Anwender soll nicht auf Zeichensalat blicken, waehrend
+            # darunter die richtigen Werte stehen.
+            text = entferne_nullzeichen(text)
+            self.input.setPlainText(text)
+            self._kodierungshinweis = (
+                "Der Text war Zeichensalat und wurde geradegezogen -- "
+                "zuverlaessiger ist \"Datei oeffnen ...\".")
         if not text.strip():
             self.status_label.setText("Es wurde noch nichts eingefuegt.")
             return
