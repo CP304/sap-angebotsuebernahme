@@ -122,90 +122,58 @@ class AufzeichnungAuswertenTest(unittest.TestCase):
 
 @unittest.skipUnless(HAS_QT, "PySide6 ist nicht installiert")
 class VorschlagTest(unittest.TestCase):
-    """Der Vorschlag stuetzt sich auf den Feldnamen, nie auf den Wert."""
+    """Der Vorschlag stuetzt sich auf den Feldnamen, nie auf den Wert.
+
+    Vorgeschlagen wird ein Feld eines Bildschirms der erkannten
+    Transaktion -- nicht mehr eine allgemeine Bedeutung.  Eine
+    Lieferantennummer gibt es im Infosatz, im Kontrakt und in der
+    Bestellung, und es sind drei verschiedene Felder mit drei
+    verschiedenen IDs.
+    """
 
     @classmethod
     def setUpClass(cls) -> None:
-        from app.gui.vbs_importer import vorschlag_fuer
+        from app.gui.vbs_importer import VbsImporterWidget
 
         cls.app = QApplication.instance() or QApplication([])
-        cls.vorschlag_fuer = staticmethod(vorschlag_fuer)
+        cls.Widget = VbsImporterWidget
 
-    def _vorschlag(self, kennung: str, wert: str = "1") -> str:
+    def _vorschlag(self, kennung: str, transaktion: str = "ME11") -> str:
+        from app.config.settings import Settings
+        from app.sap.selectors import SelectorRegistry
         from app.services.vbs_parser import VbsField
 
-        return self.vorschlag_fuer(VbsField(kennung, wert, "text"))
+        maske = self.Widget(Settings(), SelectorRegistry())
+        maske.transaction = transaktion
+        return maske._vorschlag_aus_registry(VbsField(kennung, "1", "text"))
 
     def test_lieferant(self):
         self.assertEqual(self._vorschlag("wnd[0]/usr/ctxtEINA-LIFNR"),
-                         "vendor_number")
+                         "info_record_initial.vendor")
 
     def test_material(self):
         self.assertEqual(self._vorschlag("wnd[0]/usr/ctxtEINA-MATNR"),
-                         "material_number")
-
-    def test_lieferantenmaterial_vor_material(self):
-        """IDNLF ist das Lieferantenmaterial -- nicht unser Material."""
-        self.assertEqual(self._vorschlag("wnd[0]/usr/ctxtEINA-IDNLF"),
-                         "vendor_material_number")
+                         "info_record_initial.material")
 
     def test_preis_und_preiseinheit(self):
-        self.assertEqual(self._vorschlag("wnd[0]/usr/txtEINE-NETPR"), "price")
+        self.assertEqual(self._vorschlag("wnd[0]/usr/txtEINE-NETPR"),
+                         "info_record_purchasing.net_price")
         self.assertEqual(self._vorschlag("wnd[0]/usr/txtEINE-PEINH"),
-                         "price_unit")
+                         "info_record_purchasing.price_unit")
 
-    def test_positionsfelder_der_bestellung_und_des_kontrakts(self):
-        """In ME21N und ME31K heissen dieselben Felder anders.
-
-        Die Einrichtungsanleitung sieht Aufzeichnungen dieser beiden
-        Transaktionen ausdruecklich vor.  Deren Positionstabelle benutzt
-        aber nicht die Namen des Infosatzes: die Materialnummer heisst
-        dort EMATN, der Liefertermin EEIND, die Kontraktgueltigkeit
-        KDATB/KDATE.  Ohne diese Namen steht der Anwender vor einer
-        Tabelle ganz ohne Vorauswahl.
-        """
-        faelle = (
-            ("wnd[0]/usr/tblSAPLMEGUITC_1211/ctxtMEPO1211-EMATN[3,0]",
-             "material_number"),
-            ("wnd[0]/usr/tblSAPLMEGUITC_1211/ctxtMEPO1211-EEIND[8,0]",
-             "delivery_date"),
-            ("wnd[0]/usr/ctxtEKKO-KDATB", "valid_from"),
-            ("wnd[0]/usr/ctxtEKKO-KDATE", "valid_to"),
-        )
-        for kennung, erwartet in faelle:
-            with self.subTest(kennung=kennung.split("/")[-1]):
-                self.assertEqual(self._vorschlag(kennung), erwartet)
-
-    def test_neue_namen_verdraengen_die_alten_nicht(self):
-        """Die Zuordnung geht ueber Teilzeichenketten -- also nachpruefen."""
-        faelle = (
-            ("wnd[0]/usr/ctxtEINA-MATNR", "material_number"),
-            ("wnd[0]/usr/ctxtEINE-DATAB", "valid_from"),
-            ("wnd[0]/usr/ctxtEINE-DATBI", "valid_to"),
-            ("wnd[0]/usr/ctxtEKPO-EINDT", "delivery_date"),
-            ("wnd[0]/usr/ctxtEINA-IDNLF", "vendor_material_number"),
-        )
-        for kennung, erwartet in faelle:
-            with self.subTest(kennung=kennung.split("/")[-1]):
-                self.assertEqual(self._vorschlag(kennung), erwartet)
+    def test_dasselbe_feld_in_einer_anderen_transaktion(self):
+        """Der Fall, an dem die flache Liste scheiterte."""
+        self.assertEqual(self._vorschlag("wnd[0]/usr/ctxtRM06E-LIFNR", "ME31K"),
+                         "contract_initial.vendor")
+        self.assertEqual(self._vorschlag("wnd[0]/usr/ctxtEORD-MATNR", "ME01"),
+                         "source_list_initial.material")
 
     def test_unbekanntes_feld_bekommt_keinen_vorschlag(self):
         self.assertEqual(self._vorschlag("wnd[0]/usr/ctxtZZ-EIGEN"), "")
 
-    def test_wert_beeinflusst_den_vorschlag_nicht(self):
-        """"1000" kann EKorg, Werk oder Menge sein -- nicht raten."""
-        ohne_hinweis = self._vorschlag("wnd[0]/usr/ctxtZZ-UNBEKANNT", "1000")
-        self.assertEqual(ohne_hinweis, "",
-                         "Aus dem Wert allein darf nichts geschlossen werden")
-
-    def test_alle_vorschlaege_stehen_zur_auswahl(self):
-        """Ein Vorschlag, den die Auswahlliste nicht kennt, waere unsichtbar."""
-        from app.gui.vbs_importer import FIELD_MAPPINGS, _ID_HINWEISE
-
-        auswaehlbar = {schluessel for schluessel, _ in FIELD_MAPPINGS}
-        for _muster, schluessel in _ID_HINWEISE:
-            self.assertIn(schluessel, auswaehlbar, schluessel)
-
+    def test_feld_einer_fremden_transaktion_wird_nicht_vorgeschlagen(self):
+        """In ME01 gibt es keinen Nettopreis des Infosatzes."""
+        self.assertEqual(self._vorschlag("wnd[0]/usr/txtEINE-NETPR", "ME01"), "")
 
 @unittest.skipUnless(HAS_QT, "PySide6 ist nicht installiert")
 class ImportMaskeTest(unittest.TestCase):
@@ -236,42 +204,57 @@ class ImportMaskeTest(unittest.TestCase):
         self.assertGreater(maske.table.rowCount(), 0)
 
     def test_zuordnung_ist_vorbelegt(self):
+        """Zugeordnet wird auf Bildschirm und Element, nicht auf eine
+        allgemeine Bedeutung -- eine Lieferantennummer gibt es im
+        Infosatz, im Kontrakt und in der Bestellung, und es sind drei
+        verschiedene Felder."""
         maske = self._maske()
         zuordnung = maske.current_mapping()
-        self.assertEqual(zuordnung.get("wnd[0]/usr/ctxtEINA-LIFNR"),
-                         "vendor_number")
-        self.assertEqual(zuordnung.get("wnd[0]/usr/txtEINE-NETPR"), "price")
+        self.assertEqual(zuordnung.get(("info_record_initial", "vendor")),
+                         "wnd[0]/usr/ctxtEINA-LIFNR")
+        self.assertEqual(zuordnung.get(("info_record_purchasing", "net_price")),
+                         "wnd[0]/usr/txtEINE-NETPR")
 
-    def test_speichern_legt_in_den_einstellungen_ab(self):
+    def test_speichern_landet_dort_wo_geschrieben_wird(self):
+        """Frueher endete alles in einer flachen Liste, die niemand las."""
         maske = self._maske()
         maske.save_mapping()
-        gespeichert = maske.settings.sap_field_ids
-        self.assertIn("wnd[0]/usr/ctxtEINA-LIFNR", gespeichert)
-        self.assertEqual(gespeichert["wnd[0]/usr/ctxtEINA-LIFNR"],
-                         "vendor_number")
+        self.assertEqual(
+            maske.registry.get("info_record_initial", "vendor").id,
+            "wnd[0]/usr/ctxtEINA-LIFNR")
+
+    def test_uebernommene_id_gilt_als_ungeprueft(self):
+        """Bis der Anwender sie bestaetigt, wird damit nicht geschrieben."""
+        maske = self._maske()
+        maske.save_mapping()
+        self.assertFalse(
+            maske.registry.get("info_record_initial", "vendor").verified)
 
     def test_zweite_aufzeichnung_ergaenzt_statt_zu_ersetzen(self):
         """Die vier Vorgaenge werden nacheinander aufgezeichnet."""
         maske = self._maske()
         maske.save_mapping()
-        anzahl_vorher = len(maske.settings.sap_field_ids)
 
         maske.input.setPlainText(
-            'session.findById("wnd[0]/tbar[0]/okcd").text = "/nME21N"\n'
-            'session.findById("wnd[0]/usr/ctxtMEPO1211-KOSTL").text = "4711"\n')
+            'session.findById("wnd[0]/tbar[0]/okcd").text = "/nME01"\n'
+            'session.findById("wnd[0]/usr/ctxtEORD-MATNR").text = "4711001"\n')
         maske.parse_input()
         maske.save_mapping()
 
-        self.assertIn("wnd[0]/usr/ctxtEINA-LIFNR", maske.settings.sap_field_ids,
-                      "Die erste Aufzeichnung darf nicht geloescht werden")
-        self.assertGreater(len(maske.settings.sap_field_ids), anzahl_vorher)
+        self.assertEqual(
+            maske.registry.get("info_record_initial", "vendor").id,
+            "wnd[0]/usr/ctxtEINA-LIFNR",
+            "Die erste Aufzeichnung darf nicht geloescht werden")
+        self.assertEqual(
+            maske.registry.get("source_list_initial", "material").id,
+            "wnd[0]/usr/ctxtEORD-MATNR")
 
     def test_leere_eingabe_speichert_nichts(self):
         from app.config.settings import Settings
 
         maske = self.Widget(Settings())
         maske.save_mapping()
-        self.assertEqual(maske.settings.sap_field_ids, {})
+        self.assertEqual(maske.current_mapping(), {})
 
     def test_unbrauchbarer_text_meldet_sich(self):
         from app.config.settings import Settings

@@ -173,7 +173,8 @@ class MainWindow(QMainWindow):
         self.diagnosis_view = DiagnosisView(self.settings)
 
         from .vbs_importer import VbsImporterWidget
-        self.vbs_importer = VbsImporterWidget(self.settings)
+        self.vbs_importer = VbsImporterWidget(
+            self.settings, self.gateway.selectors)
 
         self._admin_pages = [
             ("Historie", self.history_view),

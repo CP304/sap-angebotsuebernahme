@@ -109,21 +109,28 @@ class VollstaendigkeitTest(unittest.TestCase):
             with self.subTest(tabelle=name):
                 self.assertGreaterEqual(len(text), 5, name)
 
-    def test_alle_felder_der_vorschlagsliste_sind_erklaert(self):
-        """Was einen Vorschlag bekommt, muss erst recht lesbar sein.
+    def test_die_felder_der_selektorenablage_sind_erklaert(self):
+        """Was in der Maske erscheinen kann, muss lesbar sein.
 
-        Sonst stuende in der Zeile ein Vorschlag, aber daneben nichts --
-        gerade dort, wo der Anwender ihn bestaetigen soll.
+        Die Aufzeichnung wird gegen die hinterlegten Selektoren
+        abgeglichen -- taucht eines dieser Felder auf, steht es in der
+        Tabelle, und daneben sollte nicht "nicht hinterlegt" stehen.
         """
-        try:
-            from app.gui.vbs_importer import _ID_HINWEISE
-        except ImportError:  # pragma: no cover -- ohne PySide6
-            self.skipTest("PySide6 ist nicht installiert")
-        for muster, _ziel in _ID_HINWEISE:
-            with self.subTest(feld=muster):
-                self.assertTrue(erklaere_feldname(muster),
-                                f"{muster} hat einen Vorschlag, aber keine "
-                                f"Erklaerung")
+        from app.sap.selectors import SelectorRegistry
+
+        registry = SelectorRegistry()
+        ohne = []
+        for screen_key, screen in registry.screens.items():
+            for element_key, selector in screen.elements.items():
+                if not selector.id or "-" not in selector.id:
+                    continue
+                feld = selector.id.split("/")[-1].rpartition("-")[2]
+                feld = feld.split("[")[0]
+                if not erklaere_feldname(feld):
+                    ohne.append(f"{screen_key}.{element_key} ({feld})")
+        self.assertEqual(ohne, [],
+                         "Diese Felder der Selektorenablage haben keine "
+                         "Erklaerung: " + ", ".join(ohne))
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -111,12 +111,15 @@ class AufzeichnungEinlesenTest(unittest.TestCase):
         self.assertEqual(maske.table.rowCount(), 6)
 
         zuordnung = self._zuordnungen(maske)
-        self.assertEqual(zuordnung["EINA-LIFNR"], "Lieferantennummer")
-        self.assertEqual(zuordnung["EINA-MATNR"], "Materialnummer")
-        self.assertEqual(zuordnung["EINE-EKORG"], "Einkaufsorganisation")
-        self.assertEqual(zuordnung["EINE-WERKS"], "Werk")
-        self.assertEqual(zuordnung["EINE-NETPR"], "Preis")
-        self.assertEqual(zuordnung["EINE-WAERS"], "Waehrung")
+        # Vorgeschlagen wird das Feld eines Bildschirms dieser Transaktion,
+        # nicht eine allgemeine Bedeutung.
+        self.assertIn("Lieferant", zuordnung["EINA-LIFNR"])
+        self.assertIn("Einstiegsbild", zuordnung["EINA-LIFNR"])
+        self.assertIn("Material", zuordnung["EINA-MATNR"])
+        self.assertIn("Einkaufsorganisation", zuordnung["EINE-EKORG"])
+        self.assertIn("Werk", zuordnung["EINE-WERKS"])
+        self.assertIn("Nettopreis", zuordnung["EINE-NETPR"])
+        self.assertIn("hrung", zuordnung["EINE-WAERS"])
 
         # Kommandofeld und Werkzeugleiste sind Navigation, keine Daten.
         self.assertNotIn("okcd", zuordnung)
@@ -143,13 +146,151 @@ class AufzeichnungEinlesenTest(unittest.TestCase):
                 self.assertEqual(maske.table.rowCount(), 6)
                 self.assertIn("ME11", maske.transaction_label.text())
 
-    def test_gespeicherte_zuordnung_landet_in_den_einstellungen(self):
+    def test_gespeicherte_zuordnung_landet_dort_wo_geschrieben_wird(self):
+        """In der Selektorenablage, aus der die Schreibschicht ihre IDs holt.
+
+        Frueher landete sie in einer flachen Liste neben den
+        Einstellungen, die niemand las: der Anwender ordnete zu, bekam
+        eine Erfolgsmeldung, und beim Schreiben fehlten die IDs trotzdem.
+        """
         maske = self._maske_mit_datei(
             b"\xff\xfe" + AUFZEICHNUNG_ME11.encode("utf-16-le"))
         maske.save_mapping()
-        gepflegt = maske.settings.sap_field_ids
-        self.assertEqual(gepflegt["wnd[0]/usr/ctxtEINA-LIFNR"], "vendor_number")
-        self.assertEqual(gepflegt["wnd[0]/usr/txtEINE-NETPR"], "price")
+        self.assertEqual(
+            maske.registry.get("info_record_initial", "vendor").id,
+            "wnd[0]/usr/ctxtEINA-LIFNR")
+        self.assertEqual(
+            maske.registry.get("info_record_purchasing", "net_price").id,
+            "wnd[0]/usr/txtEINE-NETPR")
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 ist nicht installiert")
+class ZuordnungIstTransaktionsspezifischTest(unittest.TestCase):
+    """Weg 1c: dieselbe Bedeutung in mehreren Transaktionen.
+
+    Der Fehler, um den es geht
+    --------------------------
+    Die Maske bot eine feste Liste allgemeiner Bedeutungen an
+    ("Lieferantennummer", "Preis") und legte das Ergebnis in einer flachen
+    Liste neben den Einstellungen ab.  Beides passte nicht zur Sache:
+
+    * Eine Lieferantennummer gibt es im Infosatz, im Kontrakt und in der
+      Bestellung -- drei Bildschirme, drei verschiedene Feld-IDs.  Flach
+      gespeichert ueberschrieb die zweite Aufzeichnung die erste, oder die
+      Dublettenpruefung warnte vor etwas voellig Richtigem.
+    * Gelesen wurde diese Liste ohnehin nirgends.  Die Schreibschicht holt
+      ihre IDs aus der Selektorenablage, je Bildschirm und Element.  Der
+      Anwender ordnete also zu, bestaetigte, bekam eine Erfolgsmeldung --
+      und beim Schreiben nach SAP fehlten die IDs trotzdem.
+
+    Angeboten werden jetzt die Felder der Bildschirme, die zur erkannten
+    Transaktion gehoeren, und gespeichert wird dorthin, wo geschrieben
+    wird.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _maske(self, vbs: str, registry=None):
+        from app.gui.vbs_importer import VbsImporterWidget
+        from app.sap.selectors import SelectorRegistry
+
+        maske = VbsImporterWidget(Settings(),
+                                  registry or SelectorRegistry())
+        maske.input.setPlainText(vbs)
+        maske.parse_input()
+        return maske
+
+    ME11 = ('session.findById("wnd[0]/tbar[0]/okcd").text = "/nME11"\n'
+            'session.findById("wnd[0]/usr/ctxtEINA-LIFNR").text = "100234"\n'
+            'session.findById("wnd[0]/usr/txtEINE-NETPR").text = "2,95"\n')
+    ME31K = ('session.findById("wnd[0]/tbar[0]/okcd").text = "/nME31K"\n'
+             'session.findById("wnd[0]/usr/ctxtRM06E-LIFNR").text = "100234"\n')
+    ME01 = ('session.findById("wnd[0]/tbar[0]/okcd").text = "/nME01"\n'
+            'session.findById("wnd[0]/usr/ctxtEORD-MATNR").text = "4711001"\n')
+
+    def test_die_auswahl_beschraenkt_sich_auf_die_transaktion(self):
+        """Alles anzubieten macht die Liste lang und die Wahl unsicher."""
+        from PySide6.QtWidgets import QComboBox
+
+        # Die Masken in Variablen halten: sonst raeumt Python sie weg,
+        # bevor die Auswahlfelder ausgelesen sind, und Qt meldet ein
+        # bereits geloeschtes C++-Objekt.
+        maske_me11 = self._maske(self.ME11)
+        maske_me01 = self._maske(self.ME01)
+        auswahl_me11 = maske_me11.table.cellWidget(0, 3)
+        auswahl_me01 = maske_me01.table.cellWidget(0, 3)
+        self.assertIsInstance(auswahl_me11, QComboBox)
+        beschriftungen_me11 = [auswahl_me11.itemText(i)
+                               for i in range(auswahl_me11.count())]
+        beschriftungen_me01 = [auswahl_me01.itemText(i)
+                               for i in range(auswahl_me01.count())]
+        self.assertTrue(any("Infosatz" in t for t in beschriftungen_me11))
+        self.assertFalse(any("Orderbuch" in t for t in beschriftungen_me11))
+        self.assertTrue(any("Orderbuch" in t for t in beschriftungen_me01))
+        self.assertFalse(any("Infosatz" in t for t in beschriftungen_me01))
+
+    def test_lieferant_im_infosatz_und_im_kontrakt_koennen_nebeneinander(self):
+        """Der Fall, an dem die flache Liste scheiterte."""
+        from app.sap.selectors import SelectorRegistry
+
+        registry = SelectorRegistry()
+        self._maske(self.ME11, registry).save_mapping()
+        self._maske(self.ME31K, registry).save_mapping()
+
+        self.assertEqual(registry.get("info_record_initial", "vendor").id,
+                         "wnd[0]/usr/ctxtEINA-LIFNR")
+        self.assertEqual(registry.get("contract_initial", "vendor").id,
+                         "wnd[0]/usr/ctxtRM06E-LIFNR")
+
+    def test_drei_aufzeichnungen_nacheinander(self):
+        """Die Vorgaenge werden nach und nach aufgezeichnet."""
+        from app.sap.selectors import SelectorRegistry
+
+        registry = SelectorRegistry()
+        for vbs in (self.ME11, self.ME31K, self.ME01):
+            self._maske(vbs, registry).save_mapping()
+
+        self.assertEqual(registry.get("info_record_initial", "vendor").id,
+                         "wnd[0]/usr/ctxtEINA-LIFNR")
+        self.assertEqual(registry.get("info_record_purchasing", "net_price").id,
+                         "wnd[0]/usr/txtEINE-NETPR")
+        self.assertEqual(registry.get("contract_initial", "vendor").id,
+                         "wnd[0]/usr/ctxtRM06E-LIFNR")
+        self.assertEqual(registry.get("source_list_initial", "material").id,
+                         "wnd[0]/usr/ctxtEORD-MATNR")
+
+    def test_abweichender_bildaufbau_bekommt_trotzdem_einen_vorschlag(self):
+        """Nicht jede Anlage baut ihre Bilder gleich auf.
+
+        Stimmt nur der Feldname (``LIFNR``) und nicht die Bildstruktur
+        davor (``EKKO`` statt ``RM06E``), ist das ein guter Hinweis --
+        solange er eindeutig ist.
+        """
+        vbs = ('session.findById("wnd[0]/tbar[0]/okcd").text = "/nME31K"\n'
+               'session.findById("wnd[0]/usr/ctxtEKKO-LIFNR").text = "100234"\n')
+        maske = self._maske(vbs)
+        auswahl = maske.table.cellWidget(0, 3)
+        self.assertIn("Lieferant", auswahl.currentText())
+
+    def test_unbekannte_transaktion_stellt_alles_zur_wahl(self):
+        """Lieber alles anbieten als den Anwender aussperren."""
+        vbs = 'session.findById("wnd[0]/usr/ctxtEINA-LIFNR").text = "100234"'
+        maske = self._maske(vbs)
+        self.assertEqual(maske.transaction, "")
+        auswahl = maske.table.cellWidget(0, 3)
+        beschriftungen = [auswahl.itemText(i) for i in range(auswahl.count())]
+        self.assertTrue(any("Infosatz" in t for t in beschriftungen))
+        self.assertTrue(any("Kontrakt" in t for t in beschriftungen))
+
+    def test_uebernommene_ids_gelten_als_ungeprueft(self):
+        """Solange sie das sind, schreibt die Anwendung damit nicht."""
+        from app.sap.selectors import SelectorRegistry
+
+        registry = SelectorRegistry()
+        self._maske(self.ME11, registry).save_mapping()
+        self.assertFalse(registry.get("info_record_initial", "vendor").verified)
 
 
 @unittest.skipUnless(HAS_QT, "PySide6 ist nicht installiert")

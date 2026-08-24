@@ -871,6 +871,31 @@ class SelectorRegistry:
                 seen.append(element_id)
         return seen
 
+    def screens_fuer_transaktion(self, code: str) -> list[str]:
+        """Welche Bildschirme gehoeren zu dieser Transaktion?
+
+        Jeder Bildschirm traegt die Transaktionen, in denen er vorkommt
+        (``"ME11/ME12/ME13"``).  Eine Aufzeichnung aus ME11 kann nur
+        Felder dieser Bildschirme enthalten -- alles andere zur Auswahl zu
+        stellen, macht die Liste lang und die Zuordnung unsicher.
+
+        ``common`` ist immer dabei: Kommandofeld, Sichern, Meldungszeile
+        gibt es in jeder Transaktion.  Ist der Code unbekannt oder leer,
+        kommt alles zurueck -- dann entscheidet der Anwender selbst.
+        """
+        code = (code or "").strip().upper()
+        if not code:
+            return list(self.screens)
+        treffer = [name for name, screen in self.screens.items()
+                   if code in [t.strip().upper()
+                               for t in (screen.transaction or "").split("/")
+                               if t.strip()]]
+        if not treffer:
+            return list(self.screens)
+        if "common" in self.screens and "common" not in treffer:
+            treffer.append("common")
+        return treffer
+
     def suggest_mapping(self, vbs_ids: list[str]) -> dict[tuple[str, str], str]:
         """Aufgezeichnete IDs den konfigurierten Feldern zuordnen (Vorschlag).
 
