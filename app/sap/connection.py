@@ -19,6 +19,7 @@ Es wird bewusst **nicht** mit ``sleep(2)``-Kaskaden gearbeitet.  Stattdessen:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -27,6 +28,52 @@ from ..config.settings import SapRuntime
 from .selectors import SelectorRegistry
 
 logger = logging.getLogger(__name__)
+
+#: Zeichen, die in einem einzeiligen SAP-Eingabefeld nichts zu suchen
+#: haben und dort zu einem Leerzeichen werden: Tabulator, Zeilenumbruch,
+#: Zeilen- und Seitenvorschub sowie die Unicode-Zeilentrenner.
+_TRENNER = "\t\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+#: Erkennt, ob ueberhaupt etwas zu tun ist -- Steuerzeichen jeder Art.
+_STEUERZEICHEN = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def feldtext(value: object) -> tuple[str, bool]:
+    """Einen Wert fuer ein SAP-Eingabefeld aufbereiten.
+
+    Liefert ``(text, veraendert)``.
+
+    Warum das noetig ist
+    --------------------
+    SAP-Eingabefelder sind einzeilig, und der Weg dorthin fuehrt ueber
+    COM.  Ein Nullzeichen im Wert ist dort besonders heimtueckisch: der
+    Text wird an dieser Stelle abgeschnitten, ohne dass irgendwo ein
+    Fehler entsteht.  In SAP steht dann ein halber Kurztext, und niemand
+    erfaehrt davon.  Zeilenumbruch und Tabulator sind harmloser, aber
+    ebenfalls nichts, was in einem einzeiligen Feld stehen sollte.
+
+    Steuerzeichen koennen aus jeder Richtung kommen -- aus einem PDF
+    kopierter Text traegt Seitenvorschuebe, eine Excel-Zelle
+    Zeilenumbrueche.  Die Eingangswege raeumen das auf, aber diese
+    Funktion ist die letzte Stelle, an der es noch auffallen kann, und
+    die einzige, die alle Wege gemeinsam haben.
+
+    Ist nichts zu beanstanden, wird der Wert **unveraendert**
+    durchgereicht -- auch mit Leerraum am Rand, denn ueber den entscheidet
+    nicht diese Funktion.
+    """
+    text = "" if value is None else str(value)
+    if not _STEUERZEICHEN.search(text):
+        return text, False
+    # Trennende Steuerzeichen werden zu Leerzeichen, damit nicht zwei
+    # Woerter zusammenkleben ("40x52" + "NBR" -> "40x52NBR").
+    bereinigt = "".join(" " if zeichen in _TRENNER else zeichen
+                        for zeichen in text)
+    # Alles uebrige Steuerzeichen faellt ersatzlos weg -- allen voran das
+    # Nullzeichen, an dem COM den Text sonst abschneiden wuerde.
+    bereinigt = _STEUERZEICHEN.sub("", bereinigt)
+    bereinigt = re.sub(r" {2,}", " ", bereinigt).strip()
+    return bereinigt, bereinigt != text
 
 
 # ---------------------------------------------------------------------------
@@ -401,15 +448,28 @@ class SapGuiConnection:
         )
 
     def set_text(self, element_id: str, value: str, wait: bool = False) -> None:
-        """Textfeld setzen."""
-        text = "" if value is None else str(value)
+        """Textfeld setzen -- der letzte Halt vor dem echten System.
+
+        Was hier durchgeht, steht anschliessend in SAP.  Deshalb wird der
+        Wert vorher auf Steuerzeichen geprueft: siehe :func:`feldtext`.
+        Bereinigt wird still, aber nicht heimlich -- es steht im Protokoll
+        und im Ablaufmitschnitt, denn ein Steuerzeichen an dieser Stelle
+        heisst, dass weiter vorne etwas nicht stimmt.
+        """
+        text, veraendert = feldtext(value)
         element = self.wait_for_element(element_id) if wait else self.find_element(element_id)
 
         def _do():
             element.text = text
 
         self._retry(_do, f"Feld setzen ({element_id})")
-        self._trace(f"set_text {element_id} = {text!r}")
+        if veraendert:
+            logger.warning("Steuerzeichen aus dem Wert fuer %s entfernt: "
+                           "%r -> %r", element_id, value, text)
+            self._trace(f"set_text {element_id} = {text!r} "
+                        f"(bereinigt aus {value!r})")
+        else:
+            self._trace(f"set_text {element_id} = {text!r}")
 
     def set_checkbox(self, element_id: str, checked: bool) -> None:
         element = self.find_element(element_id)

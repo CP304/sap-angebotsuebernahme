@@ -230,7 +230,16 @@ class CsvReader(DocumentReader):
         delimiter = detect_delimiter(raw)
         document.meta["delimiter"] = delimiter
         try:
-            reader = csv.reader(raw.splitlines(), delimiter=delimiter)
+            # keepends: ein Zeilenumbruch INNERHALB von Anfuehrungszeichen
+            # gehoert zum Feld ("Dichtring 40x52\nNBR 70" ist eine Zelle).
+            # Ohne die Zeilenenden fuegt der CSV-Leser die Bruchstuecke
+            # zwar wieder zusammen, aber ohne Trennung -- aus "40x52" und
+            # "NBR 70" wuerde "40x52NBR 70", und genau so ginge der
+            # Kurztext spaeter nach SAP.  Zerlegt wird weiterhin zeilenweise,
+            # damit ein verirrtes Anfuehrungszeichen nicht die ganze Datei
+            # in ein Feld saugt.
+            reader = csv.reader(raw.splitlines(keepends=True),
+                                delimiter=delimiter)
             rows = [[cell.strip() for cell in row] for row in reader]
         except csv.Error as exc:
             document.add_warning(f"CSV-Datei konnte nicht zerlegt werden: {exc}")
