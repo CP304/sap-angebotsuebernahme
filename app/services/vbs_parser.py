@@ -26,10 +26,12 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from ..utils.textkodierung import entferne_nullzeichen
+
 logger = logging.getLogger(__name__)
 
 __all__ = ["VbsField", "parse_vbs_recording", "describe_field",
-           "detect_transaction", "TRANSACTION_NAMES"]
+           "detect_transaction", "saubere_aufzeichnung", "TRANSACTION_NAMES"]
 
 #: Transaktionen, die dieses Werkzeug kennt -- Code auf Klartext.
 TRANSACTION_NAMES = {
@@ -61,6 +63,20 @@ _TRANSACTION_PATTERNS = (
 )
 
 
+def saubere_aufzeichnung(vbs_text: str) -> str:
+    """Eingefuegten Text von Nullzeichen befreien.
+
+    Beim Lesen einer Datei ist die Kodierung geklaert, bevor der Text
+    hier ankommt.  Eingefuegt werden kann er aber aus einem Editor, der
+    die UTF-16-Aufzeichnung selbst falsch geoeffnet hat -- dann steht
+    zwischen je zwei Buchstaben ein Nullzeichen und keine einzige Zeile
+    passt mehr auf das Muster.  Sie herauszunehmen macht die Zeilen
+    wieder auswertbar; die Feld-IDs bestehen ohnehin nur aus ASCII, es
+    geht also nichts verloren, was der Parser braucht.
+    """
+    return entferne_nullzeichen(vbs_text)
+
+
 def detect_transaction(vbs_text: str) -> str:
     """Aus welcher Transaktion stammt die Aufzeichnung?
 
@@ -70,6 +86,7 @@ def detect_transaction(vbs_text: str) -> str:
     """
     if not vbs_text:
         return ""
+    vbs_text = saubere_aufzeichnung(vbs_text)
     for muster in _TRANSACTION_PATTERNS:
         treffer = muster.search(vbs_text)
         if treffer:
@@ -124,7 +141,7 @@ def parse_vbs_recording(vbs_text: str) -> list[VbsField]:
         return []
 
     fields = []
-    lines = vbs_text.split("\n")
+    lines = saubere_aufzeichnung(vbs_text).split("\n")
 
     # Regex fuer session.findById("...").text = "..." oder .value = ...
     pattern = re.compile(

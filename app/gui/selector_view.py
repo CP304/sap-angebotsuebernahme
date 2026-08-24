@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..sap.selectors import REQUIRED_SCREENS, SelectorRegistry
+from ..utils.textkodierung import decode_bytes
 from .dialogs import ask_yes_no, show_error
 from .style import Colors
 
@@ -256,11 +257,17 @@ class SelectorView(QWidget):
         if not path:
             return
         try:
-            text = Path(path).read_text(encoding="utf-8", errors="replace")
+            rohdaten = Path(path).read_bytes()
         except OSError as exc:
             show_error(self, "Datei nicht lesbar",
                        "Die Aufzeichnung konnte nicht gelesen werden.", str(exc))
             return
+        # Der Recorder schreibt UTF-16LE.  Fest als utf-8 gelesen bleibt
+        # zwischen je zwei Buchstaben ein Nullzeichen stehen, und kein
+        # findById-Aufruf ist mehr als solcher zu erkennen.
+        text, kodierung, _warnung = decode_bytes(rohdaten)
+        logger.info("Aufzeichnung %s gelesen (Kodierung %s)",
+                    Path(path).name, kodierung)
 
         ids = self.registry.ids_from_vbs(text)
         if not ids:

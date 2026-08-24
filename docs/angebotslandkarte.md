@@ -29,7 +29,7 @@ Verschlechterung, kein Fortschritt.
 ### A. Datei und Transport
 - Format: PDF (Text), PDF (Scan), Excel, CSV, TXT, Word, ODS/ODT, RTF, E-Mail, ZIP
 - Angebot im Mailtext statt im Anhang; mehrere Anhänge; Anhang im Anhang
-- Kodierung: UTF-8, UTF-8 mit BOM, Latin-1, Windows-1252
+- Kodierung: UTF-8, UTF-8 mit BOM, Latin-1, Windows-1252, **UTF-16** (mit und ohne BOM) — so schreibt Excel „Unicode Text (*.txt)" und so kommt der SAP-Listexport heraus
 - Zeilenenden: Windows, Unix, gemischt
 
 ### B. Tabellenaufbau

@@ -124,6 +124,13 @@ Die Zuordnung erfolgt ueber den technischen Feldnamen am Ende der ID
 unterscheidet sich je nach Bildaufbau. Vorgeschlagene Aenderungen werden vor
 der Uebernahme angezeigt.
 
+**Die Datei oeffnen, nicht den Inhalt einfuegen.** Der Recorder schreibt
+seine `.vbs` als UTF-16 — die Anwendung erkennt das beim Oeffnen selbst.
+Wird der Inhalt dagegen ueber einen Editor kopiert, der die Datei falsch
+oeffnet, landet Zeichensalat im Eingabefeld (leere Rechtecke zwischen den
+Buchstaben). Die Anwendung faengt das ab und sagt es auch, aber der
+zuverlaessige Weg ist *Datei oeffnen ...*.
+
 ### 3.3 Von Hand nacharbeiten
 
 Was der Automatismus nicht findet, tragen Sie direkt in der Tabelle ein.

@@ -56,6 +56,7 @@ from ..utils.parsing import (
     parse_int,
     similarity,
 )
+from ..utils.textkodierung import decode_bytes
 from .style import Colors
 
 logger = logging.getLogger(__name__)
@@ -332,14 +333,9 @@ class TableImportDialog(QDialog):
         raw = b""
         with open(path, "rb") as handle:
             raw = handle.read()
-        for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
-            try:
-                text = raw.decode(encoding)
-                break
-            except UnicodeDecodeError:
-                continue
-        else:
-            text = raw.decode("utf-8", errors="replace")
+        # Erkennt auch UTF-16 -- so legt Excel "Unicode Text (*.txt)" und
+        # der SAP-Listexport ihre Dateien ab.
+        text, _kodierung, _warnung = decode_bytes(raw)
 
         try:
             dialect = csv.Sniffer().sniff(text[:4000], delimiters=";,\t|")

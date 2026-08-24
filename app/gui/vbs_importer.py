@@ -45,6 +45,7 @@ from ..services.vbs_parser import (
     detect_transaction,
     parse_vbs_recording,
 )
+from ..utils.textkodierung import decode_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,8 @@ class VbsImporterWidget(QWidget):
         self.settings = settings
         self.fields: list[VbsField] = []
         self.transaction = ""
+        #: Hinweis aus der Kodierungserkennung, falls sie unsicher war
+        self._kodierungshinweis = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -162,6 +165,9 @@ class VbsImporterWidget(QWidget):
             'Inhalt der .vbs hier einfuegen, z. B.:\n'
             'session.findById("wnd[0]/usr/ctxtEINA-LIFNR").text = "100234"')
         self.input.setMaximumHeight(110)
+        # Wird von Hand etwas geaendert, gilt der Hinweis aus dem
+        # Dateieinlesen nicht mehr fuer das, was jetzt dasteht.
+        self.input.textChanged.connect(self._vergiss_kodierungshinweis)
         layout.addWidget(self.input)
 
         knopfleiste = QHBoxLayout()
@@ -205,6 +211,9 @@ class VbsImporterWidget(QWidget):
         layout.addWidget(self.status_label)
 
     # ------------------------------------------------------------------
+    def _vergiss_kodierungshinweis(self) -> None:
+        self._kodierungshinweis = ""
+
     def _open_file(self) -> None:
         pfad, _filter = QFileDialog.getOpenFileName(
             self, "Aufzeichnung oeffnen", "",
@@ -212,15 +221,21 @@ class VbsImporterWidget(QWidget):
         if not pfad:
             return
         try:
-            # utf-8-sig: das SAP GUI schreibt haeufig mit Byte-Order-Mark.
-            inhalt = Path(pfad).read_text(encoding="utf-8-sig")
-        except (OSError, UnicodeDecodeError):
-            try:
-                inhalt = Path(pfad).read_text(encoding="latin-1")
-            except OSError as fehler:
-                self.status_label.setText(f"Datei nicht lesbar: {fehler}")
-                return
+            rohdaten = Path(pfad).read_bytes()
+        except OSError as fehler:
+            self.status_label.setText(f"Datei nicht lesbar: {fehler}")
+            return
+        # Die Aufzeichnung des SAP GUI ist UTF-16LE mit Byte-Order-Mark.
+        # Sie als utf-8 oder cp1252 zu lesen ergibt Zeichensalat mit
+        # Nullzeichen -- auf dem Bildschirm leere Rechtecke -- und der
+        # Parser findet darin keine einzige Zeile wieder.
+        inhalt, kodierung, warnung = decode_bytes(rohdaten)
+        logger.info("Aufzeichnung %s gelesen (Kodierung %s)",
+                    Path(pfad).name, kodierung)
+        # Erst der Text -- das setzen loescht ueber textChanged einen
+        # Hinweis aus einem frueheren Einlesen -- dann der neue Hinweis.
         self.input.setPlainText(inhalt)
+        self._kodierungshinweis = warnung
         self.parse_input()
 
     def parse_input(self) -> None:
@@ -244,16 +259,43 @@ class VbsImporterWidget(QWidget):
 
         if not self.fields:
             self.table.setRowCount(0)
-            self.status_label.setText(
-                "Keine Eingabefelder gefunden. Enthaelt der Text Zeilen der "
-                "Form session.findById(\"...\").text = \"...\"?")
+            self.status_label.setText(self._grund_fuer_leeres_ergebnis(text))
             return
 
         self._fill_table()
         vorbelegt = sum(1 for f in self.fields if vorschlag_fuer(f))
-        self.status_label.setText(
-            f"{len(self.fields)} Feld(er) gefunden, davon {vorbelegt} mit "
-            "Vorschlag. Bitte pruefen und ergaenzen, dann speichern.")
+        meldung = (f"{len(self.fields)} Feld(er) gefunden, davon {vorbelegt} "
+                   "mit Vorschlag. Bitte pruefen und ergaenzen, dann "
+                   "speichern.")
+        if self._kodierungshinweis:
+            meldung = f"{meldung} -- {self._kodierungshinweis}"
+        self.status_label.setText(meldung)
+
+    def _grund_fuer_leeres_ergebnis(self, text: str) -> str:
+        """Warum kam nichts heraus -- und was hilft?
+
+        "Keine Felder gefunden" allein laesst den Anwender ratlos vor
+        einer Datei stehen, die im SAP GUI eben noch entstanden ist.  Der
+        haeufigste Grund ist die Kodierung: die Aufzeichnung ist UTF-16,
+        und wer sie ueber die Zwischenablage aus einem Editor holt, der
+        sie falsch geoeffnet hat, fuegt hier Zeichensalat ein.  Das ist an
+        den Nullzeichen erkennbar und wird beim Namen genannt.
+        """
+        if self._kodierungshinweis:
+            return self._kodierungshinweis
+        if "\x00" in text or text.lstrip().startswith(("ÿþ", "þÿ")):
+            return ("Der eingefuegte Text ist Zeichensalat -- die "
+                    "Aufzeichnung wurde beim Kopieren falsch gelesen. "
+                    "Bitte die .vbs ueber \"Datei oeffnen ...\" einlesen "
+                    "statt den Inhalt einzufuegen.")
+        if "findById" not in text:
+            return ("Keine Eingabefelder gefunden: im Text steht keine "
+                    "einzige Zeile mit session.findById(...). Stammt die "
+                    "Datei aus der Skript-Aufzeichnung des SAP GUI?")
+        return ("Keine Eingabefelder gefunden. Es gibt zwar Zeilen mit "
+                "session.findById(...), aber keine davon schreibt einen "
+                "Wert (.text = \"...\") -- die Aufzeichnung enthaelt "
+                "offenbar nur Klicks und Tastendruecke.")
 
     def _fill_table(self) -> None:
         self.table.setRowCount(len(self.fields))

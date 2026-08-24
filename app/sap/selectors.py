@@ -44,6 +44,8 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from ..utils.textkodierung import entferne_nullzeichen
+
 logger = logging.getLogger(__name__)
 
 #: Kennzeichnung im Beschreibungstext, solange eine ID nicht geprueft ist
@@ -840,7 +842,11 @@ class SelectorRegistry:
         """
         pattern = re.compile(r'findById\(\s*"([^"]+)"\s*\)')
         seen: list[str] = []
-        for match in pattern.finditer(vbs_text):
+        # Aus einem Editor kopiert, der die UTF-16-Aufzeichnung falsch
+        # geoeffnet hat, steht zwischen je zwei Buchstaben ein Nullzeichen.
+        # Die IDs bestehen nur aus ASCII -- ohne die Nullzeichen sind sie
+        # wieder vollstaendig lesbar.
+        for match in pattern.finditer(entferne_nullzeichen(vbs_text)):
             element_id = match.group(1)
             if element_id not in seen:
                 seen.append(element_id)
