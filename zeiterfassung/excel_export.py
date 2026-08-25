@@ -8,8 +8,15 @@ Vier Blaetter:
                 und Tagesart (Urlaub, Krank, Feiertag ...).
 ``Auswertung``  Kennzahlen, Saldoverlauf, Verteilung der Zeit und der
                 Durchschnitt je Wochentag -- jeweils mit Diagramm.
-``Buchungen``   Jede einzelne Sitzung und jede eingeordnete Luecke -- der
-                Nachweis hinter den Tageszahlen.
+``Buchungen``   Jede einzelne Sitzung und jede eingeordnete Luecke mit ihrer
+                Herkunft -- der Nachweis hinter den Tageszahlen.
+``Protokoll``   Jede Aenderung von Hand: wann, von wem, was vorher stand,
+                was jetzt steht und warum.
+
+Damit ist jeder Zeitstempel im Bericht belegt: Er kommt entweder vom
+Rechner selbst (an bis aus), ist nach einem harten Ausschalten aus dem
+letzten Herzschlag geschaetzt, wurde auf Rueckfrage eingeordnet oder von
+Hand erfasst -- und dann steht die Begruendung daneben.
 """
 
 from __future__ import annotations
@@ -23,17 +30,24 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+from . import __version__
 from .rules import Tageswerte, als_dezimal, wochenbeginn
 from .storage import (
     ABWESEND,
     ARBEIT,
     DIENSTREISE,
     FEIERTAG,
+    GESCHAETZT,
     GLEITTAG,
     KRANK,
+    MANUELL,
     PAUSE,
+    QUELLE_TEXT,
+    RUECKFRAGE,
     URLAUB,
     Datenbank,
+    benutzer,
+    rechnername,
 )
 from .tracker import Zeiterfassung
 
@@ -44,6 +58,7 @@ FARBE_KOPF = "1F3864"
 FARBE_ZEILE = "F2F5FA"
 FARBE_WOCHENENDE = "EFEFEF"
 FARBE_ABWESEND = "FFF3D6"
+FARBE_HANDBETRIEB = "FDE7E9"
 FARBE_PLUS = "1E7B34"
 FARBE_MINUS = "B00020"
 
@@ -89,23 +104,32 @@ def exportieren(
     ziel.parent.mkdir(parents=True, exist_ok=True)
     tage = zeiterfassung.zeitraum(von, bis, jetzt=jetzt)
 
+    erstellt = jetzt or datetime.now()
     mappe = Workbook()
-    _blatt_uebersicht(mappe.active, tage, von, bis)
+    _blatt_uebersicht(mappe.active, tage, von, bis, erstellt)
     _blatt_tage(mappe.create_sheet("Tage"), tage)
     _blatt_auswertung(mappe.create_sheet("Auswertung"), tage)
     _blatt_buchungen(mappe.create_sheet("Buchungen"), zeiterfassung.db, von, bis)
+    _blatt_protokoll(mappe.create_sheet("Protokoll"), zeiterfassung.db)
     mappe.save(ziel)
     return ziel
 
 
-def _blatt_uebersicht(blatt: Worksheet, tage: list[Tageswerte], von: date, bis: date) -> None:
+def _blatt_uebersicht(
+    blatt: Worksheet, tage: list[Tageswerte], von: date, bis: date, erstellt: datetime
+) -> None:
     blatt.title = "Uebersicht"
-    _breiten(blatt, [28, 16, 16, 16, 16])
+    _breiten(blatt, [38, 16, 16, 16, 16])
 
     blatt["A1"] = "Zeiterfassung"
     blatt["A1"].font = Font(size=18, bold=True, color=FARBE_KOPF)
-    blatt["A2"] = f"Zeitraum {von:%d.%m.%Y} bis {bis:%d.%m.%Y}"
-    blatt["A2"].font = Font(size=11, color="475467")
+    blatt["A2"] = (
+        f"Zeitraum {von:%d.%m.%Y} bis {bis:%d.%m.%Y}  |  "
+        f"erstellt am {erstellt:%d.%m.%Y um %H:%M:%S}  |  "
+        f"Benutzer {benutzer()}  |  Rechner {rechnername()}  |  "
+        f"Programm Zeiterfassung {__version__}"
+    )
+    blatt["A2"].font = Font(size=10, color="475467")
 
     ist = sum((t.arbeitszeit for t in tage), timedelta(0))
     soll = sum((t.soll for t in tage), timedelta(0))
@@ -129,7 +153,27 @@ def _blatt_uebersicht(blatt: Worksheet, tage: list[Tageswerte], von: date, bis: 
             _saldofarbe(zelle)
         zeile += 1
 
+    handbetrieb = sum(
+        1 for t in tage if t.quellen.get(MANUELL) or t.quellen.get(RUECKFRAGE)
+    )
+    geschaetzt = sum(1 for t in tage if t.quellen.get(GESCHAETZT))
+    blatt.cell(row=zeile, column=1, value="Tage mit Eintraegen von Hand").font = Font(bold=True)
+    blatt.cell(row=zeile, column=2, value=handbetrieb).number_format = "0"
     zeile += 1
+    blatt.cell(row=zeile, column=1, value="Tage mit geschaetztem Ende (Rechner hart aus)").font = Font(bold=True)
+    blatt.cell(row=zeile, column=2, value=geschaetzt).number_format = "0"
+    zeile += 1
+    hinweis = blatt.cell(
+        row=zeile,
+        column=1,
+        value=(
+            "Herkunft jedes Zeitstempels: Blatt \"Buchungen\".  "
+            "Aenderungen von Hand mit Begruendung: Blatt \"Protokoll\"."
+        ),
+    )
+    hinweis.font = Font(italic=True, size=10, color="475467")
+    zeile += 2
+
     _kopfzeile(blatt, zeile, ["Kalenderwoche", "Ist", "Soll", "Saldo"])
     blatt.freeze_panes = None
     erste_datenzeile = zeile + 1
@@ -161,13 +205,13 @@ def _blatt_uebersicht(blatt: Worksheet, tage: list[Tageswerte], von: date, bis: 
 
 
 def _blatt_tage(blatt: Worksheet, tage: list[Tageswerte]) -> None:
-    _breiten(blatt, [12, 12, 16, 10, 10, 10, 10, 10, 10, 12, 30])
+    _breiten(blatt, [12, 12, 16, 10, 10, 10, 10, 10, 10, 12, 26, 30])
     _kopfzeile(
         blatt,
         1,
         [
             "Datum", "Wochentag", "Art", "Kommen", "Gehen", "Anwesend",
-            "Pause", "Ist", "Soll", "Saldo", "Hinweis",
+            "Pause", "Ist", "Soll", "Saldo", "Nachweis", "Hinweis",
         ],
     )
 
@@ -192,6 +236,7 @@ def _blatt_tage(blatt: Worksheet, tage: list[Tageswerte]) -> None:
             als_dezimal(tag.arbeitszeit),
             als_dezimal(tag.soll),
             als_dezimal(tag.arbeitszeit - tag.soll),
+            tag.nachweis,
             ", ".join(hinweise),
         ]
         for spalte, wert in enumerate(werte, start=1):
@@ -221,7 +266,7 @@ def _blatt_tage(blatt: Worksheet, tage: list[Tageswerte]) -> None:
         zelle.number_format = "0.00"
         zelle.font = Font(bold=True)
     if tage:
-        blatt.auto_filter.ref = f"A1:K{letzte}"
+        blatt.auto_filter.ref = f"A1:L{letzte}"
 
 
 def _blatt_auswertung(blatt: Worksheet, tage: list[Tageswerte]) -> None:
@@ -350,31 +395,44 @@ def _blatt_auswertung(blatt: Worksheet, tage: list[Tageswerte]) -> None:
 
 
 def _blatt_buchungen(blatt: Worksheet, datenbank: Datenbank, von: date, bis: date) -> None:
-    _breiten(blatt, [12, 10, 10, 12, 14, 40])
-    _kopfzeile(blatt, 1, ["Datum", "Von", "Bis", "Dauer", "Art", "Bemerkung"])
+    """Jeder Zeitstempel mit seiner Herkunft -- sekundengenau."""
+    _breiten(blatt, [12, 11, 11, 10, 16, 24, 46])
+    _kopfzeile(blatt, 1, ["Datum", "Von", "Bis", "Dauer", "Art", "Herkunft", "Beleg / Begruendung"])
 
     fenster_von = datetime.combine(von, datetime.min.time())
     fenster_bis = datetime.combine(bis, datetime.min.time()) + timedelta(days=1)
 
-    eintraege: list[tuple[datetime, datetime, str, str]] = []
+    eintraege: list[tuple[datetime, datetime, str, str, str]] = []
     for sitzung in datenbank.sitzungen(fenster_von, fenster_bis):
-        bemerkung = "Rechner eingeschaltet"
-        if sitzung.laeuft:
-            bemerkung += " -- laeuft noch"
-        elif sitzung.ende_geschaetzt:
-            bemerkung += " -- Ende aus letztem Herzschlag"
-        eintraege.append((sitzung.beginn, sitzung.ende, "Rechnerlaufzeit", bemerkung))
+        eintraege.append(
+            (
+                sitzung.beginn,
+                sitzung.ende,
+                "Rechnerlaufzeit",
+                QUELLE_TEXT.get(sitzung.quelle, sitzung.quelle),
+                sitzung.herkunft,
+            )
+        )
     for luecke in datenbank.luecken(fenster_von, fenster_bis):
-        eintraege.append((luecke.beginn, luecke.ende, ART_TEXT.get(luecke.art, luecke.art), luecke.notiz))
+        eintraege.append(
+            (
+                luecke.beginn,
+                luecke.ende,
+                ART_TEXT.get(luecke.art, luecke.art),
+                QUELLE_TEXT.get(luecke.quelle, luecke.quelle),
+                luecke.herkunft,
+            )
+        )
 
-    for nummer, (beginn, ende, art, bemerkung) in enumerate(sorted(eintraege), start=2):
+    for nummer, (beginn, ende, art, quelle, beleg) in enumerate(sorted(eintraege), start=2):
         werte = [
             beginn.date(),
-            beginn.strftime("%H:%M"),
-            ende.strftime("%H:%M"),
+            beginn.strftime("%H:%M:%S"),
+            ende.strftime("%H:%M:%S"),
             als_dezimal(ende - beginn),
             art,
-            bemerkung,
+            quelle,
+            beleg,
         ]
         for spalte, wert in enumerate(werte, start=1):
             zelle = blatt.cell(row=nummer, column=spalte, value=wert)
@@ -383,7 +441,47 @@ def _blatt_buchungen(blatt: Worksheet, datenbank: Datenbank, von: date, bis: dat
                 zelle.number_format = "DD.MM.YYYY"
             elif spalte == 4:
                 zelle.number_format = "0.00"
-            if nummer % 2 == 0:
+            elif spalte in (2, 3):
+                zelle.alignment = Alignment(horizontal="center")
+            if quelle == QUELLE_TEXT[MANUELL]:
+                zelle.fill = PatternFill("solid", fgColor=FARBE_HANDBETRIEB)
+            elif nummer % 2 == 0:
                 zelle.fill = PatternFill("solid", fgColor=FARBE_ZEILE)
     if eintraege:
-        blatt.auto_filter.ref = f"A1:F{len(eintraege) + 1}"
+        blatt.auto_filter.ref = f"A1:G{len(eintraege) + 1}"
+
+
+def _blatt_protokoll(blatt: Worksheet, datenbank: Datenbank) -> None:
+    """Das Aenderungsprotokoll -- es wird nur ergaenzt, nie ueberschrieben."""
+    _breiten(blatt, [20, 16, 18, 12, 26, 24, 24, 44])
+    _kopfzeile(
+        blatt,
+        1,
+        ["Zeitpunkt", "Benutzer", "Rechner", "Aktion", "Gegenstand", "vorher", "nachher", "Begruendung"],
+    )
+
+    eintraege = datenbank.protokoll()
+    for nummer, eintrag in enumerate(eintraege, start=2):
+        werte = [
+            eintrag.zeitpunkt,
+            eintrag.benutzer,
+            eintrag.rechner,
+            eintrag.aktion,
+            eintrag.gegenstand,
+            eintrag.vorher,
+            eintrag.nachher,
+            eintrag.begruendung,
+        ]
+        for spalte, wert in enumerate(werte, start=1):
+            zelle = blatt.cell(row=nummer, column=spalte, value=wert)
+            zelle.border = _RAHMEN
+            if spalte == 1:
+                zelle.number_format = "DD.MM.YYYY HH:MM:SS"
+            if nummer % 2 == 0:
+                zelle.fill = PatternFill("solid", fgColor=FARBE_ZEILE)
+
+    if eintraege:
+        blatt.auto_filter.ref = f"A1:H{len(eintraege) + 1}"
+    else:
+        hinweis = blatt.cell(row=2, column=1, value="Keine Aenderungen von Hand -- alle Zeiten stammen aus der automatischen Erfassung.")
+        hinweis.font = Font(italic=True, color="475467")

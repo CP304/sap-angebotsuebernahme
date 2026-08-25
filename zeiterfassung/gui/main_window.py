@@ -57,9 +57,12 @@ class Hauptfenster(QWidget):
         aufbau.addWidget(self._kopf)
 
         aufbau.addWidget(self._bereich_zeitraum())
-        self._tabelle = QTableWidget(0, 9)
+        self._tabelle = QTableWidget(0, 10)
         self._tabelle.setHorizontalHeaderLabels(
-            ["Datum", "Wochentag", "Art", "Kommen", "Gehen", "Anwesend", "Pause", "Ist", "Saldo"]
+            [
+                "Datum", "Wochentag", "Art", "Kommen", "Gehen", "Anwesend",
+                "Pause", "Ist", "Saldo", "Nachweis",
+            ]
         )
         self._tabelle.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._tabelle.verticalHeader().setVisible(False)
@@ -69,8 +72,11 @@ class Hauptfenster(QWidget):
         aufbau.addWidget(self._tabelle, 1)
         hinweis = QLabel(
             "Doppelklick auf einen Tag: Buchungen korrigieren, nachtragen oder die "
-            "Tagesart setzen."
+            "Tagesart setzen.  Die Spalte \"Nachweis\" zeigt, woher die Zeiten des "
+            "Tages stammen; Eingriffe von Hand verlangen eine Begruendung und "
+            "stehen im Excel-Blatt \"Protokoll\"."
         )
+        hinweis.setWordWrap(True)
         hinweis.setStyleSheet("color: #666;")
         aufbau.addWidget(hinweis)
 
@@ -282,11 +288,17 @@ class Hauptfenster(QWidget):
                 als_stunden(tag.erfasste_pause + tag.pausenabzug),
                 als_stunden(tag.arbeitszeit),
                 als_stunden(tag.saldo),
+                tag.nachweis,
             ]
             for spalte, text in enumerate(werte):
                 eintrag = QTableWidgetItem(text)
-                if spalte >= 3:
+                if 3 <= spalte <= 8:
                     eintrag.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if spalte == 9 and not tag.vollautomatisch:
+                    eintrag.setToolTip(
+                        "Enthaelt Zeiten, die nicht rein automatisch entstanden sind -- "
+                        "Einzelheiten im Excel-Blatt \"Buchungen\"."
+                    )
                 if spalte == 8:
                     eintrag.setForeground(
                         Qt.darkGreen if tag.saldo >= timedelta(0) else Qt.red

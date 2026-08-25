@@ -65,8 +65,16 @@ class LueckenDialog(QDialog):
             aufbau.addWidget(hinweis)
 
         self._notiz = QLineEdit()
-        self._notiz.setPlaceholderText("Bemerkung (freiwillig)")
+        self._notiz.setPlaceholderText("Begruendung (freiwillig, steht spaeter im Bericht)")
         aufbau.addWidget(self._notiz)
+
+        nachweis = QLabel(
+            "Diese Zeit wird im Bericht als \"Rechner war aus, auf Rueckfrage "
+            "eingeordnet\" ausgewiesen -- mit der hier gewaehlten Einordnung."
+        )
+        nachweis.setWordWrap(True)
+        nachweis.setStyleSheet("color: #666; font-size: 11px;")
+        aufbau.addWidget(nachweis)
 
         knoepfe = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         knoepfe.button(QDialogButtonBox.Ok).setText("Uebernehmen")
@@ -77,4 +85,8 @@ class LueckenDialog(QDialog):
 
     def ergebnis(self) -> tuple[str, str]:
         knopf = self._gruppe.checkedButton()
-        return (str(knopf.property("art")) if knopf else PAUSE), self._notiz.text().strip()
+        art = str(knopf.property("art")) if knopf else PAUSE
+        # Ohne eigene Bemerkung traegt die Einordnung selbst die Begruendung --
+        # im Bericht steht nie ein unbelegter Zeitstempel.
+        notiz = self._notiz.text().strip() or (knopf.text() if knopf else "")
+        return art, notiz

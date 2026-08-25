@@ -30,7 +30,7 @@ Ziffernblatt.
 |--------------------------------|--------------------------------------------------|
 | Tageszahlen nachschauen        | **Strg+Shift+Z** gedrueckt halten                 |
 | Uebersicht und Zeitraum        | Doppelklick auf das Symbol im Infobereich         |
-| Tag korrigieren                | Doppelklick auf eine Tageszeile in der Uebersicht  |
+| Tag korrigieren                | Doppelklick auf eine Tageszeile (Begruendung noetig) |
 | Urlaub, Krank, Feiertag        | Uebersicht -> *Urlaub / Krank / Feiertag...*      |
 | Excel-Export                   | Uebersicht -> *Als Excel exportieren*             |
 | Beenden                        | Rechtsklick auf das Symbol -> *Zeiterfassung beenden* |
@@ -69,6 +69,37 @@ es offen.
 
 Beispiel: 8:00 bis 17:00 ohne erfasste Pause
 = 9:00 Anwesenheit - 0:30 Pflichtpause = **8:30 Arbeitszeit**, Saldo +0:54.
+
+---
+
+## Belastbare Zeitstempel
+
+Ein Zeitnachweis taugt nur so viel wie seine Nachvollziehbarkeit.  Deshalb
+traegt **jeder** Zeitstempel seine Herkunft mit sich, und der Bericht weist
+sie aus:
+
+| Herkunft | Bedeutung | Beleg im Bericht |
+|---|---|---|
+| **automatisch gemessen** | Der Rechner lief von an bis aus; das Programm hat die Zeit selbst gemessen. | "automatisch gemessen (Rechner an bis aus)" |
+| **Ende aus letztem Herzschlag** | Der Rechner ging hart aus (Stromausfall, Absturz). Das Ende ist der letzte Herzschlag -- also die letzte Minute, in der der Rechner nachweislich lief. | "Beginn automatisch, Ende aus dem letzten Herzschlag" |
+| **auf Rueckfrage eingeordnet** | Der Rechner war zwischendurch aus. Das Programm hat gefragt, der Benutzer hat geantwortet. | "Rechner war aus, auf Rueckfrage eingeordnet am *Zeitpunkt*: *Begruendung*" |
+| **von Hand erfasst** | Nachgetragen oder korrigiert. **Nur mit Begruendung moeglich.** | "von Hand erfasst am *Zeitpunkt*: *Begruendung*" |
+
+Daraus ergibt sich je Tag ein kurzer **Nachweis** ("automatisch",
+"automatisch, von Hand", "Ende geschaetzt, Rueckfrage" ...).  Er steht in der
+Uebersicht, im Mini-Fenster und in der Excel-Spalte *Nachweis*.
+
+**Begruendungspflicht.**  Ohne Begruendung entsteht kein Handeintrag: Der
+Knopf *Uebernehmen* bleibt gesperrt, und auch das Loeschen einer Buchung
+fragt danach.  Die Begruendung ist spaeter nicht mehr wegzudiskutieren --
+sie steht in der Buchung **und** im Aenderungsprotokoll.
+
+**Aenderungsprotokoll.**  Jeder Eingriff von Hand wird fortgeschrieben --
+Zeitpunkt (sekundengenau), Benutzer, Rechnername, Aktion, was vorher stand,
+was jetzt steht und warum.  Das Protokoll wird nur ergaenzt, nie
+ueberschrieben, und immer vollstaendig exportiert.  Die automatische
+Erfassung erzeugt darin keine Eintraege -- was im Protokoll steht, ist genau
+das, was ein Mensch angefasst hat.
 
 ---
 
@@ -135,8 +166,16 @@ Vier Blaetter:
   Kommen und Gehen im Mittel, Urlaubs- und Krankheitstage) und **drei
   Diagramme**: Saldoverlauf als Linie, Verteilung der Zeit als Kreis,
   Durchschnitt je Wochentag als Balken.
-* **Buchungen** -- jede Sitzung und jede eingeordnete Luecke als Nachweis,
-  einschliesslich der von Hand nachgetragenen.
+* **Buchungen** -- jede Sitzung und jede eingeordnete Luecke **sekundengenau**
+  mit Spalte *Herkunft* und *Beleg / Begruendung*; Handeintraege sind rot
+  hinterlegt.
+* **Protokoll** -- das vollstaendige Aenderungsprotokoll: Zeitpunkt,
+  Benutzer, Rechner, Aktion, vorher, nachher, Begruendung.  Gab es keine
+  Eingriffe, steht das dort ausdruecklich.
+
+Der Kopf der Uebersicht nennt Erstellzeitpunkt, Benutzer, Rechnername und
+Programmstand; darunter steht, an wie vielen Tagen von Hand eingegriffen
+wurde und an wie vielen das Ende geschaetzt ist.
 
 Alle Stundenwerte stehen als Industriestunden (8,50 = 8:30) und lassen sich
 direkt weiterrechnen.
@@ -156,7 +195,7 @@ Beides liegt im Benutzerprofil unter
 
 | Datei                 | Inhalt                                            |
 |-----------------------|---------------------------------------------------|
-| `zeiterfassung.db`    | SQLite mit Sitzungen, Luecken und Tagesarten       |
+| `zeiterfassung.db`    | SQLite mit Sitzungen, Luecken, Tagesarten und Aenderungsprotokoll |
 | `einstellungen.json`  | Wochensoll, Tagessoll, Hotkey, Pausenautomatik     |
 
 Einstellbar sind unter anderem Wochenarbeitszeit (Vorgabe 38), Sollstunden
@@ -173,6 +212,8 @@ python -m unittest tests.test_zeiterfassung -v
 
 Die Tests laufen ohne Windows -- geprueft werden Pausenregeln, Tages- und
 Wochenzahlen, Lueckenerkennung, hartes Ausschalten, Urlaub und Krankheit,
-manuelle Korrekturen, Hotkey-Zerlegung und der Excel-Export.  Die
+manuelle Korrekturen, die Herkunft jedes Zeitstempels, die
+Begruendungspflicht, das Aenderungsprotokoll, Hotkey-Zerlegung und der
+Excel-Export.  Die
 Oberflaechentests laufen bildschirmlos (`QT_QPA_PLATFORM=offscreen`) und
 werden uebersprungen, wenn PySide6 nicht vorhanden ist.

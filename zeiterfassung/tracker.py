@@ -28,12 +28,27 @@ from .storage import (
     ABWESEND,
     ARBEIT,
     ARBEITSTAG,
+    AUTOMATISCH,
+    MANUELL,
     PAUSE,
+    RUECKFRAGE,
     TAGESART_TEXT,
     Datenbank,
     Luecke,
+    Protokolleintrag,
     Sitzung,
 )
+
+
+def _begruendung_pruefen(begruendung: str) -> str:
+    """Die Begruendung landet im Bericht -- deshalb darf sie nicht fehlen."""
+    begruendung = (begruendung or "").strip()
+    if len(begruendung) < 3:
+        raise ValueError(
+            "Bitte eine Begruendung angeben -- sie steht spaeter im Bericht "
+            "und macht die Zeit nachvollziehbar."
+        )
+    return begruendung
 
 
 @dataclass
@@ -78,7 +93,15 @@ class Zeiterfassung:
         if luecke < timedelta(minutes=self.einstellungen.luecke_ab_minuten):
             # Kurze Aussetzer gelten als durchgehende Arbeit.
             if luecke > timedelta(0):
-                self.db.luecke_eintragen(letzte.ende, jetzt, ARBEIT, "automatisch: kurzer Aussetzer")
+                self.db.luecke_eintragen(
+                    letzte.ende,
+                    jetzt,
+                    ARBEIT,
+                    f"kurzer Aussetzer unter {self.einstellungen.luecke_ab_minuten} Minuten "
+                    "-- automatisch als Arbeit gewertet",
+                    quelle=AUTOMATISCH,
+                    protokollieren=False,
+                )
             return []
         if self.db.ist_eingeordnet(letzte.ende, jetzt):
             return []
@@ -97,9 +120,10 @@ class Zeiterfassung:
 
     # -- Antworten auf Rueckfragen -----------------------------------------
     def luecke_einordnen(self, luecke: OffeneLuecke, art: str, notiz: str = "") -> None:
+        """Antwort auf die Rueckfrage -- der Rechner war in dieser Zeit aus."""
         if art not in (ARBEIT, PAUSE, ABWESEND):
             raise ValueError(f"Unbekannte Art: {art!r}")
-        self.db.luecke_eintragen(luecke.beginn, luecke.ende, art, notiz)
+        self.db.luecke_eintragen(luecke.beginn, luecke.ende, art, notiz, quelle=RUECKFRAGE)
 
     # -- Auswertung ---------------------------------------------------------
     def tag(self, tag: date | None = None, jetzt: datetime | None = None) -> Tageswerte:
@@ -140,39 +164,55 @@ class Zeiterfassung:
         eintraege: list[Sitzung | Luecke] = [*self.db.sitzungen(von, bis), *self.db.luecken(von, bis)]
         return sorted(eintraege, key=lambda eintrag: eintrag.beginn)
 
-    def sitzung_nachtragen(self, beginn: datetime, ende: datetime) -> int:
-        """Traegt eine vergessene Arbeitszeit von Hand nach."""
-        if ende <= beginn:
-            raise ValueError("Das Ende muss nach dem Beginn liegen.")
-        return self.db.sitzung_anlegen(beginn, ende)
+    def sitzung_nachtragen(self, beginn: datetime, ende: datetime, begruendung: str) -> int:
+        """Traegt eine vergessene Arbeitszeit von Hand nach -- mit Begruendung."""
+        self._zeiten_pruefen(beginn, ende)
+        return self.db.sitzung_anlegen(beginn, ende, begruendung)
 
-    def sitzung_korrigieren(self, sitzung_id: int, beginn: datetime, ende: datetime) -> None:
-        if ende <= beginn:
-            raise ValueError("Das Ende muss nach dem Beginn liegen.")
+    def sitzung_korrigieren(
+        self, sitzung_id: int, beginn: datetime, ende: datetime, begruendung: str
+    ) -> None:
+        self._zeiten_pruefen(beginn, ende)
         if self.sitzung_id == sitzung_id:
             # Die laufende Sitzung wird durch die Korrektur festgeschrieben.
             self.sitzung_id = None
-        self.db.sitzung_aendern(sitzung_id, beginn, ende)
+        self.db.sitzung_aendern(sitzung_id, beginn, ende, begruendung)
 
-    def sitzung_verwerfen(self, sitzung_id: int) -> None:
+    def sitzung_verwerfen(self, sitzung_id: int, begruendung: str) -> None:
         if self.sitzung_id == sitzung_id:
             self.sitzung_id = None
-        self.db.sitzung_loeschen(sitzung_id)
+        self.db.sitzung_loeschen(sitzung_id, begruendung)
 
-    def luecke_nachtragen(self, beginn: datetime, ende: datetime, art: str, notiz: str = "") -> None:
-        if ende <= beginn:
-            raise ValueError("Das Ende muss nach dem Beginn liegen.")
+    def luecke_nachtragen(self, beginn: datetime, ende: datetime, art: str, begruendung: str) -> None:
+        self._zeiten_pruefen(beginn, ende)
         if art not in (ARBEIT, PAUSE, ABWESEND):
             raise ValueError(f"Unbekannte Art: {art!r}")
-        self.db.luecke_eintragen(beginn, ende, art, notiz)
+        self.db.luecke_eintragen(
+            beginn, ende, art, _begruendung_pruefen(begruendung), quelle=MANUELL
+        )
 
-    def luecke_korrigieren(self, luecke_id: int, beginn: datetime, ende: datetime, art: str, notiz: str = "") -> None:
+    def luecke_korrigieren(
+        self, luecke_id: int, beginn: datetime, ende: datetime, art: str, begruendung: str
+    ) -> None:
+        self._zeiten_pruefen(beginn, ende)
+        self.db.luecke_aendern(luecke_id, beginn, ende, art, begruendung)
+
+    def luecke_verwerfen(self, luecke_id: int, begruendung: str) -> None:
+        self.db.luecke_loeschen(luecke_id, begruendung)
+
+    @staticmethod
+    def _zeiten_pruefen(beginn: datetime, ende: datetime) -> None:
         if ende <= beginn:
             raise ValueError("Das Ende muss nach dem Beginn liegen.")
-        self.db.luecke_aendern(luecke_id, beginn, ende, art, notiz)
 
-    def luecke_verwerfen(self, luecke_id: int) -> None:
-        self.db.luecke_loeschen(luecke_id)
+    # -- Nachweis -----------------------------------------------------------
+    def protokoll(self, von: date | None = None, bis: date | None = None) -> list[Protokolleintrag]:
+        """Aenderungsprotokoll, wahlweise auf einen Zeitraum eingegrenzt."""
+        if von is None and bis is None:
+            return self.db.protokoll()
+        anfang = datetime.combine(von, datetime.min.time()) if von else None
+        schluss = datetime.combine(bis, datetime.max.time().replace(microsecond=0)) if bis else None
+        return self.db.protokoll(anfang, schluss)
 
     # -- Urlaub, Krankheit, Feiertag ---------------------------------------
     def tagesart_setzen(

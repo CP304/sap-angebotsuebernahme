@@ -218,4 +218,5 @@ class MiniFenster(QWidget):
         hinweise = [f"Soll heute {als_stunden(tag.soll)}", f"Saldo {als_stunden(tag.saldo)}"]
         if tag.pausenabzug > timedelta(0):
             hinweise.append(f"Pflichtpause {als_stunden(tag.pausenabzug)} abgezogen")
+        hinweise.append(f"Nachweis: {tag.nachweis}")
         self._fuss.setText(" -- ".join(hinweise))

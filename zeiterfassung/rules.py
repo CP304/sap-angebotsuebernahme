@@ -15,15 +15,19 @@ Grundlagen
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
 from .config import Einstellungen
 from .storage import (
     ABWESEND,
     ARBEIT,
+    AUTOMATISCH,
+    GESCHAETZT,
     GUTSCHRIFT_TAGESARTEN,
+    MANUELL,
     PAUSE,
+    RUECKFRAGE,
     Luecke,
     Sitzung,
     Tagesart,
@@ -106,11 +110,40 @@ class Tageswerte:
     soll: timedelta
     laeuft: bool                    # Rechner laeuft gerade (Sitzung offen)
     tagesart: Tagesart | None = None
+    # Wie viele Buchungen des Tages aus welcher Quelle stammen -- daraus
+    # ergibt sich, wie belastbar die Tageszahl ist.
+    quellen: dict[str, int] = field(default_factory=dict)
     offene_luecken: int = 0
 
     @property
     def art_beschriftung(self) -> str:
         return self.tagesart.beschriftung if self.tagesart else "Arbeitstag"
+
+    @property
+    def nachweis(self) -> str:
+        """Kurzform der Herkunft fuer Tabellen und Berichte."""
+        if not self.quellen:
+            if self.tagesart is not None:
+                return f"{self.tagesart.beschriftung} -- von Hand eingetragen"
+            return "keine Erfassung"
+        teile = []
+        for quelle, beschriftung in (
+            (AUTOMATISCH, "automatisch"),
+            (GESCHAETZT, "Ende geschaetzt"),
+            (RUECKFRAGE, "Rueckfrage"),
+            (MANUELL, "von Hand"),
+        ):
+            anzahl = self.quellen.get(quelle, 0)
+            if anzahl:
+                teile.append(beschriftung if anzahl == 1 else f"{beschriftung} ({anzahl}x)")
+        return ", ".join(teile)
+
+    @property
+    def vollautomatisch(self) -> bool:
+        """True, wenn kein Zeitstempel des Tages von Hand entstanden ist."""
+        if self.tagesart is not None:
+            return False
+        return not any(self.quellen.get(quelle) for quelle in (MANUELL, RUECKFRAGE, GESCHAETZT))
 
     @property
     def rest(self) -> timedelta:
@@ -160,7 +193,11 @@ def tag_auswerten(
 
     anwesend: list[Zeitraum] = []
     pausen: list[Zeitraum] = []
+    quellen: dict[str, int] = {}
     laeuft = False
+
+    def merken(quelle: str) -> None:
+        quellen[quelle] = quellen.get(quelle, 0) + 1
 
     for sitzung in sitzungen:
         # Eine laufende Sitzung reicht bis jetzt -- der letzte Herzschlag
@@ -170,6 +207,7 @@ def tag_auswerten(
         if zeitraum[1] > zeitraum[0]:
             anwesend.append(zeitraum)
             laeuft = laeuft or sitzung.laeuft
+            merken(sitzung.quelle)
 
     for luecke in luecken:
         zeitraum = (max(luecke.beginn, von), min(luecke.ende, bis))
@@ -179,6 +217,9 @@ def tag_auswerten(
             anwesend.append(zeitraum)
         elif luecke.art in (PAUSE, ABWESEND):
             pausen.append(zeitraum)
+        else:
+            continue
+        merken(luecke.quelle)
 
     anwesend = _vereinigen(anwesend)
     pausen = _vereinigen(pausen)
@@ -227,6 +268,7 @@ def tag_auswerten(
         soll=soll,
         laeuft=laeuft,
         tagesart=tagesart,
+        quellen=quellen,
     )
 
 

@@ -4,6 +4,10 @@ Die automatische Erfassung ist gut, aber nicht allwissend: der Rechner lief
 in der Mittagspause weiter, das Programm wurde zu spaet gestartet, oder ein
 halber Tag war Urlaub.  Hier laesst sich jede Buchung eines Tages aendern,
 nachtragen und loeschen -- und die Tagesart setzen.
+
+Jeder Eingriff von Hand verlangt eine **Begruendung**.  Sie steht spaeter im
+Bericht und im Aenderungsprotokoll; ohne sie waere eine Zeit, die nicht vom
+Rechner selbst kommt, nicht belastbar.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from datetime import date, datetime, time, timedelta
 from PySide6.QtCore import QTime, Qt
 from PySide6.QtWidgets import (
     QComboBox,
+    QInputDialog,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -73,8 +78,15 @@ class BuchungsDialog(QDialog):
         aufbau.addLayout(zeile)
 
         self._notiz = QLineEdit()
-        self._notiz.setPlaceholderText("Bemerkung (freiwillig)")
+        self._notiz.setPlaceholderText("Begruendung -- Pflicht, steht spaeter im Bericht")
         aufbau.addWidget(self._notiz)
+
+        self._hinweis = QLabel(
+            "Von Hand erfasste Zeiten werden im Bericht als solche ausgewiesen."
+        )
+        self._hinweis.setWordWrap(True)
+        self._hinweis.setStyleSheet("color: #666;")
+        aufbau.addWidget(self._hinweis)
 
         if isinstance(buchung, Sitzung):
             self._art.setCurrentIndex(0)
@@ -90,6 +102,15 @@ class BuchungsDialog(QDialog):
         knoepfe.accepted.connect(self._pruefen_und_schliessen)
         knoepfe.rejected.connect(self.reject)
         aufbau.addWidget(knoepfe)
+
+        # Ohne Begruendung bleibt der Knopf gesperrt -- so entsteht gar kein
+        # unbelegter Zeitstempel.
+        self._uebernehmen = knoepfe.button(QDialogButtonBox.Ok)
+        self._notiz.textChanged.connect(self._begruendung_pruefen)
+        self._begruendung_pruefen()
+
+    def _begruendung_pruefen(self) -> None:
+        self._uebernehmen.setEnabled(len(self._notiz.text().strip()) >= 3)
 
     def _zeiten(self) -> tuple[datetime, datetime]:
         beginn = datetime.combine(self.tag, time(self._von.time().hour(), self._von.time().minute()))
@@ -146,8 +167,8 @@ class TagesDialog(QDialog):
         art_zeile.addWidget(self._notiz, 1)
         aufbau.addLayout(art_zeile)
 
-        self._tabelle = QTableWidget(0, 4)
-        self._tabelle.setHorizontalHeaderLabels(["Von", "Bis", "Dauer", "Art"])
+        self._tabelle = QTableWidget(0, 5)
+        self._tabelle.setHorizontalHeaderLabels(["Von", "Bis", "Dauer", "Art", "Herkunft"])
         self._tabelle.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._tabelle.verticalHeader().setVisible(False)
         self._tabelle.setSelectionBehavior(QTableWidget.SelectRows)
@@ -210,7 +231,7 @@ class TagesDialog(QDialog):
         art, beginn, ende, notiz = dialog.ergebnis()
         try:
             if art == "sitzung":
-                self.zeiterfassung.sitzung_nachtragen(beginn, ende)
+                self.zeiterfassung.sitzung_nachtragen(beginn, ende, notiz)
             else:
                 self.zeiterfassung.luecke_nachtragen(beginn, ende, art, notiz)
         except ValueError as fehler:
@@ -229,7 +250,7 @@ class TagesDialog(QDialog):
         art, beginn, ende, notiz = dialog.ergebnis()
         try:
             if isinstance(buchung, Sitzung):
-                self.zeiterfassung.sitzung_korrigieren(buchung.id, beginn, ende)
+                self.zeiterfassung.sitzung_korrigieren(buchung.id, beginn, ende, notiz)
             else:
                 self.zeiterfassung.luecke_korrigieren(buchung.id, beginn, ende, art, notiz)
         except ValueError as fehler:
@@ -242,17 +263,22 @@ class TagesDialog(QDialog):
         if buchung is None:
             QMessageBox.information(self, "Buchung", "Bitte zuerst eine Zeile auswaehlen.")
             return
-        antwort = QMessageBox.question(
+        begruendung, bestaetigt = QInputDialog.getText(
             self,
             "Buchung loeschen",
-            f"{buchung.beginn:%H:%M} bis {buchung.ende:%H:%M} wirklich loeschen?",
+            f"{buchung.beginn:%H:%M} bis {buchung.ende:%H:%M} loeschen.\n"
+            "Begruendung (Pflicht -- sie bleibt im Aenderungsprotokoll stehen):",
         )
-        if antwort != QMessageBox.Yes:
+        if not bestaetigt:
             return
-        if isinstance(buchung, Sitzung):
-            self.zeiterfassung.sitzung_verwerfen(buchung.id)
-        else:
-            self.zeiterfassung.luecke_verwerfen(buchung.id)
+        try:
+            if isinstance(buchung, Sitzung):
+                self.zeiterfassung.sitzung_verwerfen(buchung.id, begruendung)
+            else:
+                self.zeiterfassung.luecke_verwerfen(buchung.id, begruendung)
+        except ValueError as fehler:
+            QMessageBox.warning(self, "Buchung", str(fehler))
+            return
         self.aktualisieren()
 
     # -- Anzeige ------------------------------------------------------------
@@ -262,21 +288,16 @@ class TagesDialog(QDialog):
         for zeile, buchung in enumerate(self._buchungen):
             if isinstance(buchung, Sitzung):
                 art = "Arbeit am Rechner"
-                if buchung.manuell:
-                    art += " (von Hand)"
-                elif buchung.laeuft:
+                if buchung.laeuft:
                     art += " (laeuft)"
-                elif buchung.ende_geschaetzt:
-                    art += " (Ende geschaetzt)"
             else:
                 art = ART_TEXT.get(buchung.art, buchung.art)
-                if buchung.notiz:
-                    art += f" -- {buchung.notiz}"
             werte = [
                 f"{buchung.beginn:%H:%M}",
                 f"{buchung.ende:%H:%M}",
                 als_stunden(buchung.dauer),
                 art,
+                buchung.herkunft,
             ]
             for spalte, text in enumerate(werte):
                 eintrag = QTableWidgetItem(text)
@@ -290,5 +311,6 @@ class TagesDialog(QDialog):
             f"  |  Soll {als_stunden(werte.soll)}"
             f"  |  Pause {als_stunden(werte.erfasste_pause + werte.pausenabzug)}"
             f"  |  Saldo {als_stunden(werte.saldo)}"
+            f"  |  Nachweis: {werte.nachweis}"
         )
         self._anteil.setEnabled(str(self._tagesart.currentData()) != ARBEITSTAG)
