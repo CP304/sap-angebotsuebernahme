@@ -19,7 +19,15 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
 from .config import Einstellungen
-from .storage import ABWESEND, ARBEIT, PAUSE, Luecke, Sitzung
+from .storage import (
+    ABWESEND,
+    ARBEIT,
+    GUTSCHRIFT_TAGESARTEN,
+    PAUSE,
+    Luecke,
+    Sitzung,
+    Tagesart,
+)
 
 # Schwellen der Pflichtpause: (Arbeitszeit ueber ..., Pause mindestens ...)
 PFLICHTPAUSEN = (
@@ -36,11 +44,45 @@ def pflichtpause(arbeitszeit: timedelta) -> timedelta:
     return timedelta(0)
 
 
-def _zuschnitt(beginn: datetime, ende: datetime, von: datetime, bis: datetime) -> timedelta:
-    """Anteil eines Zeitraums, der in das Fenster [von, bis) faellt."""
-    start = max(beginn, von)
-    schluss = min(ende, bis)
-    return max(timedelta(0), schluss - start)
+# -- Intervallrechnung ------------------------------------------------------
+# Zeitraeume koennen sich ueberschneiden: zwei Sitzungen nach einer Korrektur,
+# oder eine von Hand nachgetragene Pause mitten in einer Sitzung.  Deshalb
+# wird mit Mengen von Zeitraeumen gerechnet und nicht mit blossen Summen --
+# sonst zaehlt dieselbe Minute doppelt oder eine Pause bleibt wirkungslos.
+Zeitraum = tuple[datetime, datetime]
+
+
+def _vereinigen(zeitraeume: list[Zeitraum]) -> list[Zeitraum]:
+    """Ueberschneidungen zusammenfassen -- jede Minute zaehlt genau einmal."""
+    ergebnis: list[Zeitraum] = []
+    for beginn, ende in sorted(z for z in zeitraeume if z[1] > z[0]):
+        if ergebnis and beginn <= ergebnis[-1][1]:
+            letzter = ergebnis[-1]
+            ergebnis[-1] = (letzter[0], max(letzter[1], ende))
+        else:
+            ergebnis.append((beginn, ende))
+    return ergebnis
+
+
+def _abziehen(grundmenge: list[Zeitraum], abzug: list[Zeitraum]) -> list[Zeitraum]:
+    """Alles aus ``abzug`` aus ``grundmenge`` herausschneiden."""
+    ergebnis = list(grundmenge)
+    for a_beginn, a_ende in _vereinigen(abzug):
+        naechste: list[Zeitraum] = []
+        for beginn, ende in ergebnis:
+            if a_ende <= beginn or a_beginn >= ende:
+                naechste.append((beginn, ende))
+                continue
+            if beginn < a_beginn:
+                naechste.append((beginn, a_beginn))
+            if a_ende < ende:
+                naechste.append((a_ende, ende))
+        ergebnis = naechste
+    return ergebnis
+
+
+def _summe(zeitraeume: list[Zeitraum]) -> timedelta:
+    return sum((ende - beginn for beginn, ende in zeitraeume), timedelta(0))
 
 
 def tagesfenster(tag: date) -> tuple[datetime, datetime]:
@@ -58,10 +100,17 @@ class Tageswerte:
     anwesenheit: timedelta          # Einschaltzeit + als Arbeit gebuchte Luecken
     erfasste_pause: timedelta       # Luecken als Pause oder Abwesenheit
     pausenabzug: timedelta          # zusaetzlicher Abzug nach ArbZG
-    arbeitszeit: timedelta          # das, was zaehlt
+    erfasste_arbeitszeit: timedelta  # tatsaechlich am Rechner geleistet
+    gutschrift: timedelta           # aus Urlaub, Krankheit, Feiertag ...
+    arbeitszeit: timedelta          # das, was zaehlt (erfasst + Gutschrift)
     soll: timedelta
     laeuft: bool                    # Rechner laeuft gerade (Sitzung offen)
+    tagesart: Tagesart | None = None
     offene_luecken: int = 0
+
+    @property
+    def art_beschriftung(self) -> str:
+        return self.tagesart.beschriftung if self.tagesart else "Arbeitstag"
 
     @property
     def rest(self) -> timedelta:
@@ -79,6 +128,8 @@ class Tageswerte:
         rest = self.rest
         if rest <= timedelta(0):
             return self.letzter_kontakt
+        if self.tagesart is not None and self.tagesart.anteil >= 1.0:
+            return None  # ganzer Tag Urlaub, Krankheit oder Feiertag
         # Kippt die verbleibende Arbeit ueber eine Pausenschwelle, faellt
         # dort weitere Pausenzeit an -- die muss man mit absitzen.
         ziel = self.letzter_kontakt + rest
@@ -94,41 +145,51 @@ def tag_auswerten(
     luecken: list[Luecke],
     einstellungen: Einstellungen,
     jetzt: datetime | None = None,
+    tagesart: Tagesart | None = None,
 ) -> Tageswerte:
-    """Rechnet Sitzungen und eingeordnete Luecken zu Tageskennzahlen zusammen."""
+    """Rechnet Sitzungen, Luecken und die Tagesart zu Tageskennzahlen zusammen.
+
+    Urlaub, Krankheit und Feiertag schreiben das Tagessoll gut.  Bei einem
+    ganzen Tag bleibt eine trotzdem aufgezeichnete Rechnerlaufzeit
+    unberuecksichtigt -- der Rechner lief dann eben mit, gearbeitet wurde
+    nicht.  Bei einem halben Tag wird die halbe Gutschrift mit der wirklich
+    geleisteten Zeit addiert.
+    """
     von, bis = tagesfenster(tag)
     jetzt = jetzt or datetime.now()
 
-    anwesenheit = timedelta(0)
-    erste: datetime | None = None
-    letzter: datetime | None = None
+    anwesend: list[Zeitraum] = []
+    pausen: list[Zeitraum] = []
     laeuft = False
 
     for sitzung in sitzungen:
         # Eine laufende Sitzung reicht bis jetzt -- der letzte Herzschlag
         # liegt je nach Takt bis zu einer Minute zurueck.
         ende = max(sitzung.ende, jetzt) if sitzung.laeuft else sitzung.ende
-        anteil = _zuschnitt(sitzung.beginn, ende, von, bis)
-        if anteil <= timedelta(0) and not (von <= sitzung.beginn < bis):
-            continue
-        anwesenheit += anteil
-        beginn_im_tag = max(sitzung.beginn, von)
-        ende_im_tag = min(ende, bis)
-        erste = beginn_im_tag if erste is None else min(erste, beginn_im_tag)
-        letzter = ende_im_tag if letzter is None else max(letzter, ende_im_tag)
-        laeuft = laeuft or sitzung.laeuft
+        zeitraum = (max(sitzung.beginn, von), min(ende, bis))
+        if zeitraum[1] > zeitraum[0]:
+            anwesend.append(zeitraum)
+            laeuft = laeuft or sitzung.laeuft
 
-    erfasste_pause = timedelta(0)
     for luecke in luecken:
-        anteil = _zuschnitt(luecke.beginn, luecke.ende, von, bis)
-        if anteil <= timedelta(0):
+        zeitraum = (max(luecke.beginn, von), min(luecke.ende, bis))
+        if zeitraum[1] <= zeitraum[0]:
             continue
         if luecke.art == ARBEIT:
-            anwesenheit += anteil
-            letzter = max(letzter, min(luecke.ende, bis)) if letzter else min(luecke.ende, bis)
-            erste = min(erste, max(luecke.beginn, von)) if erste else max(luecke.beginn, von)
+            anwesend.append(zeitraum)
         elif luecke.art in (PAUSE, ABWESEND):
-            erfasste_pause += anteil
+            pausen.append(zeitraum)
+
+    anwesend = _vereinigen(anwesend)
+    pausen = _vereinigen(pausen)
+    # Eine Pause innerhalb einer Sitzung muss die Anwesenheit kuerzen --
+    # sonst waere sie folgenlos.
+    anwesend = _abziehen(anwesend, pausen)
+
+    anwesenheit = _summe(anwesend)
+    erfasste_pause = _summe(pausen)
+    erste = anwesend[0][0] if anwesend else None
+    letzter = anwesend[-1][1] if anwesend else None
 
     if einstellungen.pausen_automatik:
         # Zweistufig: erst mit der Bruttozeit pruefen, dann mit der bereits
@@ -138,8 +199,20 @@ def tag_auswerten(
     else:
         abzug = timedelta(0)
 
-    arbeitszeit = max(timedelta(0), anwesenheit - abzug)
+    erfasst = max(timedelta(0), anwesenheit - abzug)
     soll = timedelta(hours=einstellungen.soll_stunden(tag.weekday()))
+
+    gutschrift = timedelta(0)
+    if tagesart is not None:
+        anteil = max(0.0, min(1.0, tagesart.anteil))
+        if GUTSCHRIFT_TAGESARTEN.get(tagesart.art, False):
+            gutschrift = soll * anteil
+        else:
+            # Unbezahlt frei: das Soll sinkt entsprechend.
+            soll = soll * (1 - anteil)
+        if anteil >= 1.0:
+            erfasst = timedelta(0)
+    arbeitszeit = erfasst + gutschrift
 
     return Tageswerte(
         tag=tag,
@@ -148,9 +221,12 @@ def tag_auswerten(
         anwesenheit=anwesenheit,
         erfasste_pause=erfasste_pause,
         pausenabzug=abzug,
+        erfasste_arbeitszeit=erfasst,
+        gutschrift=gutschrift,
         arbeitszeit=arbeitszeit,
         soll=soll,
         laeuft=laeuft,
+        tagesart=tagesart,
     )
 
 
@@ -180,6 +256,10 @@ class Wochenwerte:
     @property
     def kalenderwoche(self) -> int:
         return self.montag.isocalendar().week
+
+    @property
+    def gutschrift(self) -> timedelta:
+        return sum((t.gutschrift for t in self.tage), timedelta(0))
 
 
 def wochenbeginn(tag: date) -> date:

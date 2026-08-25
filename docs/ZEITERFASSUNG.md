@@ -1,8 +1,9 @@
 # Zeiterfassung
 
 Erfasst die Arbeitszeit anhand der Einschaltzeiten des Rechners, fragt bei
-Luecken im Tag nach, zeigt die Tageszahlen auf Tastendruck und exportiert
-alles als formatierte Excel-Mappe.
+Luecken im Tag nach, laesst sich von Hand korrigieren, kennt Urlaub und
+Krankheit, zeigt die Tageszahlen auf Tastendruck und exportiert alles als
+formatierte Excel-Mappe mit Auswertung und Diagrammen.
 
 Grundlage ist eine **Wochenarbeitszeit von 38 Stunden**, verteilt auf Montag
 bis Freitag -- also **7,6 Stunden (7:36) je Tag**.  Fuehrend ist das
@@ -29,6 +30,8 @@ Ziffernblatt.
 |--------------------------------|--------------------------------------------------|
 | Tageszahlen nachschauen        | **Strg+Shift+Z** gedrueckt halten                 |
 | Uebersicht und Zeitraum        | Doppelklick auf das Symbol im Infobereich         |
+| Tag korrigieren                | Doppelklick auf eine Tageszeile in der Uebersicht  |
+| Urlaub, Krank, Feiertag        | Uebersicht -> *Urlaub / Krank / Feiertag...*      |
 | Excel-Export                   | Uebersicht -> *Als Excel exportieren*             |
 | Beenden                        | Rechtsklick auf das Symbol -> *Zeiterfassung beenden* |
 
@@ -39,6 +42,11 @@ keinen Fokus und zeigt:
 * Arbeitszeit heute, Pausen, Rest bis zum Tagesziel
 * voraussichtlicher Feierabend
 * Ist und Soll der Woche sowie den Wochenrest
+
+Oben rechts sitzt ein kleiner Pfeil (**↗**): ein Klick springt in die grosse
+Uebersicht.  Damit er ueberhaupt zu treffen ist, bleibt das Fenster nach dem
+Loslassen noch 2,5 Sekunden stehen -- und solange die Maus darin steht, bleibt
+es offen.
 
 ---
 
@@ -64,6 +72,41 @@ Beispiel: 8:00 bis 17:00 ohne erfasste Pause
 
 ---
 
+## Korrigieren, Urlaub und Krankheit
+
+Die Automatik ist gut, aber nicht allwissend: der Rechner lief in der
+Mittagspause weiter, das Programm wurde zu spaet gestartet, ein halber Tag war
+Urlaub.  Deshalb laesst sich jeder Tag von Hand nachziehen.
+
+**Tag bearbeiten** (Doppelklick auf eine Tageszeile) zeigt alle Buchungen des
+Tages und erlaubt:
+
+* **Nachtragen** -- vergessene Arbeitszeit oder eine Pause eintragen
+* **Bearbeiten** -- Zeiten und Art einer Buchung aendern
+* **Loeschen** -- eine falsche Buchung entfernen
+* **Tagesart** -- Arbeitstag, Urlaub, Krank, Feiertag, Gleittag, Dienstreise;
+  ganz- oder halbtags
+
+Von Hand geaenderte Buchungen sind als solche gekennzeichnet und tauchen im
+Excel-Blatt *Buchungen* auf -- die Korrektur bleibt also nachvollziehbar.
+
+Eine Pause mitten in einer Sitzung kuerzt die Anwesenheit tatsaechlich; sich
+ueberschneidende Buchungen werden nur einmal gezaehlt.
+
+**Urlaub / Krank / Feiertag** traegt einen ganzen Zeitraum auf einmal ein.
+Tage ohne Sollstunden (Samstag und Sonntag) werden dabei uebersprungen --
+Urlaub am Wochenende kostet keinen Urlaubstag.
+
+So wird gerechnet:
+
+| Fall | Wirkung |
+|---|---|
+| Ganzer Tag Urlaub/Krank/Feiertag | Tagessoll wird gutgeschrieben, Saldo 0. Eine trotzdem aufgezeichnete Rechnerlaufzeit bleibt unberuecksichtigt. |
+| Halber Tag | Halbe Gutschrift **plus** die wirklich geleistete Zeit. |
+| Zurueck auf *Arbeitstag* | Der Eintrag wird geloescht, es zaehlt wieder die Erfassung. |
+
+---
+
 ## Autostart
 
 Vorgabe ist ein Eintrag unter
@@ -81,13 +124,19 @@ meldet, dass es bereits laeuft.
 
 ## Excel-Export
 
-Drei Blaetter:
+Vier Blaetter:
 
-* **Uebersicht** -- Ist, Soll, Saldo und Pausen des Zeitraums, Salden je
-  Kalenderwoche und ein Balkendiagramm Ist/Soll.
-* **Tage** -- eine Zeile je Tag mit Kommen, Gehen, Anwesenheit, Pause, Ist,
-  Soll und Saldo; Wochenenden hinterlegt, Summenzeile, Autofilter.
-* **Buchungen** -- jede Sitzung und jede eingeordnete Luecke als Nachweis.
+* **Uebersicht** -- Ist, Soll, Saldo, Pausen und Gutschriften des Zeitraums,
+  Salden je Kalenderwoche und ein Balkendiagramm Ist gegen Soll.
+* **Tage** -- eine Zeile je Tag mit Tagesart, Kommen, Gehen, Anwesenheit,
+  Pause, Ist, Soll und Saldo; Wochenenden grau, Abwesenheiten gelb
+  hinterlegt, Summenzeile, Autofilter.
+* **Auswertung** -- Kennzahlen (Durchschnitt je Erfassungstag, laengster Tag,
+  Kommen und Gehen im Mittel, Urlaubs- und Krankheitstage) und **drei
+  Diagramme**: Saldoverlauf als Linie, Verteilung der Zeit als Kreis,
+  Durchschnitt je Wochentag als Balken.
+* **Buchungen** -- jede Sitzung und jede eingeordnete Luecke als Nachweis,
+  einschliesslich der von Hand nachgetragenen.
 
 Alle Stundenwerte stehen als Industriestunden (8,50 = 8:30) und lassen sich
 direkt weiterrechnen.
@@ -107,7 +156,7 @@ Beides liegt im Benutzerprofil unter
 
 | Datei                 | Inhalt                                            |
 |-----------------------|---------------------------------------------------|
-| `zeiterfassung.db`    | SQLite mit Sitzungen und eingeordneten Luecken     |
+| `zeiterfassung.db`    | SQLite mit Sitzungen, Luecken und Tagesarten       |
 | `einstellungen.json`  | Wochensoll, Tagessoll, Hotkey, Pausenautomatik     |
 
 Einstellbar sind unter anderem Wochenarbeitszeit (Vorgabe 38), Sollstunden
@@ -122,6 +171,8 @@ nachgefragt wird (Vorgabe 5 Minuten).
 python -m unittest tests.test_zeiterfassung -v
 ```
 
-Die Tests laufen ohne Oberflaeche und ohne Windows -- geprueft werden
-Pausenregeln, Tages- und Wochenzahlen, Lueckenerkennung, hartes Ausschalten,
-Hotkey-Zerlegung und der Excel-Export.
+Die Tests laufen ohne Windows -- geprueft werden Pausenregeln, Tages- und
+Wochenzahlen, Lueckenerkennung, hartes Ausschalten, Urlaub und Krankheit,
+manuelle Korrekturen, Hotkey-Zerlegung und der Excel-Export.  Die
+Oberflaechentests laufen bildschirmlos (`QT_QPA_PLATFORM=offscreen`) und
+werden uebersprungen, wenn PySide6 nicht vorhanden ist.

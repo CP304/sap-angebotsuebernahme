@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDateEdit,
@@ -33,7 +34,10 @@ from .. import autostart
 from ..config import WOCHENTAG_SCHLUESSEL
 from ..excel_export import WOCHENTAGE, exportieren
 from ..rules import als_stunden, als_uhrzeit, wochenbeginn
+from ..storage import ARBEITSTAG, TAGESART_TEXT
 from ..tracker import Zeiterfassung
+from .absence_dialog import AbwesenheitsDialog
+from .day_editor import TagesDialog
 
 
 class Hauptfenster(QWidget):
@@ -44,7 +48,8 @@ class Hauptfenster(QWidget):
         self.zeiterfassung = zeiterfassung
         self.einstellungen = zeiterfassung.einstellungen
         self.setWindowTitle("Zeiterfassung")
-        self.resize(880, 640)
+        self.resize(940, 700)
+        self._tage: list = []
 
         aufbau = QVBoxLayout(self)
         self._kopf = QLabel()
@@ -52,19 +57,42 @@ class Hauptfenster(QWidget):
         aufbau.addWidget(self._kopf)
 
         aufbau.addWidget(self._bereich_zeitraum())
-        self._tabelle = QTableWidget(0, 8)
+        self._tabelle = QTableWidget(0, 9)
         self._tabelle.setHorizontalHeaderLabels(
-            ["Datum", "Wochentag", "Kommen", "Gehen", "Anwesend", "Pause", "Ist", "Saldo"]
+            ["Datum", "Wochentag", "Art", "Kommen", "Gehen", "Anwesend", "Pause", "Ist", "Saldo"]
         )
         self._tabelle.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._tabelle.verticalHeader().setVisible(False)
-        self._tabelle.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._tabelle.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._tabelle.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._tabelle.doubleClicked.connect(self._tag_bearbeiten)
         aufbau.addWidget(self._tabelle, 1)
+        hinweis = QLabel(
+            "Doppelklick auf einen Tag: Buchungen korrigieren, nachtragen oder die "
+            "Tagesart setzen."
+        )
+        hinweis.setStyleSheet("color: #666;")
+        aufbau.addWidget(hinweis)
+
+        aufbau.addLayout(self._knopfzeile())
 
         aufbau.addWidget(self._bereich_einstellungen())
         self.aktualisieren()
 
     # -- Aufbau -------------------------------------------------------------
+    def _knopfzeile(self) -> QHBoxLayout:
+        zeile = QHBoxLayout()
+        for beschriftung, aktion in (
+            ("Tag bearbeiten...", self._tag_bearbeiten),
+            ("Urlaub / Krank / Feiertag...", self._abwesenheit_eintragen),
+        ):
+            knopf = QPushButton(beschriftung)
+            knopf.clicked.connect(aktion)
+            zeile.addWidget(knopf)
+        zeile.addStretch(1)
+        return zeile
+
+
     def _bereich_zeitraum(self) -> QWidget:
         kasten = QGroupBox("Zeitraum und Export")
         zeile = QHBoxLayout(kasten)
@@ -138,6 +166,34 @@ class Hauptfenster(QWidget):
         self._von.setDate(QDate(von))
         self._bis.setDate(QDate(bis))
 
+    def _gewaehlter_tag(self) -> date:
+        zeile = self._tabelle.currentRow()
+        if 0 <= zeile < len(self._tage):
+            return self._tage[zeile].tag
+        return min(date.today(), self._bis.date().toPython())
+
+    def _tag_bearbeiten(self) -> None:
+        TagesDialog(self.zeiterfassung, self._gewaehlter_tag(), self).exec()
+        self.aktualisieren()
+
+    def abwesenheit_eintragen(self) -> None:
+        """Urlaub, Krankheit oder Feiertag fuer einen Zeitraum eintragen."""
+        self._abwesenheit_eintragen()
+
+    def _abwesenheit_eintragen(self) -> None:
+        dialog = AbwesenheitsDialog(self._gewaehlter_tag(), self)
+        if dialog.exec() != AbwesenheitsDialog.Accepted:
+            return
+        von, bis, art, anteil, notiz = dialog.ergebnis()
+        anzahl = self.zeiterfassung.tagesart_setzen(von, bis, art, anteil, notiz)
+        beschriftung = TAGESART_TEXT.get(art, art)
+        if art == ARBEITSTAG:
+            meldung = f"{anzahl} Tage auf Arbeitstag zurueckgesetzt."
+        else:
+            meldung = f"{beschriftung}: {anzahl} Tage eingetragen (Wochenenden uebersprungen)."
+        QMessageBox.information(self, "Abwesenheit", meldung)
+        self.aktualisieren()
+
     def _autostart_umschalten(self, an: bool) -> None:
         erfolg, meldung = autostart.einrichten() if an else autostart.entfernen()
         self.einstellungen.autostart = an and erfolg
@@ -210,14 +266,16 @@ class Hauptfenster(QWidget):
         von = self._von.date().toPython()
         bis = self._bis.date().toPython()
         if bis < von:
+            self._tage = []
             self._tabelle.setRowCount(0)
             return
-        tage = self.zeiterfassung.zeitraum(von, bis, jetzt=jetzt)
-        self._tabelle.setRowCount(len(tage))
-        for zeile, tag in enumerate(tage):
+        self._tage = self.zeiterfassung.zeitraum(von, bis, jetzt=jetzt)
+        self._tabelle.setRowCount(len(self._tage))
+        for zeile, tag in enumerate(self._tage):
             werte = [
                 f"{tag.tag:%d.%m.%Y}",
                 WOCHENTAGE[tag.tag.weekday()],
+                tag.art_beschriftung,
                 als_uhrzeit(tag.erste_anmeldung),
                 als_uhrzeit(tag.letzter_kontakt),
                 als_stunden(tag.anwesenheit),
@@ -227,9 +285,9 @@ class Hauptfenster(QWidget):
             ]
             for spalte, text in enumerate(werte):
                 eintrag = QTableWidgetItem(text)
-                if spalte >= 2:
+                if spalte >= 3:
                     eintrag.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                if spalte == 7:
+                if spalte == 8:
                     eintrag.setForeground(
                         Qt.darkGreen if tag.saldo >= timedelta(0) else Qt.red
                     )

@@ -26,7 +26,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import APP_NAME, __version__, autostart
-from .config import Einstellungen, datenverzeichnis
+from .config import Einstellungen
 from .excel_export import exportieren
 from .gui.gap_dialog import LueckenDialog
 from .gui.main_window import Hauptfenster
@@ -68,6 +68,7 @@ class Anwendung:
 
         self.fenster = Hauptfenster(self.zeiterfassung)
         self.mini = MiniFenster(self.zeiterfassung)
+        self.mini.uebersicht_gewuenscht.connect(self._fenster_zeigen)
         self._offene_luecken: list[OffeneLuecke] = []
         self._dialog_offen = False
 
@@ -94,6 +95,10 @@ class Anwendung:
             self._hotkey_timer.start()
 
         self.qt.aboutToQuit.connect(self._beenden)
+        # Windows meldet das Abmelden oder Herunterfahren ueber die
+        # Sitzungsverwaltung -- damit endet die Zeiterfassung punktgenau und
+        # nicht erst mit dem letzten Herzschlag.
+        self.qt.commitDataRequest.connect(self._abmelden)
         if not im_hintergrund:
             self.fenster.show()
         else:
@@ -120,6 +125,10 @@ class Anwendung:
         kennzahlen.triggered.connect(self._kurz_zeigen)
         menue.addAction(kennzahlen)
 
+        eintragen = QAction("Urlaub / Krank eintragen...", menue)
+        eintragen.triggered.connect(self._abwesenheit_eintragen)
+        menue.addAction(eintragen)
+
         export = QAction("Diese Woche als Excel...", menue)
         export.triggered.connect(self._woche_exportieren)
         menue.addAction(export)
@@ -145,7 +154,11 @@ class Anwendung:
     def _kurz_zeigen(self) -> None:
         """Mini-Fenster kurz einblenden (fuer den Weg ueber das Menue)."""
         self.mini.einblenden()
-        QTimer.singleShot(4000, self.mini.ausblenden)
+        QTimer.singleShot(4000, self.mini.loslassen)
+
+    def _abwesenheit_eintragen(self) -> None:
+        self._fenster_zeigen()
+        self.fenster.abwesenheit_eintragen()
 
     def _woche_exportieren(self) -> None:
         self.fenster.zeitraum_diese_woche()
@@ -171,7 +184,7 @@ class Anwendung:
             self.fenster.aktualisieren()
 
     def _hotkey_pruefen(self) -> None:
-        self._hotkey.pruefen(self.mini.einblenden, self.mini.ausblenden)
+        self._hotkey.pruefen(self.mini.einblenden, self.mini.loslassen)
 
     # -- Rueckfragen --------------------------------------------------------
     def _luecken_abfragen(self) -> None:
@@ -191,6 +204,11 @@ class Anwendung:
             self.fenster.aktualisieren()
 
     # -- Ende ---------------------------------------------------------------
+    def _abmelden(self, verwaltung) -> None:
+        """Windows faehrt herunter: Sitzung sofort sauber abschliessen."""
+        verwaltung.setRestartHint(verwaltung.RestartNever)
+        self.zeiterfassung.beenden()
+
     def _beenden(self) -> None:
         self.zeiterfassung.beenden()
         self.zeiterfassung.db.schliessen()

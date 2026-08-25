@@ -409,11 +409,12 @@ zeiterfassung/                  eigenstaendiges Werkzeug: Arbeitszeit nach
     main.py                     Startpunkt (Infobereich der Taskleiste)
     tracker.py                  Sitzungen, Herzschlag, Lueckenerkennung
     rules.py                    38-Stunden-Woche, Pflichtpausen, Kennzahlen
-    storage.py                  SQLite (Sitzungen und Luecken)
-    excel_export.py             formatierte Excel-Mappe
+    storage.py                  SQLite (Sitzungen, Luecken, Tagesarten)
+    excel_export.py             Excel-Mappe mit Auswertung und Diagrammen
     hotkey.py                   Strg+Shift+Z, solange gedrueckt
     autostart.py                Autostart ohne Administratorrechte
-    gui/                        Mini-Fenster, Rueckfrage, Uebersicht
+    gui/                        Mini-Fenster, Rueckfrage, Uebersicht,
+                                Tageskorrektur, Urlaub und Krankheit
 
 sample_data/                    Beispielangebote und Generator
 tests/                          Testsuiten (unittest)
@@ -437,7 +438,7 @@ Zugriff auf Ihre echten Anwendungsdaten (temporaeres `SAP_ANGEBOT_HOME`).
 | Suite | Umfang |
 |---|---|
 | `tests/test_database.py` | Migrationen, Historie, Zuordnungen, CSV-Export, Nebenlaeufigkeit |
-| `tests/test_zeiterfassung.py` | Zeiterfassung: Pausenregeln, Tages- und Wochenzahlen, Luecken, Export |
+| `tests/test_zeiterfassung.py` | Zeiterfassung: Pausenregeln, Tages- und Wochenzahlen, Luecken, Urlaub und Krankheit, manuelle Korrekturen, Export |
 | `tests/test_services.py` | Vergleich, Pruefung, Vorschau, Komplettvorgang, Undo |
 | `tests/test_extraction.py` | Angebotsformate, E-Mails, Freitext, Lernen |
 | `tests/test_email_merge.py` | Mail und Anhang als ein Angebot |

@@ -24,7 +24,16 @@ from .rules import (
     tagesfenster,
     wochenbeginn,
 )
-from .storage import ABWESEND, ARBEIT, PAUSE, Datenbank
+from .storage import (
+    ABWESEND,
+    ARBEIT,
+    ARBEITSTAG,
+    PAUSE,
+    TAGESART_TEXT,
+    Datenbank,
+    Luecke,
+    Sitzung,
+)
 
 
 @dataclass
@@ -103,6 +112,7 @@ class Zeiterfassung:
             self.db.luecken(von, bis),
             self.einstellungen,
             jetzt=jetzt,
+            tagesart=self.db.tagesart(tag),
         )
         return werte
 
@@ -122,6 +132,70 @@ class Zeiterfassung:
             tage.append(self.tag(laufend, jetzt=jetzt))
             laufend += timedelta(days=1)
         return tage
+
+    # -- Manuelle Korrektur -------------------------------------------------
+    def buchungen(self, tag: date) -> list[Sitzung | Luecke]:
+        """Alle Eintraege eines Tages, nach Uhrzeit sortiert."""
+        von, bis = tagesfenster(tag)
+        eintraege: list[Sitzung | Luecke] = [*self.db.sitzungen(von, bis), *self.db.luecken(von, bis)]
+        return sorted(eintraege, key=lambda eintrag: eintrag.beginn)
+
+    def sitzung_nachtragen(self, beginn: datetime, ende: datetime) -> int:
+        """Traegt eine vergessene Arbeitszeit von Hand nach."""
+        if ende <= beginn:
+            raise ValueError("Das Ende muss nach dem Beginn liegen.")
+        return self.db.sitzung_anlegen(beginn, ende)
+
+    def sitzung_korrigieren(self, sitzung_id: int, beginn: datetime, ende: datetime) -> None:
+        if ende <= beginn:
+            raise ValueError("Das Ende muss nach dem Beginn liegen.")
+        if self.sitzung_id == sitzung_id:
+            # Die laufende Sitzung wird durch die Korrektur festgeschrieben.
+            self.sitzung_id = None
+        self.db.sitzung_aendern(sitzung_id, beginn, ende)
+
+    def sitzung_verwerfen(self, sitzung_id: int) -> None:
+        if self.sitzung_id == sitzung_id:
+            self.sitzung_id = None
+        self.db.sitzung_loeschen(sitzung_id)
+
+    def luecke_nachtragen(self, beginn: datetime, ende: datetime, art: str, notiz: str = "") -> None:
+        if ende <= beginn:
+            raise ValueError("Das Ende muss nach dem Beginn liegen.")
+        if art not in (ARBEIT, PAUSE, ABWESEND):
+            raise ValueError(f"Unbekannte Art: {art!r}")
+        self.db.luecke_eintragen(beginn, ende, art, notiz)
+
+    def luecke_korrigieren(self, luecke_id: int, beginn: datetime, ende: datetime, art: str, notiz: str = "") -> None:
+        if ende <= beginn:
+            raise ValueError("Das Ende muss nach dem Beginn liegen.")
+        self.db.luecke_aendern(luecke_id, beginn, ende, art, notiz)
+
+    def luecke_verwerfen(self, luecke_id: int) -> None:
+        self.db.luecke_loeschen(luecke_id)
+
+    # -- Urlaub, Krankheit, Feiertag ---------------------------------------
+    def tagesart_setzen(
+        self, von: date, bis: date, art: str, anteil: float = 1.0, notiz: str = ""
+    ) -> int:
+        """Setzt die Tagesart fuer einen ganzen Zeitraum und liefert die Anzahl.
+
+        Wochenenden und andere Tage ohne Soll bleiben unberuehrt -- Urlaub am
+        Sonntag kostet keinen Urlaubstag.
+        """
+        if art != ARBEITSTAG and art not in TAGESART_TEXT:
+            raise ValueError(f"Unbekannte Tagesart: {art!r}")
+        gesetzt = 0
+        laufend = von
+        while laufend <= bis:
+            if art == ARBEITSTAG:
+                self.db.tagesart_loeschen(laufend)
+                gesetzt += 1
+            elif self.einstellungen.soll_stunden(laufend.weekday()) > 0:
+                self.db.tagesart_setzen(laufend, art, anteil, notiz)
+                gesetzt += 1
+            laufend += timedelta(days=1)
+        return gesetzt
 
     # -- Kennzahlen fuer das Mini-Fenster -----------------------------------
     def kennzahlen(self, jetzt: datetime | None = None) -> dict[str, object]:
