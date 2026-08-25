@@ -404,6 +404,17 @@ app/
     config/settings.py          gesamte Konfiguration
     utils/                      Parser, Logging, .msg-Leser
 
+zeiterfassung/                  eigenstaendiges Werkzeug: Arbeitszeit nach
+                                Einschaltzeiten (siehe docs/ZEITERFASSUNG.md)
+    main.py                     Startpunkt (Infobereich der Taskleiste)
+    tracker.py                  Sitzungen, Herzschlag, Lueckenerkennung
+    rules.py                    38-Stunden-Woche, Pflichtpausen, Kennzahlen
+    storage.py                  SQLite (Sitzungen und Luecken)
+    excel_export.py             formatierte Excel-Mappe
+    hotkey.py                   Strg+Shift+Z, solange gedrueckt
+    autostart.py                Autostart ohne Administratorrechte
+    gui/                        Mini-Fenster, Rueckfrage, Uebersicht
+
 sample_data/                    Beispielangebote und Generator
 tests/                          Testsuiten (unittest)
 docs/                           SAP-Einrichtung
@@ -426,6 +437,7 @@ Zugriff auf Ihre echten Anwendungsdaten (temporaeres `SAP_ANGEBOT_HOME`).
 | Suite | Umfang |
 |---|---|
 | `tests/test_database.py` | Migrationen, Historie, Zuordnungen, CSV-Export, Nebenlaeufigkeit |
+| `tests/test_zeiterfassung.py` | Zeiterfassung: Pausenregeln, Tages- und Wochenzahlen, Luecken, Export |
 | `tests/test_services.py` | Vergleich, Pruefung, Vorschau, Komplettvorgang, Undo |
 | `tests/test_extraction.py` | Angebotsformate, E-Mails, Freitext, Lernen |
 | `tests/test_email_merge.py` | Mail und Anhang als ein Angebot |
