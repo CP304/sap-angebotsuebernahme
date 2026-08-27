@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config.settings import Settings
-from ..models.enums import FieldOrigin, PositionStatus
+from ..models.enums import FieldOrigin, PositionStatus, SourceKind
 from ..models.offer import Offer
 from ..models.offer_position import OfferPosition
 from ..sap.gateway import SapGateway
@@ -63,7 +63,8 @@ from .dialogs import (
 from .admin_window import AdminWindow
 from .history_view import HistoryView
 from .mapping_view import MappingView
-from .offer_table import POSITION_ROLE, OfferFilterProxy, OfferTableModel, OfferTableView
+from .offer_table import (COLUMNS, POSITION_ROLE, OfferFilterProxy,
+                          OfferTableModel, OfferTableView)
 from .quick_entry import QuickEntryBar
 from .position_details import PositionDetails
 from .queue_bar import QueueBar
@@ -108,8 +109,38 @@ class MainWindow(QMainWindow):
         self._build()
         self._connect_log()
         self._update_mode_badges()
+        self._bereite_erfassung_vor()
         self._update_actions()
         QTimer.singleShot(200, self._show_startup_problems)
+
+    def _bereite_erfassung_vor(self) -> None:
+        """Eine leere Zeile bereitstellen, in die sofort getippt werden kann.
+
+        Ohne sie steht der Anwender beim Start vor einer Tabelle ganz ohne
+        Zellen: nichts zum Anklicken, nichts zum Hineinschreiben.  Wer nur
+        einen einzelnen Preis erfassen will, muss dann erst eine Datei
+        besorgen oder einen Menuepunkt finden -- fuer den kleinsten
+        denkbaren Fall der groesste Umweg.
+
+        Die Zeile ist ausdruecklich nichts weiter als eine Einladung:
+        nicht angehakt, nicht geprueft, nicht gezaehlt, nicht schreibbar.
+        Sie wird zur Position, sobald der erste Wert darin steht -- und
+        verschwindet, sobald ein Angebot geladen oder uebernommen wird.
+        """
+        if self.offer is not None:
+            return
+        self.offer = Offer()
+        self.offer.set_field("currency", self.settings.purchasing.currency,
+                             FieldOrigin.DEFAULT)
+        position = OfferPosition(source_kind=SourceKind.MANUAL,
+                                 source_hint="von Hand erfasst")
+        self.offer.positions.append(position)
+        self._apply_defaults_to_new([position])
+        self.offer.renumber()
+        self._revalidate()
+        self.table_model.set_offer(self.offer)
+        self.table.apply_column_widths()
+        self._update_counters()
 
     # ==================================================================
     # Aufbau
@@ -142,12 +173,20 @@ class MainWindow(QMainWindow):
         self.diagnosis_view = DiagnosisView(self.settings)
 
         from .vbs_importer import VbsImporterWidget
-        self.vbs_importer = VbsImporterWidget(self.settings)
+        self.vbs_importer = VbsImporterWidget(
+            self.settings, self.gateway.selectors)
 
+        # Die beiden Seiten fuer die Feld-IDs gehoeren nebeneinander und in
+        # dieser Reihenfolge: erst die Aufzeichnung einlesen, dann das
+        # Ergebnis pruefen und freigeben.  Die Pflegeseite war bisher zwar
+        # gebaut, aber in keiner Liste eingetragen -- damit war sie ueber
+        # kein Menue erreichbar, obwohl mehrere Meldungen auf sie
+        # verweisen ("bitte auf der Seite SAP-Feld-IDs bestaetigen").
         self._admin_pages = [
             ("Historie", self.history_view),
             ("Zuordnungen", self.mapping_view),
-            ("SAP Feld-ID Zuordnung", self.vbs_importer),
+            ("Aufzeichnung einlesen (.vbs)", self.vbs_importer),
+            ("SAP-Feld-IDs", self.selector_view),
             ("Einstellungen", self.settings_view),
             ("Diagnose", self.diagnosis_view),
             ("Protokoll", self.log_view),
@@ -405,6 +444,7 @@ class MainWindow(QMainWindow):
         self.table.requestVendorAssignment.connect(self.assign_vendor)
         self.table.requestRemove.connect(self._remove_positions)
         self.table.requestFillDown.connect(self._fill_down)
+        self.table.requestScaleEdit.connect(self._edit_scales)
         splitter.addWidget(self.table)
 
         self.details = PositionDetails(self.comparison, settings=self.settings)
@@ -539,7 +579,15 @@ class MainWindow(QMainWindow):
             "Die ausgewaehlten Positionen ein zweites Mal fuer ein anderes "
             "Werk anlegen -- fuer die werksspezifische Infosatz-Sicht")
         auswahl_menu.addSeparator()
-        auswahl_menu.addAction("Position ergaenzen", self._add_position)
+        self.add_position_action = auswahl_menu.addAction(
+            "Position ergaenzen", self._add_position)
+        # Einfg ist in Tabellen die uebliche Taste fuer "Zeile einfuegen".
+        # Sie macht den direktesten Weg auch zum kuerzesten: Anwendung
+        # starten, Einfg, tippen -- ohne Datei, ohne Menue.
+        self.add_position_action.setShortcut("Ins")
+        self.add_position_action.setToolTip(
+            "Eine leere Zeile anlegen und direkt hineinschreiben (Einfg) -- "
+            "geht auch ohne geladenes Angebot")
         self.quick_entry_action = auswahl_menu.addAction(
             "Schnellerfassung", lambda: self.toggle_quick_entry())
         self.quick_entry_action.setCheckable(True)
@@ -1094,6 +1142,11 @@ class MainWindow(QMainWindow):
                                  FieldOrigin.DEFAULT)
         self._snapshot("Positionen ergaenzt")
 
+        # Die bereitgestellte Leerzeile hat ausgedient, sobald echte
+        # Positionen dazukommen -- sonst steht sie zwischen ihnen herum.
+        if any(not p.ist_leere_erfassungszeile for p in positions):
+            self.offer.positions = [p for p in self.offer.positions
+                                    if not p.ist_leere_erfassungszeile]
         vorhanden = len(self.offer.positions)
         self.offer.positions.extend(positions)
         self.offer.add_note(f"{len(positions)} Position(en) manuell erfasst ({quelle})")
@@ -1133,7 +1186,9 @@ class MainWindow(QMainWindow):
             if position.delivery_date is None:
                 position.delivery_date = date.today() + timedelta(
                     days=purchasing.default_delivery_days)
-            position.selected = True
+            # Eine noch leere Erfassungszeile bleibt aussen vor, bis
+            # etwas darin steht -- sie wird beim ersten Wert angehakt.
+            position.selected = not position.ist_leere_erfassungszeile
             position.do_info_record = workflow.chain_info_record
             position.do_source_list = workflow.chain_source_list
             position.do_contract = workflow.chain_contract
@@ -1602,10 +1657,44 @@ class MainWindow(QMainWindow):
         self._update_counters()
 
     def _add_position(self) -> None:
-        position = self.table_model.add_empty_position()
-        if position is not None:
-            self._revalidate()
-            self._update_counters()
+        """Eine leere Zeile anlegen und den Cursor hineinsetzen.
+
+        Der direkteste Weg ueberhaupt: Zeile anlegen, tippen, fertig --
+        ohne vorher eine Datei zu haben.  Genau das ging bisher nicht.
+        Ohne geladenes Angebot gab das Modell die Zeile nicht heraus, und
+        der Menuepunkt tat schlicht nichts -- ohne Zeile, ohne Meldung.
+
+        Angelegt wird ueber denselben Weg wie jeder andere manuelle
+        Zugang.  Sonst haette eine von Hand ergaenzte Zeile andere
+        Vorbelegungen als eine schnell erfasste -- Einkaufsorganisation,
+        Werk, Mengeneinheit und Preiseinheit blieben leer --, und genau
+        das faellt spaeter niemandem auf.
+        """
+        position = OfferPosition(source_kind=SourceKind.MANUAL,
+                                 source_hint="von Hand erfasst")
+        self._add_positions([position], "von Hand")
+        self._springe_in_zeile(position)
+
+    def _springe_in_zeile(self, position: OfferPosition) -> None:
+        """In die Zelle springen, in der die Eingabe beginnt.
+
+        Ohne das muesste der Anwender die neue Zeile erst suchen und
+        anklicken -- bei einer langen Tabelle steht sie ausserhalb des
+        sichtbaren Bereichs.
+        """
+        zeile = self.table_model.row_of_uid(position.uid)
+        if zeile < 0:
+            return
+        spalte = next((i for i, spec in enumerate(COLUMNS)
+                       if spec.key == "material_number"), 0)
+        quelle = self.table_model.index(zeile, spalte)
+        ziel = self.proxy.mapFromSource(quelle)
+        if not ziel.isValid():
+            return
+        self.table.setCurrentIndex(ziel)
+        self.table.scrollTo(ziel)
+        self.table.edit(ziel)
+        self.table.setFocus()
 
     # ------------------------------------------------------------------
     # Schnellerfassung
@@ -1634,6 +1723,29 @@ class MainWindow(QMainWindow):
         """
         self._add_positions([position], "Schnellerfassung")
         self.quick_entry.focus_first()
+
+    def _edit_scales(self, position: OfferPosition) -> None:
+        """Mengenstaffel einer Position von Hand pflegen.
+
+        Bisher entstanden Staffeln nur beim Zusammenfassen mehrerer
+        Angebotszeilen.  Steht die Staffel im Angebot als Fliesstext, hat
+        der Einkaeufer eine Stufe nachverhandelt, oder soll eine
+        bestehende SAP-Staffel angepasst statt ueberschrieben werden --
+        dann fuehrte bisher kein Weg dorthin.
+        """
+        from .scale_dialog import ScaleDialog
+
+        dialog = ScaleDialog(position, self)
+        if dialog.exec() != ScaleDialog.DialogCode.Accepted:
+            return
+        self._snapshot("Mengenstaffel geaendert")
+        meldungen = dialog.uebernehmen()
+        self._revalidate()
+        self.table_model.refresh_row(position.uid)
+        self.details.show_position(position)
+        self._update_counters()
+        if meldungen:
+            self.counter_label.setText(meldungen[0])
 
     def _fill_down(self, key: str) -> None:
         position = self.details.position or self.table.current_position()

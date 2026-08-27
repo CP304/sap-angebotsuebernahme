@@ -16,6 +16,7 @@ __all__ = [
     "parse_int",
     "parse_date",
     "format_decimal",
+    "format_decimal_fuer_eingabe",
     "format_date",
     "normalize_whitespace",
     "normalize_material_number",
@@ -230,6 +231,42 @@ def format_date(value: date | None) -> str:
 # --------------------------------------------------------------------------
 # Texte / Schluessel
 # --------------------------------------------------------------------------
+
+def format_decimal_fuer_eingabe(value: object, max_stellen: int = 3) -> str:
+    """Eine Zahl so darstellen, dass sie unveraendert zurueckgelesen wird.
+
+    Fuer die reine *Anzeige* ist eine feste Stellenzahl schoen: "1,000 ST"
+    liest sich sauber.  In einem *Eingabefeld* ist sie gefaehrlich, denn
+    genau diese Form ist mehrdeutig -- "1,000" heisst auf Deutsch eins
+    Komma null, in der ueblichen Konvention aber tausend.  :func:`parse_decimal`
+    loest sie nach der Konvention auf, weil sie fuer fremde Angebotstexte
+    gilt und dort richtig ist.
+
+    Steht der Wert aber in einem Feld, das die Anwendung selbst gefuellt
+    hat, wird aus dem Ansehen ein Datenfehler: wer in das Mengenfeld
+    klickt und wieder herausklickt, ohne etwas zu tippen, hatte danach die
+    tausendfache Menge stehen -- und sie waere so nach SAP gegangen.
+
+    Deshalb werden hier die ueberfluessigen Nachkommastellen abgeschnitten:
+    aus ``1,000`` wird ``1``, aus ``2,950`` wird ``2,95``, aus ``1.000,500``
+    wird ``1.000,5``.  Alle drei liest :func:`parse_decimal` wieder als
+    genau den Wert, der dastand.
+    """
+    if value is None:
+        return ""
+    text = format_decimal(value, max_stellen)
+    if not text or "," not in text:
+        return text
+    text = text.rstrip("0").rstrip(",")
+    ganz, _, nachkomma = text.partition(",")
+    if len(nachkomma) == 3:
+        # Genau drei Nachkommastellen sind die mehrdeutige Form, um die es
+        # hier geht ("2,125" -- zwei Komma eins zwei fuenf oder
+        # zweitausendeinhundertfuenfundzwanzig?).  Eine angehaengte Null
+        # aendert den Wert nicht, macht die Sache aber eindeutig.
+        text = f"{ganz},{nachkomma}0"
+    return text
+
 
 def normalize_whitespace(text: object) -> str:
     if text is None:

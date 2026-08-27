@@ -29,13 +29,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..sap.feldnamen import beschreibe_feld
+from ..services.selektoren_excel import (exportiere_selektoren,
+                                         lies_selektoren,
+                                         uebernimm_selektoren)
 from ..sap.selectors import REQUIRED_SCREENS, SelectorRegistry
+from ..services.vbs_parser import TRANSACTION_NAMES, detect_transaction
+from ..utils.textkodierung import decode_bytes
 from .dialogs import ask_yes_no, show_error
 from .style import Colors
 
 logger = logging.getLogger(__name__)
 
-_COLUMNS = ("Maske / Feld", "Beschreibung", "SAP-GUI-ID", "Pflicht", "Geprueft")
+_COLUMNS = ("Maske / Feld", "Beschreibung", "SAP-GUI-ID",
+            "So heisst das Feld in SAP", "Pflicht", "Geprueft")
 
 
 class SelectorView(QWidget):
@@ -93,6 +100,7 @@ class SelectorView(QWidget):
         self.tree.setAlternatingRowColors(True)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.tree.header().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.itemChanged.connect(self._item_changed)
         layout.addWidget(self.tree, 1)
 
@@ -104,6 +112,20 @@ class SelectorView(QWidget):
         import_button = QPushButton("Aufzeichnung (.vbs) einlesen ...")
         import_button.clicked.connect(self._import_vbs)
         buttons.addWidget(import_button)
+
+        excel_export = QPushButton("Nach Excel sichern ...")
+        excel_export.setToolTip(
+            "Alle Feld-IDs als Arbeitsmappe sichern -- zum Aufheben, "
+            "Weitergeben oder Durchsehen")
+        excel_export.clicked.connect(self._export_excel)
+        buttons.addWidget(excel_export)
+
+        excel_import = QPushButton("Aus Excel einlesen ...")
+        excel_import.setToolTip(
+            "Eine gesicherte Arbeitsmappe zurueckspielen oder die eines "
+            "Kollegen uebernehmen")
+        excel_import.clicked.connect(self._import_excel)
+        buttons.addWidget(excel_import)
 
         verify_visible = QPushButton("Sichtbare als geprueft markieren")
         verify_visible.clicked.connect(self._verify_visible)
@@ -139,6 +161,7 @@ class SelectorView(QWidget):
                     screen.transaction,
                     screen.note,
                     "",
+                    "",
                     f"{verified}/{required} geprueft",
                 ])
                 parent.setFlags(parent.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -146,23 +169,28 @@ class SelectorView(QWidget):
                 font.setBold(True)
                 parent.setFont(0, font)
                 if required and verified < required:
-                    parent.setForeground(4, Qt.GlobalColor.darkYellow)
+                    parent.setForeground(5, Qt.GlobalColor.darkYellow)
 
                 matched = 0
                 for key, selector in screen.elements.items():
                     haystack = f"{key} {selector.description} {selector.id}".lower()
                     if search and search not in haystack:
                         continue
+                    # Was der SAP-Feldname bedeutet.  Beim Eintragen von
+                    # Hand ist das die eigentliche Hilfe: die Beschreibung
+                    # sagt, welches Feld gemeint ist, diese Spalte sagt,
+                    # ob die eingetragene ID dazu passt.
                     child = QTreeWidgetItem([
                         key,
                         selector.description,
                         selector.id,
+                        beschreibe_feld(selector.id),
                         "nein" if selector.optional else "ja",
                         "",
                     ])
                     child.setFlags(child.flags() | Qt.ItemFlag.ItemIsEditable
                                    | Qt.ItemFlag.ItemIsUserCheckable)
-                    child.setCheckState(4, Qt.CheckState.Checked if selector.verified
+                    child.setCheckState(5, Qt.CheckState.Checked if selector.verified
                                         else Qt.CheckState.Unchecked)
                     child.setData(0, Qt.ItemDataRole.UserRole, (screen_key, key))
                     if not selector.verified and not selector.optional:
@@ -207,11 +235,13 @@ class SelectorView(QWidget):
             if new_id != selector.id:
                 self.registry.set_id(screen_key, element_key, new_id)
                 self._loading = True
-                item.setCheckState(4, Qt.CheckState.Unchecked)
+                item.setCheckState(5, Qt.CheckState.Unchecked)
+                # Die Lesehilfe gilt fuer die neue ID, nicht mehr fuer die alte.
+                item.setText(3, beschreibe_feld(new_id))
                 self._loading = False
                 logger.info("Feld-ID geaendert: %s.%s = %s", screen_key, element_key, new_id)
-        elif column == 4:
-            selector.verified = item.checkState(4) == Qt.CheckState.Checked
+        elif column == 5:
+            selector.verified = item.checkState(5) == Qt.CheckState.Checked
         self._update_summary()
         self.changed.emit()
 
@@ -244,7 +274,7 @@ class SelectorView(QWidget):
                     continue
                 screen_key, element_key = data
                 self.registry.get(screen_key, element_key).verified = True
-                child.setCheckState(4, Qt.CheckState.Checked)
+                child.setCheckState(5, Qt.CheckState.Checked)
         self._loading = False
         self._update_summary()
         self.changed.emit()
@@ -256,11 +286,17 @@ class SelectorView(QWidget):
         if not path:
             return
         try:
-            text = Path(path).read_text(encoding="utf-8", errors="replace")
+            rohdaten = Path(path).read_bytes()
         except OSError as exc:
             show_error(self, "Datei nicht lesbar",
                        "Die Aufzeichnung konnte nicht gelesen werden.", str(exc))
             return
+        # Der Recorder schreibt UTF-16LE.  Fest als utf-8 gelesen bleibt
+        # zwischen je zwei Buchstaben ein Nullzeichen stehen, und kein
+        # findById-Aufruf ist mehr als solcher zu erkennen.
+        text, kodierung, _warnung = decode_bytes(rohdaten)
+        logger.info("Aufzeichnung %s gelesen (Kodierung %s)",
+                    Path(path).name, kodierung)
 
         ids = self.registry.ids_from_vbs(text)
         if not ids:
@@ -269,31 +305,136 @@ class SelectorView(QWidget):
                        "Stammt sie wirklich vom SAP GUI Script Recorder?")
             return
 
-        mapping = self.registry.suggest_mapping(ids)
+        # Aus welcher Transaktion stammt die Aufzeichnung?  Das grenzt die
+        # Zuordnung auf deren Bildschirme ein: eine ME11-Aufzeichnung kann
+        # keine Kontraktfelder enthalten, und was nicht zugeordnet werden
+        # kann, wird auch nicht ueberschrieben.
+        transaktion = detect_transaction(text)
+        herkunft = (f" aus {transaktion}"
+                    f" ({TRANSACTION_NAMES.get(transaktion, '')})".rstrip(" ()")
+                    if transaktion else "")
+
+        mapping = self.registry.suggest_mapping(ids, transaktion)
         if not mapping:
             QMessageBox.information(
-                self, "Keine Zuordnung moeglich",
-                f"{len(ids)} ID(s) gelesen, aber keine passt zu den konfigurierten "
-                f"Feldern. Bitte die IDs von Hand eintragen.")
+                self, "Nichts zu aendern",
+                f"{len(ids)} ID(s) gelesen{herkunft}.\n\n"
+                "Es gibt nichts zu aktualisieren: entweder stimmen die "
+                "hinterlegten IDs bereits mit der Aufzeichnung ueberein, "
+                "oder die aufgezeichneten Felder lassen sich nicht "
+                "zweifelsfrei zuordnen.\n\n"
+                "Schaltflaechen werden bewusst nie zugeordnet -- welcher "
+                "Knopf welcher ist, verraet nur seine Nummer, und die ist "
+                "nicht uebertragbar. Solche Felder bitte von Hand eintragen.")
             return
 
-        preview = "\n".join(f"{screen}.{key}\n    {new_id}"
-                            for (screen, key), new_id in list(mapping.items())[:15])
-        more = "" if len(mapping) <= 15 else f"\n... und {len(mapping) - 15} weitere"
+        # Alt und neu nebeneinander: sonst sieht der Anwender nicht, was
+        # ueberschrieben wird, und bestaetigt im Zweifel blind.
+        zeilen = []
+        for (screen_key, element_key), neue_id in sorted(mapping.items())[:12]:
+            selector = self.registry.get(screen_key, element_key)
+            zeilen.append(f"{screen_key}.{element_key} — {selector.description}\n"
+                          f"    bisher: {selector.id or '(leer)'}\n"
+                          f"    neu:    {neue_id}")
+        preview = "\n\n".join(zeilen)
+        more = "" if len(mapping) <= 12 else f"\n\n... und {len(mapping) - 12} weitere"
         if not ask_yes_no(self, "Zuordnungen uebernehmen",
-                          f"{len(mapping)} Feld-ID(s) koennen aktualisiert werden.",
+                          f"{len(mapping)} von {len(ids)} gelesenen ID(s)"
+                          f"{herkunft} weichen ab und koennen uebernommen werden.",
                           preview + more):
             return
 
         for (screen_key, element_key), new_id in mapping.items():
             self.registry.set_id(screen_key, element_key, new_id)
-        logger.info("%d Feld-IDs aus Aufzeichnung uebernommen (%s)", len(mapping), path)
+        logger.info("%d Feld-IDs aus Aufzeichnung uebernommen (%s, %s)",
+                    len(mapping), path, transaktion or "Transaktion unbekannt")
         self.reload()
         self.changed.emit()
         QMessageBox.information(
             self, "Uebernommen",
-            f"{len(mapping)} Feld-ID(s) uebernommen.\n\nBitte pruefen Sie die Zuordnung "
-            f"und setzen Sie anschliessend die Haken „Geprueft“.")
+            f"{len(mapping)} Feld-ID(s) uebernommen.\n\nSie gelten als "
+            "ungeprueft: bitte am Zielsystem kontrollieren und dann den "
+            "Haken „Geprueft“ setzen. Vorher schreibt die Anwendung damit "
+            "nicht in ein echtes SAP.")
+
+    def _export_excel(self) -> None:
+        """Alle Feld-IDs als Arbeitsmappe sichern."""
+        vorschlag = str(Path(self.settings.selectors_file).with_name(
+            "SAP-Feld-IDs.xlsx"))
+        pfad, _filter = QFileDialog.getSaveFileName(
+            self, "Feld-IDs sichern", vorschlag, "Excel-Arbeitsmappe (*.xlsx)")
+        if not pfad:
+            return
+        if not pfad.lower().endswith(".xlsx"):
+            pfad += ".xlsx"
+        try:
+            ziel = exportiere_selektoren(self.registry, Path(pfad))
+        except (OSError, RuntimeError) as fehler:
+            show_error(self, "Sichern fehlgeschlagen",
+                       "Die Feld-IDs konnten nicht als Excel gesichert werden.",
+                       str(fehler))
+            return
+        QMessageBox.information(
+            self, "Gesichert",
+            f"Die Feld-IDs wurden gesichert:\n{ziel}\n\n"
+            "Die Mappe enthaelt zu jedem Feld die ID, ihre Bedeutung im "
+            "Klartext und eine Spalte fuer Bemerkungen. Sie laesst sich "
+            "hier wieder einlesen.")
+
+    def _import_excel(self) -> None:
+        """Eine gesicherte Arbeitsmappe zurueckspielen."""
+        pfad, _filter = QFileDialog.getOpenFileName(
+            self, "Gesicherte Feld-IDs waehlen", "",
+            "Excel-Arbeitsmappe (*.xlsx *.xlsm);;Alle Dateien (*.*)")
+        if not pfad:
+            return
+        try:
+            ergebnis = lies_selektoren(self.registry, Path(pfad))
+        except (OSError, RuntimeError, ValueError) as fehler:
+            show_error(self, "Einlesen fehlgeschlagen",
+                       "Die Arbeitsmappe konnte nicht gelesen werden.",
+                       str(fehler))
+            return
+
+        if not ergebnis.hat_aenderungen:
+            QMessageBox.information(
+                self, "Nichts zu aendern",
+                "Die Mappe stimmt mit dem aktuellen Stand ueberein.\n\n"
+                + "\n".join(ergebnis.warnungen))
+            return
+
+        # Alt und neu nebeneinander -- wer nicht sieht, was ueberschrieben
+        # wird, bestaetigt im Zweifel blind.
+        zeilen = []
+        for (screen_key, element_key), (alt_id, neu_id) in \
+                sorted(ergebnis.geaendert.items())[:12]:
+            beschreibung = self.registry.get(screen_key, element_key).description
+            zeilen.append(f"{screen_key}.{element_key} — {beschreibung}\n"
+                          f"    bisher: {alt_id or '(leer)'}\n"
+                          f"    neu:    {neu_id}")
+        if len(ergebnis.geaendert) > 12:
+            zeilen.append(f"... und {len(ergebnis.geaendert) - 12} weitere")
+        if ergebnis.freigaben:
+            zeilen.append(f"Ausserdem {len(ergebnis.freigaben)} unveraenderte "
+                          "Feld-ID(s), die laut Mappe geprueft sind.")
+        zeilen.extend(ergebnis.warnungen)
+
+        if not ask_yes_no(
+                self, "Aus Excel uebernehmen",
+                f"{len(ergebnis.geaendert)} Feld-ID(s) weichen ab.",
+                "\n\n".join(zeilen)):
+            return
+
+        anzahl = uebernimm_selektoren(self.registry, ergebnis)
+        self.reload()
+        self.changed.emit()
+        QMessageBox.information(
+            self, "Uebernommen",
+            f"{anzahl} Feld(er) uebernommen.\n\nGeaenderte IDs gelten wieder "
+            "als ungeprueft: ob eine ID aus einer fremden Mappe zu diesem "
+            "System passt, weiss nur, wer sie hier kontrolliert. Bitte "
+            "pruefen und dann den Haken „Geprueft“ setzen.\n\n"
+            "Nicht vergessen: „Speichern“, damit es dauerhaft gilt.")
 
     def _reset(self) -> None:
         if not ask_yes_no(self, "Zuruecksetzen",

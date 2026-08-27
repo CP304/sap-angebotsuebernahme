@@ -359,6 +359,15 @@ class MockInfoRecordService(_MockBase, InfoRecordServiceBase):
                          is_percentage=bool(c.get("is_percentage")))
             for c in raw.get("conditions", [])
         ]
+        # Die Staffel wird beim Schreiben abgelegt -- zurueckgegeben wurde
+        # sie bisher nicht, womit der Alt/Neu-Vergleich sie nicht sehen
+        # konnte und die Ruecklese-Pruefung sie nicht pruefen.
+        record.scales = sorted(
+            ((_d(str(menge)), _d(str(preis)))
+             for menge, preis in raw.get("scales", [])
+             if _d(str(menge)) is not None and _d(str(preis)) is not None),
+            key=lambda stufe: stufe[0])
+        record.scales_read = True
         record.raw = dict(raw)
         return record
 

@@ -108,9 +108,17 @@ class SelfCheck:
         if version >= (3, 12):
             return CheckResult("Python", OK,
                                f"{version.major}.{version.minor}.{version.micro}")
+        # Wie bei jedem anderen Fehlbefund gehoert die Abhilfe dazu.  Wer
+        # hier landet, hat die Anwendung gestartet und erfaehrt, dass sie
+        # nicht laeuft -- ohne einen naechsten Schritt waere das eine
+        # Sackgasse, und ausgerechnet die erste Meldung ueberhaupt.
         return CheckResult("Python", FAIL,
                            f"{version.major}.{version.minor} ist zu alt -- "
-                           "benoetigt wird 3.12 oder neuer.")
+                           "benoetigt wird 3.12 oder neuer.",
+                           "Abhilfe: Python 3.12 oder neuer von "
+                           "python.org installieren und die Anwendung damit "
+                           "starten. Eine vorhandene aeltere Fassung kann "
+                           "daneben bestehen bleiben.")
 
     def _pakete(self) -> list[CheckResult]:
         ergebnisse: list[CheckResult] = []

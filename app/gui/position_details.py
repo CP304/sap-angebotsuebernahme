@@ -43,6 +43,7 @@ from ..models.offer_position import OfferPosition
 from ..utils.parsing import (
     format_date,
     format_decimal,
+    format_decimal_fuer_eingabe,
     normalize_material_number,
     normalize_uom,
     parse_date,
@@ -436,17 +437,18 @@ class PositionDetails(QWidget):
             "vendor_material_number": position.vendor_material_number,
             "description": position.description,
             "remarks": position.remarks,
-            "quantity": format_decimal(position.quantity, 3),
+            # Zum Bearbeiten muss die Darstellung eindeutig sein -- sonst
+            # macht schon das Hineinklicken aus 1 eine 1000.
+            "quantity": format_decimal_fuer_eingabe(position.quantity),
             "uom": position.uom,
-            "price": (format_decimal(position.price, 4).rstrip("0").rstrip(",")
-                      if position.price is not None else ""),
+            "price": format_decimal_fuer_eingabe(position.price, 4),
             "price_unit": str(position.price_unit or ""),
             "currency": position.currency,
-            "min_order_qty": format_decimal(position.min_order_qty, 3),
+            "min_order_qty": format_decimal_fuer_eingabe(position.min_order_qty),
             "lead_time_days": str(position.lead_time_days or ""),
             "valid_from": format_date(position.valid_from),
-            "contract_quantity": format_decimal(position.contract_quantity, 3),
-            "order_quantity": format_decimal(position.order_quantity, 3),
+            "contract_quantity": format_decimal_fuer_eingabe(position.contract_quantity),
+            "order_quantity": format_decimal_fuer_eingabe(position.order_quantity),
             "delivery_date": format_date(position.delivery_date),
         }
         for key, field in self._fields.items():

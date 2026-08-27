@@ -30,6 +30,7 @@ from ...config.settings import ExtractionSettings
 from ...models.enums import SourceKind
 from ...models.offer import EmailContext
 from ...utils.msg_reader import read_msg
+from ...utils.textkodierung import decode_bytes, entferne_nullzeichen
 from .base import DocumentReader, RawDocument, TableBlock
 
 logger = logging.getLogger(__name__)
@@ -597,16 +598,10 @@ class TextReader(DocumentReader):
         except OSError as exc:
             document.add_warning(f"Datei konnte nicht gelesen werden: {exc}")
             return document
-        text = ""
-        for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
-            try:
-                text = data.decode(encoding)
-                document.meta["encoding"] = encoding
-                break
-            except UnicodeDecodeError:
-                continue
-        else:  # pragma: no cover -- latin-1 schlaegt praktisch nie fehl
-            text = data.decode("latin-1", "replace")
+        text, encoding, kodierungswarnung = decode_bytes(data)
+        document.meta["encoding"] = encoding
+        if kodierungswarnung:
+            document.add_warning(kodierungswarnung)
 
         if Path(path).suffix.lower() in (".html", ".htm") or "<html" in text[:2000].lower():
             text, tables = html_to_text(text)
@@ -626,7 +621,10 @@ class TextReader(DocumentReader):
         """Dokument direkt aus eingefuegtem Text bauen (Zwischenablage)."""
         document = RawDocument(source_path="", source_kind=SourceKind.TEXT)
         document.meta["source_name"] = source_name
-        content = text or ""
+        # Wer den Inhalt einer UTF-16-Datei ueber einen Editor kopiert, der
+        # sie falsch geoeffnet hat, fuegt hier Text mit Nullzeichen zwischen
+        # den Buchstaben ein.  Ohne sie ist die Tabelle wieder auswertbar.
+        content = entferne_nullzeichen(text or "")
         if "<table" in content.lower() or "<html" in content.lower():
             plain, tables = html_to_text(content)
             for rows in tables:

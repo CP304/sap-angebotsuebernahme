@@ -29,8 +29,32 @@ Verschlechterung, kein Fortschritt.
 ### A. Datei und Transport
 - Format: PDF (Text), PDF (Scan), Excel, CSV, TXT, Word, ODS/ODT, RTF, E-Mail, ZIP
 - Angebot im Mailtext statt im Anhang; mehrere Anhänge; Anhang im Anhang
-- Kodierung: UTF-8, UTF-8 mit BOM, Latin-1, Windows-1252
+- Kodierung: UTF-8, UTF-8 mit BOM, Latin-1, Windows-1252, **UTF-16** (mit und ohne BOM) — so schreibt Excel „Unicode Text (*.txt)" und so kommt der SAP-Listexport heraus
 - Zeilenenden: Windows, Unix, gemischt
+
+### A0. Die eigene Erkennungsqualität messen
+
+Echte Angebote dürfen das Haus oft nicht verlassen — messen lässt sich
+trotzdem:
+
+```
+python tools/erkennungsbericht.py ORDNER_MIT_ANGEBOTEN
+```
+
+Erzeugt `erkennungsbericht.txt` mit Trefferquoten je Feld,
+Strukturmerkmalen (hat das PDF Linien? Text oder Scan?) und den
+Befundkennungen — **ohne** Lieferanten, Materialnummern, Preise,
+Bezeichnungen oder Dateinamen. Ein Test hält diese Zusicherung fest
+(`tests/test_erkennungsbericht.py`).
+
+Am aussagekräftigsten sind Dateien mit **null** erkannten Positionen —
+dort greift die Erkennung gar nicht.
+
+### A1. Mengenstaffeln
+- aus mehreren Angebotszeilen desselben Materials zusammengefasst
+- von Hand gepflegt (Kontextmenü → *Mengenstaffel pflegen*)
+- aus SAP gelesen und beim Alt/Neu-Vergleich berücksichtigt
+- nach dem Schreiben zurückgelesen und Stufe für Stufe geprüft
 
 ### B. Tabellenaufbau
 - echte Tabelle · Text mit Tabulatoren · Fließtext · Bild/Scan

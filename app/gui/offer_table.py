@@ -286,11 +286,19 @@ class OfferTableModel(QAbstractTableModel):
             return False
 
         text = "" if value is None else str(value).strip()
+        war_leer = position.ist_leere_erfassungszeile
         self.aboutToEdit.emit(f"{spec.title} geaendert")
         applied = self._apply_edit(position, spec, text)
         if not applied:
             return False
         position.mark_manual(spec.key)
+        if war_leer and not position.ist_leere_erfassungszeile:
+            # Die bereitgestellte Leerzeile war absichtlich nicht
+            # angehakt, damit sie bei "Alle verarbeiten" nicht mitlaeuft.
+            # Sobald der erste Wert darin steht, ist sie eine Position wie
+            # jede andere -- und muesste sonst noch von Hand angehakt
+            # werden, was niemand erwartet und leicht vergessen wird.
+            position.selected = True
         self.dataChanged.emit(self.index(index.row(), 0),
                               self.index(index.row(), len(COLUMNS) - 1))
         self.positionEdited.emit(position.uid, spec.key)
@@ -752,6 +760,7 @@ class OfferTableView(QTableView):
     requestDetails = Signal(object)
     requestRemove = Signal(list)             # list[uid]
     requestFillDown = Signal(str)            # Spaltenschluessel
+    requestScaleEdit = Signal(object)        # OfferPosition
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -913,6 +922,10 @@ class OfferTableView(QTableView):
                            lambda: self.requestDetails.emit(position))
             menu.addAction("SAP-Lieferant zuordnen ...",
                            lambda: self.requestVendorAssignment.emit(position))
+            beschriftung = ("Mengenstaffel pflegen ..." if position.has_scales
+                            else "Mengenstaffel anlegen ...")
+            menu.addAction(beschriftung,
+                           lambda: self.requestScaleEdit.emit(position))
             menu.addSeparator()
 
         if positions:

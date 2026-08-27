@@ -26,10 +26,12 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from ..utils.textkodierung import entferne_nullzeichen
+
 logger = logging.getLogger(__name__)
 
 __all__ = ["VbsField", "parse_vbs_recording", "describe_field",
-           "detect_transaction", "TRANSACTION_NAMES"]
+           "detect_transaction", "saubere_aufzeichnung", "TRANSACTION_NAMES"]
 
 #: Transaktionen, die dieses Werkzeug kennt -- Code auf Klartext.
 TRANSACTION_NAMES = {
@@ -51,14 +53,61 @@ TRANSACTION_NAMES = {
 #: Felder, die zur Navigation gehoeren und keine Daten tragen.
 _IGNORIERTE_FELDER = re.compile(r"(?:tbar\[|/okcd$|mbar/|sbar)", re.I)
 
+#: Ein Unterstrich am Zeilenende setzt die Anweisung in der naechsten
+#: Zeile fort.  Er zaehlt nur als Fortsetzung, wenn er allein hinter
+#: Leerraum steht -- in einem Feldnamen ("SUB_0100") ist er ein Buchstabe.
+_FORTSETZUNG = re.compile(r"[ \t]_[ \t]*\r?\n[ \t]*")
+
+#: Ein einzelner ``findById("...")``-Aufruf.  Der Objektname davor wird
+#: bewusst nicht festgelegt: der Recorder schreibt ``session``, wer die
+#: Aufzeichnung nachbearbeitet, benutzt oft eine eigene Variable
+#: (``sess``, ``oSession``).  Am Aufruf selbst aendert das nichts.
+_FIND_BY_ID = re.compile(r'findById\s*\(\s*"([^"]*)"\s*\)', re.I)
+
+#: Eine vollstaendige Zuweisung: eine -- moeglicherweise verkettete --
+#: Folge von ``findById``-Aufrufen, danach die Eigenschaft und der Wert.
+#: Verkettet wird, wenn die Aufzeichnung ueber einen Subscreen geht:
+#: ``session.findById("wnd[0]/usr/subSUB0:...").findById("ctxtEINA-LIFNR")``.
+_ZUWEISUNG = re.compile(
+    r'((?:findById\s*\(\s*"[^"]*"\s*\)\s*\.?\s*)+)'
+    r'([A-Za-z_]\w*)\s*=\s*(.*)$',
+    re.I,
+)
+
 #: So startet eine Transaktion in einer Aufzeichnung.  Beide Schreibweisen
 #: kommen vor: ueber das Kommandofeld ("/nME11") und ueber den direkten
-#: Aufruf (session.startTransaction "ME11").
+#: Aufruf (session.startTransaction "ME11").  Letzterer wird in VBS mit
+#: und ohne Klammern geschrieben -- beides ist dasselbe Statement.
 _TRANSACTION_PATTERNS = (
-    re.compile(r'startTransaction\s+"?([A-Z0-9]{2,6})"?', re.I),
+    re.compile(r'startTransaction\s*\(?\s*"?([A-Z0-9]{2,6})"?', re.I),
     re.compile(r'okcd"?\s*\)?\s*\.text\s*=\s*"/n([A-Z0-9]{2,6})"', re.I),
     re.compile(r'\.text\s*=\s*"/n([A-Z0-9]{2,6})"', re.I),
 )
+
+
+def saubere_aufzeichnung(vbs_text: str) -> str:
+    """Aufzeichnung in die Form bringen, in der sie zeilenweise lesbar ist.
+
+    Zwei Dinge stehen dem im Weg:
+
+    *Nullzeichen.*  Beim Lesen einer Datei ist die Kodierung geklaert,
+    bevor der Text hier ankommt.  Eingefuegt werden kann er aber aus
+    einem Editor, der die UTF-16-Aufzeichnung selbst falsch geoeffnet
+    hat -- dann steht zwischen je zwei Buchstaben ein Nullzeichen und
+    keine einzige Zeile passt mehr auf das Muster.  Sie herauszunehmen
+    macht die Zeilen wieder auswertbar; die Feld-IDs bestehen ohnehin
+    nur aus ASCII, es geht also nichts verloren.
+
+    *Zeilenfortsetzungen.*  Ein Unterstrich am Zeilenende setzt in VBS
+    die Anweisung in der naechsten Zeile fort.  Lange Feld-IDs werden so
+    umbrochen -- ein zeilenweiser Parser sieht dann zwei Bruchstuecke,
+    von denen keines fuer sich ein Treffer ist.  Zusammengefuegt ergeben
+    sie wieder eine Anweisung.
+    """
+    text = entferne_nullzeichen(vbs_text)
+    if "_" in text:
+        text = _FORTSETZUNG.sub(" ", text)
+    return text
 
 
 def detect_transaction(vbs_text: str) -> str:
@@ -70,6 +119,7 @@ def detect_transaction(vbs_text: str) -> str:
     """
     if not vbs_text:
         return ""
+    vbs_text = saubere_aufzeichnung(vbs_text)
     for muster in _TRANSACTION_PATTERNS:
         treffer = muster.search(vbs_text)
         if treffer:
@@ -114,35 +164,83 @@ class VbsField:
         return bool(re.search(r"[0-9]+[.,][0-9]{2}", self.value))
 
 
+def _vbs_string(rohtext: str) -> str:
+    """Den Wert einer Zuweisung lesen -- als VBS-Zeichenkette.
+
+    Rechts vom ``=`` steht in einer Aufzeichnung fast immer ein
+    Zeichenkettenliteral, und darin verdoppelt VBS das
+    Anfuehrungszeichen: ``"Dichtring 1"" NPT"`` bedeutet ``Dichtring 1"
+    NPT``.  Wer nur bis zum naechsten Anfuehrungszeichen liest, schneidet
+    genau dort ab -- und im Infosatz landet ein halber Kurztext.
+
+    Was nicht als Literal beginnt (``= True``, ``= 0``), wird
+    unveraendert uebernommen; nachgestellte Kommentare fallen weg.
+    """
+    rohtext = rohtext.strip()
+    if not rohtext.startswith('"'):
+        # Kein Literal: alles bis zu einem Kommentarzeichen gilt.
+        return rohtext.split("'")[0].strip()
+    teile: list[str] = []
+    stelle = 1
+    while stelle < len(rohtext):
+        zeichen = rohtext[stelle]
+        if zeichen == '"':
+            if rohtext[stelle + 1:stelle + 2] == '"':
+                teile.append('"')      # verdoppelt = ein Anfuehrungszeichen
+                stelle += 2
+                continue
+            break                      # hier endet das Literal
+        teile.append(zeichen)
+        stelle += 1
+    return "".join(teile)
+
+
+def _kette_zu_id(kette: str) -> str:
+    """Aus verketteten ``findById``-Aufrufen eine Feld-ID machen.
+
+    Geht die Aufzeichnung ueber einen Subscreen, teilt der Recorder den
+    Pfad auf zwei Aufrufe auf::
+
+        session.findById("wnd[0]/usr/subSUB0:SAPLMEGUI:0030") _
+               .findById("ctxtEINA-LIFNR").text = "100234"
+
+    Gemeint ist dasselbe Feld wie bei der einteiligen Schreibweise.
+    Zusammengesetzt ergibt die Kette wieder den vollen Pfad -- und damit
+    eine ID, die zu einer frueher gespeicherten Zuordnung passt.
+    """
+    teile = [t.strip("/") for t in _FIND_BY_ID.findall(kette) if t.strip("/")]
+    return "/".join(teile)
+
+
 def parse_vbs_recording(vbs_text: str) -> list[VbsField]:
     """Eine .vbs-Aufzeichnung parsen und alle Feld-IDs extrahieren.
 
-    Sucht nach Zeilen, die `session.findById("...")` enthalten, und
-    haelt fest, was dort eingegeben wurde.
+    Sucht nach Zeilen mit ``findById("...")`` und haelt fest, was dort
+    eingegeben wurde.  Der Objektname davor spielt keine Rolle: der
+    Recorder schreibt ``session``, eine nachbearbeitete Aufzeichnung
+    benutzt oft eine eigene Variable.  Auch die Schreibweise ist frei --
+    VBS unterscheidet keine Gross- und Kleinschreibung, und eine
+    Aufzeichnung, die sich nur darin unterscheidet, ist dieselbe.
     """
     if not vbs_text:
         return []
 
     fields = []
-    lines = vbs_text.split("\n")
-
-    # Regex fuer session.findById("...").text = "..." oder .value = ...
-    pattern = re.compile(
-        r'session\.findById\s*\(\s*"([^"]+)"\s*\)\s*\.\s*(\w+)\s*=\s*"?([^"]*)"?',
-        re.IGNORECASE,
-    )
+    lines = saubere_aufzeichnung(vbs_text).split("\n")
 
     gesehen: set[str] = set()
     for line in lines:
         line = line.strip()
-        if not line or "findById" not in line:
+        if not line or "findbyid" not in line.lower():
             continue
         if line.startswith("'") or line.lower().startswith("rem "):
             continue  # Kommentarzeile
-        match = pattern.search(line)
+        match = _ZUWEISUNG.search(line)
         if not match:
             continue
-        field_id, field_type, value = match.groups()
+        kette, field_type, rohwert = match.groups()
+        field_id = _kette_zu_id(kette)
+        value = _vbs_string(rohwert)
         if not field_id or not value:
             continue
         if field_type.lower() not in ("text", "value"):

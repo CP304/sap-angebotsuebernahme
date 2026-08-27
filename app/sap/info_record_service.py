@@ -114,6 +114,27 @@ def verify_info_record_write(record: SapInfoRecord, position: OfferPosition,
         abweichungen.append(f"Gueltig bis {format_date(record.valid_to)} statt "
                             f"{format_date(erwartetes_ende)}")
 
+    # -- Mengenstaffel ----------------------------------------------------
+    # Eine Stufe, die SAP nicht uebernommen hat, faellt sonst erst auf,
+    # wenn die erste groessere Bestellung zum Grundpreis herauslaeuft.
+    if position.has_scales and record.scales_read:
+        erwartete_stufen = position.sorted_scales()
+        vorhandene = {Decimal(menge): Decimal(preis)
+                      for menge, preis in record.scales}
+        for menge, preis in erwartete_stufen:
+            gespeichert = vorhandene.get(Decimal(menge))
+            if gespeichert is None:
+                abweichungen.append(
+                    f"Staffelstufe ab {_decimal_display(menge)} fehlt im Infosatz")
+            elif abs(gespeichert - Decimal(preis)) > toleranz:
+                abweichungen.append(
+                    f"Staffelstufe ab {_decimal_display(menge)}: SAP hat "
+                    f"{_decimal_display(gespeichert)} gespeichert, erwartet war "
+                    f"{_decimal_display(preis)}")
+        staffel_bestaetigt = not abweichungen
+    else:
+        staffel_bestaetigt = False
+
     # -- Zusatzkonditionen ------------------------------------------------
     # Eine Konditionszeile, die SAP nicht uebernommen hat, faellt sonst erst
     # auf, wenn die erste Bestellung mit falschem Preis herauslaeuft.
@@ -146,6 +167,9 @@ def verify_info_record_write(record: SapInfoRecord, position: OfferPosition,
     if record.price_unit:
         bestaetigt += f" / {record.price_unit}"
     meldungen = [f"Ruecklese-Pruefung: Preis {bestaetigt} bestaetigt"]
+    if staffel_bestaetigt:
+        meldungen.append("Ruecklese-Pruefung: Mengenstaffel bestaetigt ("
+                         + position.scale_display() + ")")
     if bestaetigte_konditionen:
         meldungen.append("Ruecklese-Pruefung: Zusatzkonditionen bestaetigt ("
                          + ", ".join(bestaetigte_konditionen) + ")")
@@ -544,6 +568,7 @@ class SapInfoRecordService(InfoRecordServiceBase):
             self._read_purchasing_screen(record)
             if self.settings.sap.info_record_price_via_conditions:
                 self._read_conditions(record)
+                self._read_scales(record)
             record.read_at = datetime.now()
         except SapError as exc:
             record.read_error = exc.message
@@ -1129,6 +1154,62 @@ class SapInfoRecordService(InfoRecordServiceBase):
                 ))
         except SapError as exc:
             logger.debug("Konditionen konnten nicht gelesen werden: %s", exc)
+
+    def _read_scales(self, record: SapInfoRecord) -> None:
+        """Mengenstaffel des Bestandssatzes lesen.
+
+        Ohne sie ist der Alt/Neu-Vergleich unvollstaendig: eine bestehende
+        Staffel bliebe unsichtbar, und der Anwender saehe nur den
+        Grundpreis -- waehrend in SAP drei Stufen stehen, die er
+        moeglicherweise gerade ueberschreibt.
+
+        Wichtig ist die Unterscheidung zwischen "keine Staffel gepflegt"
+        und "nicht gelesen".  Nur wenn das Staffelbild tatsaechlich
+        erreichbar war, gilt das Ergebnis als gelesen; sonst bleibt
+        ``scales_read`` falsch, und der Vergleich behauptet nichts.
+        """
+        registry = self.selectors
+        connection = self.connection
+        if not registry.has("info_record_conditions", "scale_quantity_cell"):
+            return
+        if not registry.has("info_record_conditions", "scale_amount_cell"):
+            return
+
+        try:
+            # Das Staffelbild liegt hinter einem eigenen Knopf im
+            # Konditionsbild -- ohne ihn stehen die Zellen nicht bereit.
+            if registry.has("info_record_conditions", "scales_button"):
+                element_id = registry.id_for("info_record_conditions",
+                                             "scales_button")
+                if not connection.exists(element_id):
+                    return
+                connection.press_button(element_id)
+
+            erste_menge = registry.id_for("info_record_conditions",
+                                          "scale_quantity_cell", row=0)
+            if not connection.exists(erste_menge):
+                return
+
+            stufen: list[tuple[Decimal, Decimal]] = []
+            grenze = max(8, int(self.settings.workflow.max_scale_levels or 0))
+            for row in range(grenze):
+                mengen_id = registry.id_for("info_record_conditions",
+                                            "scale_quantity_cell", row=row)
+                betrag_id = registry.id_for("info_record_conditions",
+                                            "scale_amount_cell", row=row)
+                if not connection.exists(mengen_id):
+                    break
+                menge = parse_decimal(connection.read_text(mengen_id))
+                preis = parse_decimal(connection.read_text(betrag_id))
+                if menge is None or preis is None:
+                    # Leere Zeile: dahinter kommt nichts mehr.
+                    break
+                stufen.append((menge, preis))
+
+            record.scales = sorted(stufen, key=lambda stufe: stufe[0])
+            record.scales_read = True
+        except SapError as exc:
+            logger.debug("Staffel konnte nicht gelesen werden: %s", exc)
 
     # -- Kleinkram -----------------------------------------------------
     def _validate(self, position: OfferPosition) -> str:

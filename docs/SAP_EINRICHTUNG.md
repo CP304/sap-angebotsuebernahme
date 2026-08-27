@@ -124,6 +124,59 @@ Die Zuordnung erfolgt ueber den technischen Feldnamen am Ende der ID
 unterscheidet sich je nach Bildaufbau. Vorgeschlagene Aenderungen werden vor
 der Uebernahme angezeigt.
 
+**Die Datei oeffnen, nicht den Inhalt einfuegen.** Der Recorder schreibt
+seine `.vbs` als UTF-16 — die Anwendung erkennt das beim Oeffnen selbst.
+Wird der Inhalt dagegen ueber einen Editor kopiert, der die Datei falsch
+oeffnet, landet Zeichensalat im Eingabefeld (leere Rechtecke zwischen den
+Buchstaben). Die Anwendung faengt das ab und sagt es auch, aber der
+zuverlaessige Weg ist *Datei oeffnen ...*.
+
+Die Aufzeichnung darf nachbearbeitet sein. Gelesen werden auch:
+
+| Schreibweise | Beispiel |
+|---|---|
+| anderer Objektname | `sess.findById(...)` statt `session.findById(...)` |
+| beliebige Gross-/Kleinschreibung | `FindById`, `.Text` — VBS unterscheidet keine |
+| verkettete Aufrufe (Subscreen) | `findById("wnd[0]/usr/subSUB0:...").findById("ctxtEINA-LIFNR")` |
+| Zeilenfortsetzung | Unterstrich am Zeilenende |
+| Anfuehrungszeichen im Wert | `"Dichtring 1"" NPT"` ergibt `Dichtring 1" NPT` |
+| Positionstabellen | `tblSAPLMEGUITC_1211/ctxtMEPO1211-EMATN[3,0]` |
+
+Findet die Seite nichts, nennt sie den Grund — Zeichensalat, keine
+`findById`-Zeile, oder eine Aufzeichnung, die nur Klicks enthaelt.
+
+Zugeordnet wird **je Transaktion**: angeboten werden die Felder der
+Bildschirme, die zur erkannten Transaktion gehoeren. Dieselbe Bedeutung
+in zwei Vorgaengen (Lieferant im Infosatz *und* im Kontrakt) sind zwei
+getrennte Eintraege — genau so, wie SAP sie fuehrt.
+
+**Schaltflaechen werden nie automatisch zugeordnet.** Ein Knopf traegt
+keinen Feldnamen, nur eine Nummer (`btn[3]`), und die laesst sich nicht
+uebertragen. Solche Felder auf der Seite *SAP-Feld-IDs* von Hand
+eintragen — dort zeigt die Spalte „So heisst das Feld in SAP“ zu jeder
+eingetragenen ID, welches Feld sie tatsaechlich meint.
+
+### 3.2a Gepflegte Feld-IDs sichern
+
+Auf der Seite **SAP-Feld-IDs** sichert *Speichern* dauerhaft in die
+Datei neben den Einstellungen. Fuer alles Weitere gibt es den
+Excel-Austausch:
+
+| Knopf | Wozu |
+|---|---|
+| *Nach Excel sichern ...* | Alle Feld-IDs als Arbeitsmappe — zum Aufheben, Weitergeben oder Durchsehen |
+| *Aus Excel einlesen ...* | Eine gesicherte Mappe zurueckspielen oder die eines Kollegen uebernehmen |
+
+Die Mappe enthaelt je Feld den Bildschirm, die Transaktion, die ID, ihre
+Bedeutung im Klartext, den Pruefstand und eine Spalte fuer Bemerkungen.
+Kopfzeile und Filter sind eingerichtet.
+
+**Der Haken „Geprueft“ wird beim Einlesen nicht blind uebernommen.** Er
+bedeutet, dass jemand die ID am echten System kontrolliert hat — ob das
+fuer *Ihre* Anlage gilt, weiss eine fremde Mappe nicht. Uebernommen wird
+er nur fuer Felder, deren ID unveraendert bleibt; jede geaenderte ID gilt
+wieder als ungeprueft.
+
 ### 3.3 Von Hand nacharbeiten
 
 Was der Automatismus nicht findet, tragen Sie direkt in der Tabelle ein.

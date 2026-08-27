@@ -92,7 +92,8 @@ class GuiSmokeTest(unittest.TestCase):
         self.assertIsNotNone(self.window.details)
 
         titel = [t for t, _w in self.window._admin_pages]
-        for erwartet in ("Historie", "Zuordnungen", "SAP Feld-ID Zuordnung",
+        for erwartet in ("Historie", "Zuordnungen",
+                         "Aufzeichnung einlesen (.vbs)", "SAP-Feld-IDs",
                          "Einstellungen", "Diagnose", "Protokoll"):
             self.assertIn(erwartet, titel)
 

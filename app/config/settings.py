@@ -649,6 +649,11 @@ class Settings:
 
     #: SAP GUI Scripting: Zuordnung von Feld-IDs zu Feldnamen.
     #: Wird durch die VBS-Import-Maske gefuellt; Format: {"wnd[0]/usr/...": "price", ...}
+    #: Ueberholt.  Hier landete frueher die Zuordnung aus dem
+    #: Aufzeichnungs-Assistenten -- flach, ohne Transaktion, und von der
+    #: Schreibschicht nie gelesen.  Zugeordnet wird jetzt je Bildschirm
+    #: und Element in der Selektorenablage (``selectors_file``).  Das Feld
+    #: bleibt, damit bestehende Einstellungsdateien weiter lesbar sind.
     sap_field_ids: dict[str, str] = field(default_factory=dict)
 
     # ------------------------------------------------------------------

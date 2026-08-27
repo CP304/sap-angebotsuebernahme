@@ -24,6 +24,7 @@ from pathlib import Path
 
 from ...models.enums import SourceKind
 from ...utils.parsing import format_date
+from ...utils.textkodierung import decode_bytes
 from .base import DocumentReader, RawDocument, TableBlock
 
 logger = logging.getLogger(__name__)
@@ -39,9 +40,6 @@ AMBIGUOUS_COMMA_HINT = (
 XLS_HINT = ("Das alte Excel-Format .xls kann nicht gelesen werden (Paket 'xlrd' "
             "fehlt).  Bitte die Datei in Excel als .xlsx speichern -- oder "
             "'pip install xlrd' ausfuehren.")
-
-#: Kodierungen in der Reihenfolge, in der sie probiert werden
-_ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
 
 #: Trennzeichen-Kandidaten, wenn der Sniffer versagt
 _DELIMITERS = (";", ",", "\t", "|")
@@ -232,7 +230,16 @@ class CsvReader(DocumentReader):
         delimiter = detect_delimiter(raw)
         document.meta["delimiter"] = delimiter
         try:
-            reader = csv.reader(raw.splitlines(), delimiter=delimiter)
+            # keepends: ein Zeilenumbruch INNERHALB von Anfuehrungszeichen
+            # gehoert zum Feld ("Dichtring 40x52\nNBR 70" ist eine Zelle).
+            # Ohne die Zeilenenden fuegt der CSV-Leser die Bruchstuecke
+            # zwar wieder zusammen, aber ohne Trennung -- aus "40x52" und
+            # "NBR 70" wuerde "40x52NBR 70", und genau so ginge der
+            # Kurztext spaeter nach SAP.  Zerlegt wird weiterhin zeilenweise,
+            # damit ein verirrtes Anfuehrungszeichen nicht die ganze Datei
+            # in ein Feld saugt.
+            reader = csv.reader(raw.splitlines(keepends=True),
+                                delimiter=delimiter)
             rows = [[cell.strip() for cell in row] for row in reader]
         except csv.Error as exc:
             document.add_warning(f"CSV-Datei konnte nicht zerlegt werden: {exc}")
@@ -272,18 +279,19 @@ class CsvReader(DocumentReader):
 # ---------------------------------------------------------------------------
 
 def _read_text_file(path: str) -> tuple[str | None, str, str]:
-    """Textdatei lesen und dabei die Kodierung bestimmen."""
+    """Textdatei lesen und dabei die Kodierung bestimmen.
+
+    Die Erkennung steckt in :mod:`app.utils.textkodierung`, weil dieselbe
+    Frage an mehreren Eingaengen auftaucht -- CSV, Textdatei und
+    .vbs-Aufzeichnung kommen alle als blosse Bytes herein.  Wichtig ist
+    hier vor allem UTF-16: so schreibt Excel "Unicode Text (*.txt)", und
+    so kommen SAP-Listexporte heraus.
+    """
     try:
         data = Path(path).read_bytes()
     except OSError as exc:
         return None, "", f"Datei konnte nicht gelesen werden: {exc}"
-    for encoding in _ENCODINGS:
-        try:
-            return data.decode(encoding), encoding, ""
-        except UnicodeDecodeError:
-            continue
-    return (data.decode("latin-1", "replace"), "latin-1",
-            "Kodierung konnte nicht sicher bestimmt werden -- Umlaute pruefen.")
+    return decode_bytes(data)
 
 
 # ---------------------------------------------------------------------------
