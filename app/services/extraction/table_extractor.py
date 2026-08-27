@@ -250,6 +250,11 @@ _ROLE_LABEL = {
     "vendor_material_number": "Artikelnummer des Lieferanten",
 }
 
+#: Groesste Zahl, die noch als Positionsnummer durchgeht.  Darueber ist es
+#: eher eine Material- oder Artikelnummer -- die laufen bei vielen
+#: Lieferanten ebenfalls in gleichen Schritten ("4711000, 4711001, ...").
+_MAX_POSITIONSNUMMER = Decimal("9999")
+
 #: Wie viele Zeilen werden je Spalte fuer die Typerkennung betrachtet
 _SAMPLE_SIZE = 25
 
@@ -1288,6 +1293,24 @@ class TableExtractor:
                 continue
             profiles[index] = _column_profile(values, self.material_re)
 
+        # Eine Positionsnummernspalte zuerst festnageln.  Ohne Ueberschrift
+        # sehen "10 | 20 | 30" und eine Menge gleich aus -- und wird die
+        # Nummernspalte zur Menge, wandert die echte Menge auf die
+        # Positionsnummer.  Beides ist still falsch und ginge so nach SAP.
+        nummernspalte = self._positionsnummern_spalte(profiles, rows, assigned)
+        if nummernspalte is not None and "position_number" not in used:
+            header_text = (normalize_whitespace(headers[nummernspalte])
+                           if nummernspalte < len(headers) else "")
+            assigned[nummernspalte] = ColumnAssignment(
+                nummernspalte, "position_number", header_text, 0.72,
+                "fortlaufende Nummern am Zeilenanfang")
+            used["position_number"] = nummernspalte
+            profiles.pop(nummernspalte, None)
+            analysis.notes.append(
+                f"Spalte {nummernspalte + 1} enthaelt fortlaufende Nummern am "
+                "Zeilenanfang und wurde als Positionsnummer gelesen, nicht "
+                "als Menge -- bitte pruefen")
+
         # Alle Vorschlaege sammeln und nach Konfidenz vergeben -- so gewinnt die
         # eindeutigste Spalte, unabhaengig von der Spaltenreihenfolge.
         order = ("valid_from", "currency", "uom", "material_number", "price",
@@ -1316,6 +1339,83 @@ class TableExtractor:
                 f"Spalte {index + 1} ohne passende Ueberschrift wurde ueber "
                 f"den Datentyp als '{field_name}' erkannt (Anteil "
                 f"{confidence:.0%}) -- bitte pruefen")
+
+    @staticmethod
+    def _positionsnummern_spalte(profiles: dict[int, dict[str, float]],
+                                 rows: list[list[str]],
+                                 assigned: dict[int, ColumnAssignment]) -> int | None:
+        """Welche Spalte traegt die laufende Nummer der Position?
+
+        Ohne Ueberschrift sind "10 | 20 | 30" und eine Mengenspalte nicht
+        zu unterscheiden -- beide enthalten Zahlen.  Die Positionsnummer
+        verraet sich aber durch dreierlei zugleich: sie steht ganz links,
+        ihre Werte steigen streng an, und sie tut das in gleichmaessigen
+        Schritten (1,2,3 oder 10,20,30).  Eine Menge tut das praktisch nie
+        -- Mengen sind das Ergebnis eines Bedarfs, keine Reihe.
+
+        Zwei Dinge schliessen eine Nummernspalte aus, und beide sind
+        noetig: fortlaufende Materialnummern (``4711000, 4711001,
+        4711002``) steigen ebenfalls in gleichen Schritten und stehen
+        ebenfalls links.  Deshalb muessen die Werte klein sein --
+        Positionsnummern gehen praktisch nie ueber vier Stellen -- und
+        die Spalte darf nicht ohnehin nach einer Materialnummer aussehen.
+        Ohne diese Schranken waere der Fehler nur umgekehrt: statt einer
+        vertauschten Menge stuende die Materialnummer nirgends.
+
+        Ab drei Zeilen genuegen diese drei Merkmale.  Bei nur zwei Zeilen
+        ist ein "gleichmaessiger Schritt" noch kein Muster -- zwei
+        beliebige Mengen haben auch einen Abstand.  Dann wird zusaetzlich
+        verlangt, dass die Reihe aussieht wie eine Positionsnummerierung:
+        sie beginnt bei 1 oder 10 und schreitet um 1, 5 oder 10 fort.
+        Kleine Angebote mit zwei Positionen sind haeufig, und gerade dort
+        faellt eine vertauschte Menge niemandem auf.
+
+        Trifft nur eines der Merkmale zu, wird nichts behauptet: eine
+        faelschlich als Nummer gelesene Mengenspalte waere derselbe Fehler
+        mit vertauschten Vorzeichen.
+        """
+        if len(rows) < 2:
+            return None
+        for index in sorted(profiles):
+            if index > 1 or index in assigned:
+                continue        # nur ganz links -- weiter rechts ist es Zufall
+            # Leere Zellen werden uebersprungen, nicht als Abbruch gewertet:
+            # ueber den Positionszeilen steht oft noch ein Briefkopf, dessen
+            # Zellen in dieser Spalte leer sind.  Ein Wert, der KEINE
+            # ganzzahlige positive Zahl ist, beendet die Pruefung dagegen --
+            # dann ist es keine Nummernspalte.
+            if profiles.get(index, {}).get("material_number", 0.0) >= 0.5:
+                continue        # sieht nach Materialnummern aus -- Finger weg
+            zahlen: list[Decimal] = []
+            unbrauchbar = False
+            for zeile in rows:
+                roh = normalize_whitespace(zeile[index]) if index < len(zeile) else ""
+                if not roh:
+                    continue
+                wert = parse_decimal(roh)
+                if (wert is None or wert != wert.to_integral_value()
+                        or wert <= 0 or wert > _MAX_POSITIONSNUMMER):
+                    unbrauchbar = True
+                    break
+                zahlen.append(wert)
+            if not unbrauchbar:
+                if len(zahlen) < 2:
+                    continue
+                schritte = {zahlen[i + 1] - zahlen[i]
+                            for i in range(len(zahlen) - 1)}
+                if len(schritte) != 1:
+                    continue
+                schritt = next(iter(schritte))
+                if schritt <= 0:
+                    continue
+                if len(zahlen) >= 3:
+                    return index
+                # Nur zwei Zeilen: die Reihe muss wie eine Nummerierung
+                # aussehen, sonst wird nichts behauptet.
+                if zahlen[0] in (Decimal(1), Decimal(10)) and \
+                        schritt in (Decimal(1), Decimal(5), Decimal(10)):
+                    return index
+        return None
 
     # ------------------------------------------------------------------
     # Positionen bilden
@@ -1632,6 +1732,22 @@ class TableExtractor:
                 continue
             parsed = self._parse_cell(field_name, raw,
                                       self._day_first_for(analysis, index))
+            if field_name == "uom" and "quantity" not in values:
+                # Manche Lieferanten fuehren Menge und Einheit in EINER
+                # Spalte ("Menge/Einheit" -> "50 St").  Bliebe das ungetrennt,
+                # stuende die Menge nirgends und die Mengeneinheit waere
+                # "50 ST" -- beides ginge so nach SAP.
+                zahl, einheit = self._split_number_unit(raw)
+                if zahl is not None and einheit:
+                    values["quantity"] = zahl
+                    values.setdefault("_raw", {})["quantity"] = raw
+                    if "quantity" not in present:
+                        present.append("quantity")
+                    parsed = normalize_uom(einheit)
+                    values.setdefault("_notes", []).append(
+                        f"Menge und Mengeneinheit standen zusammen in einer "
+                        f"Zelle ('{raw}') und wurden getrennt: "
+                        f"{zahl} {parsed}.")
             if parsed in (None, "") and FIELD_KIND.get(field_name) == "decimal":
                 # "100 Stk" / "12,85 EUR/St": Zahl und Einheit stehen in einer Zelle
                 parsed, unit = self._split_number_unit(raw)
@@ -1716,6 +1832,14 @@ class TableExtractor:
             if field_name.startswith("_") or field_name not in values:
                 continue
             position.set_field(field_name, values[field_name], assignment.origin)
+
+        # Aus einer Zelle abgetrennte Menge ("50 St" in der Spalte
+        # "Menge/Einheit").  Sie hat keine eigene Spalte und wuerde von der
+        # Schleife oben deshalb uebergangen -- die Position bliebe ohne
+        # Menge, obwohl sie im Beleg steht.
+        if values.get("quantity") is not None and position.quantity is None:
+            position.set_field("quantity", values["quantity"],
+                               FieldOrigin.EXTRACTED)
 
         # Zeilensumme des Belegs (nur fuer die Kreuzpruefung, nie fuer SAP)
         if values.get("_line_total") is not None:
